@@ -1,0 +1,24 @@
+package android.os;
+
+public class Looper {
+
+    private static final Looper MAIN = new Looper();
+
+    public static Looper getMainLooper() {
+        return MAIN;
+    }
+
+    public static Looper myLooper() {
+        return MAIN;
+    }
+
+    public void quit() {
+    }
+
+    public void quitSafely() {
+    }
+
+    public Thread getThread() {
+        return Thread.currentThread();
+    }
+}

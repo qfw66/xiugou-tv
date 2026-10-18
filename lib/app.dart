@@ -1,0 +1,3359 @@
+import 'dart:async';
+import 'dart:io';
+import 'package:file_selector/file_selector.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'core/api/cms_json_api.dart';
+import 'core/api/models/vod_models.dart';
+import 'core/api/parse_engine.dart';
+import 'core/api/search_engine.dart';
+import 'core/app_info.dart';
+import 'core/api/site_api.dart';
+import 'core/config/config_repository.dart';
+import 'core/config/models/history_record.dart';
+import 'core/config/models/home_site_preference.dart';
+import 'core/config/models/vod_config.dart';
+import 'core/live/live_repository.dart';
+import 'core/live/epg_repository.dart';
+import 'core/history/history_match.dart';
+import 'core/player/models/player_settings.dart';
+import 'core/player/models/player_state.dart';
+import 'core/player/mpv_player_engine.dart';
+import 'core/player/playback_history_tracker.dart';
+import 'core/player/auto_line_switch_controller.dart';
+import 'core/player/line_switch_planner.dart';
+import 'core/player/player_data_reset.dart';
+import 'core/settings/models/appearance_preferences.dart';
+import 'core/settings/models/play_skip_preferences.dart';
+import 'core/settings/models/search_preferences.dart';
+import 'core/settings/models/startup_preferences.dart';
+import 'core/settings/settings_repository.dart';
+import 'core/settings/wallpaper_store.dart';
+import 'core/storage/cache_maintenance.dart';
+import 'core/storage/data_backup_service.dart';
+import 'core/storage/data_restore_guard.dart';
+import 'ui/desktop/catalog/vod_detail_dialog.dart';
+import 'ui/desktop/player/episode_skip_dialog.dart';
+import 'ui/desktop/catalog/vod_grid_view.dart';
+import 'ui/desktop/catalog/vod_list_view.dart';
+import 'ui/desktop/catalog/search_site_groups.dart';
+import 'ui/desktop/dialogs/depot_selection_dialog.dart';
+import 'ui/desktop/dialogs/favorites_dialog.dart';
+import 'ui/desktop/dialogs/history_dialog.dart';
+import 'ui/desktop/wallpaper/wallpaper_size_probe.dart';
+import 'ui/desktop/dialogs/live_channels_dialog.dart';
+import 'ui/desktop/dialogs/push_stream_dialog.dart';
+import 'ui/desktop/dialogs/site_selector_dialog.dart';
+import 'ui/desktop/player/desktop_video_player.dart';
+import 'ui/desktop/settings/settings_page.dart';
+import 'ui/desktop/widgets/desktop_window_frame.dart';
+import 'ui/desktop/window/desktop_window_manager.dart';
+
+// --- 全局依赖 Provider ---
+
+final configRepositoryProvider = Provider<ConfigRepository>((ref) {
+  throw UnimplementedError(
+      'ConfigRepository 必须在启动时通过 ProviderScope overrides 注入');
+});
+
+final windowManagerProvider = Provider<DesktopWindowManager>((ref) {
+  throw UnimplementedError(
+      'DesktopWindowManager 必须在启动时通过 ProviderScope overrides 注入');
+});
+
+final playerEngineProvider = Provider<MpvPlayerEngine>((ref) {
+  throw UnimplementedError(
+      'MpvPlayerEngine 必须在启动时通过 ProviderScope overrides 注入');
+});
+
+final settingsRepositoryProvider = Provider<SettingsRepository>((ref) {
+  throw UnimplementedError(
+      'SettingsRepository 必须在启动时通过 ProviderScope overrides 注入');
+});
+
+/// 搜索显示与聚合开关偏好（随设置保存 / 读取实时更新）
+final searchPreferencesProvider = StreamProvider<SearchPreferences>((ref) {
+  return ref.watch(settingsRepositoryProvider).searchPreferencesStream;
+});
+
+/// 外观偏好（SET-08：壁纸）；随设置保存 / 读取实时更新
+final appearancePreferencesProvider =
+    StreamProvider<AppearancePreferences>((ref) {
+  return ref.watch(settingsRepositoryProvider).appearancePreferencesStream;
+});
+
+/// 壁纸副本管理。像素探针依赖 `dart:ui`，因此在这里（UI 层）装配。
+final wallpaperStoreProvider = Provider<WallpaperStore>(
+    (ref) => WallpaperStore(probeSize: probeWallpaperImageSize));
+
+/// 本次启动解析出的有效主入口。
+///
+/// 默认点播首页（与既有行为一致）；应用启动时由 main() 依据启动偏好注入。
+final startupEntryProvider = Provider<StartupEntry>((ref) => StartupEntry.vod);
+
+/// 设置中心是否打开（独立全屏页，覆盖主视图与播放器）
+final settingsPageOpenProvider = StateProvider<bool>((ref) => false);
+
+final cmsApiProvider = Provider<CmsJsonApi>((ref) => CmsJsonApi());
+final siteApiProvider = Provider<SiteApi>((ref) => SiteApi(
+      cmsApi: ref.watch(cmsApiProvider),
+      // 伴随服务懒启动后由 SiteApi 把当前开关推给 Java 侧
+      selfCheckEnabled: () => ref.read(settingsRepositoryProvider).selfCheckPreferences.enabled,
+    ));
+final parseEngineProvider = Provider<ParseEngine>((ref) => ParseEngine());
+final searchEngineProvider = Provider<SearchEngine>(
+    (ref) => SearchEngine(siteApi: ref.watch(siteApiProvider)));
+
+final liveRepositoryProvider = Provider<LiveRepository>((ref) {
+  final repository = LiveRepository();
+  ref.onDispose(repository.dispose);
+  return repository;
+});
+
+final epgRepositoryProvider = Provider<EpgRepository>((ref) {
+  final repository = EpgRepository();
+  ref.onDispose(repository.dispose);
+  return repository;
+});
+
+/// 存储与缓存盘点 / 清理（SET-09）。默认使用真实 %APPDATA%/XiugouTV。
+final cacheMaintenanceProvider = Provider<CacheMaintenance>(
+    (ref) => CacheMaintenance());
+
+/// 数据备份与恢复（SET-10）。读取前等待配置 / 设置保存链落定。
+final dataBackupServiceProvider = Provider<DataBackupService>((ref) {
+  return DataBackupService(
+    appVersion: () => appVersionLabel ?? '未知版本',
+    flushPendingWrites: () async {
+      await Future.wait([
+        ref.read(configRepositoryProvider).flushPendingWrites(),
+        ref.read(settingsRepositoryProvider).flushPendingWrites(),
+        ref.read(liveRepositoryProvider).flushPendingWrites(),
+      ]);
+    },
+  );
+});
+
+/// 播放进度跟踪器：把播放位置持续写回历史记录（断点续播数据源）
+final playbackHistoryTrackerProvider = Provider<PlaybackHistoryTracker>((ref) {
+  final tracker = PlaybackHistoryTracker(
+    engine: ref.watch(playerEngineProvider),
+    repository: ref.watch(configRepositoryProvider),
+  );
+  ref.onDispose(tracker.dispose);
+  return tracker;
+});
+
+/// 自动换线提示（SET-12）：由播放器外层监听并显示 SnackBar。
+final lineSwitchNoticeProvider = StateProvider<String?>((ref) => null);
+
+/// 播放器内手动换线（SET-12 重做）：与自动换线共用同一条执行链路。
+final manualLineSwitchProvider =
+    Provider<Future<void> Function(PlaybackSession, int)>((ref) {
+  return (session, sourceIndex) => _manualSwitchToLine(ref, session, sourceIndex);
+});
+
+/// 早期错误自动换线控制器（SET-12）。
+final autoLineSwitchProvider = Provider<AutoLineSwitchController>((ref) {
+  final controller = AutoLineSwitchController(
+    engine: ref.watch(playerEngineProvider),
+    canSwitch: (epoch) {
+      if (epoch != _playbackSessionEpoch) return false;
+      if (ref.read(settingsPageOpenProvider)) return false;
+      if (ref.read(playerRefreshBusyProvider)) return false;
+      final session = ref.read(activePlaybackSessionProvider);
+      return session != null &&
+          !session.switching &&
+          ref.read(activePlaySpecProvider) != null;
+    },
+    onCandidate: (candidate, position, epoch) =>
+        _autoSwitchToLine(ref, candidate, position, epoch),
+    onNotice: (message) =>
+        ref.read(lineSwitchNoticeProvider.notifier).state = message,
+    onBusyChanged: (busy) =>
+        ref.read(playerAutoSwitchBusyProvider.notifier).state = busy,
+  );
+  ref.onDispose(controller.dispose);
+  return controller;
+});
+
+/// 同步响应式 VodConfig 状态 Notifier
+class VodConfigNotifier extends StateNotifier<VodConfig> {
+  final ConfigRepository _repo;
+  StreamSubscription? _sub;
+
+  VodConfigNotifier(this._repo) : super(_repo.currentVodConfig) {
+    _sub = _repo.vodConfigStream.listen((cfg) {
+      state = cfg;
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+}
+
+final vodConfigProvider =
+    StateNotifierProvider<VodConfigNotifier, VodConfig>((ref) {
+  final repo = ref.watch(configRepositoryProvider);
+  return VodConfigNotifier(repo);
+});
+
+/// 同步响应式 Site 状态 Notifier
+class CurrentSiteNotifier extends StateNotifier<Site?> {
+  final ConfigRepository _repo;
+  StreamSubscription? _sub;
+
+  CurrentSiteNotifier(this._repo) : super(_repo.selectedSite) {
+    _sub = _repo.siteStream.listen((site) {
+      state = site;
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+}
+
+final currentSiteProvider =
+    StateNotifierProvider<CurrentSiteNotifier, Site?>((ref) {
+  final repo = ref.watch(configRepositoryProvider);
+  return CurrentSiteNotifier(repo);
+});
+
+/// 同步响应式 History 状态 Notifier
+class HistoryNotifier extends StateNotifier<List<HistoryRecord>> {
+  final ConfigRepository _repo;
+  StreamSubscription? _sub;
+
+  HistoryNotifier(this._repo) : super(_repo.historyRecords) {
+    _sub = _repo.historyStream.listen((list) {
+      state = list;
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+}
+
+final historyProvider =
+    StateNotifierProvider<HistoryNotifier, List<HistoryRecord>>((ref) {
+  final repo = ref.watch(configRepositoryProvider);
+  return HistoryNotifier(repo);
+});
+
+/// 同步响应式 Favorites 状态 Notifier
+class FavoritesNotifier extends StateNotifier<List<VodItem>> {
+  final ConfigRepository _repo;
+  StreamSubscription? _sub;
+
+  FavoritesNotifier(this._repo) : super(_repo.favorites) {
+    _sub = _repo.favoritesStream.listen((list) {
+      state = list;
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+}
+
+final favoritesProvider =
+    StateNotifierProvider<FavoritesNotifier, List<VodItem>>((ref) {
+  final repo = ref.watch(configRepositoryProvider);
+  return FavoritesNotifier(repo);
+});
+
+final activePlaySpecProvider = StateProvider<MediaPlaySpec?>((ref) => null);
+
+/// 播放会话（点播剧集上下文，仅内存）：供播放器内「上一集 / 下一集」使用。
+///
+/// 只在详情页选集播放时建立；直播 / 推送直链 / 历史续播 / 单集播放不建立会话。
+class PlaybackSession {
+  final VodItem item;
+  final String sourceName;
+  final List<VodEpisode> episodes;
+  final int index;
+  final Site? site;
+
+  /// 同一详情页的全部播放线路（SET-12 自动换线候选）。
+  final List<PlayFrom> sources;
+
+  /// 当前线路在 [sources] 中的下标。
+  final int sourceIndex;
+
+  /// 已尝试过的线路键（`lineSwitchKey`）；每个会话只增不减。
+  final Set<String> triedLines;
+
+  /// 切换进行中：两个切集按钮一并禁用，防止重复触发。
+  final bool switching;
+
+  const PlaybackSession({
+    required this.item,
+    required this.sourceName,
+    required this.episodes,
+    required this.index,
+    required this.site,
+    this.sources = const [],
+    this.sourceIndex = 0,
+    this.triedLines = const {},
+    this.switching = false,
+  });
+
+  bool get hasPrev => index > 0;
+
+  bool get hasNext => index < episodes.length - 1;
+
+  PlaybackSession copyWith({
+    int? index,
+    bool? switching,
+    String? sourceName,
+    List<VodEpisode>? episodes,
+    List<PlayFrom>? sources,
+    int? sourceIndex,
+    Set<String>? triedLines,
+  }) =>
+      PlaybackSession(
+        item: item,
+        sourceName: sourceName ?? this.sourceName,
+        episodes: episodes ?? this.episodes,
+        index: index ?? this.index,
+        site: site,
+        sources: sources ?? this.sources,
+        sourceIndex: sourceIndex ?? this.sourceIndex,
+        triedLines: triedLines ?? this.triedLines,
+        switching: switching ?? this.switching,
+      );
+}
+
+final activePlaybackSessionProvider =
+    StateProvider<PlaybackSession?>((ref) => null);
+
+/// 片头 / 片尾偏好（响应式）：播放器按钮回显与设置页共用同一来源。
+final playSkipPreferencesProvider = StreamProvider<PlaySkipPreferences>((ref) {
+  final repository = ref.watch(settingsRepositoryProvider);
+  return repository.playSkipPreferencesStream;
+});
+
+/// 播放刷新忙碌态（仅内存）。
+///
+/// 刷新进行中：刷新按钮与切集按钮一并禁用，避免两条启动链路竞争。
+final playerRefreshBusyProvider = StateProvider<bool>((ref) => false);
+
+/// 自动换线忙碌态（仅内存）：换线解析 / 启动期间禁用刷新与切集。
+final playerAutoSwitchBusyProvider = StateProvider<bool>((ref) => false);
+
+/// 播放会话变更代际（全局递增）。
+///
+/// 建立 / 关闭会话与每次发起切集都会递增；切换流程在解析与启动前后校验，
+/// 迟到的异步结果在代际不一致时必须作废（不播放、不写历史、不更新 UI）。
+int _playbackSessionEpoch = 0;
+
+/// 当前「刷新」的持有者代际：只有持有者可以复位忙碌态（避免旧刷新清掉新刷新的忙碌态）。
+int? _refreshOwnerEpoch;
+
+// --- 点播剧集播放管线（详情页选集与播放内切集共用同一链路） ---
+
+/// 统一的播放启动入口（保持既有语义）：
+/// - [historyRecordId] 非空时开启进度跟踪（点播）；为空时停止跟踪（直播 / 推送直链不进历史）；
+/// - 跟踪必须在 `play()` 之前挂上，以免漏掉起播后的首批位置事件；
+/// - [restoreRecordId] 启动失败时把跟踪对象改回仍在其位的那条记录（不写错记录）；
+/// - [isStale] 引擎启动窗口内的作废判定：为 true 时不提交播放规格，避免迟到结果
+///   把已关闭的播放器重新唤醒（幽灵播放）。
+Future<void> _launchPlayback(WidgetRef ref, MediaPlaySpec spec,
+    {String? historyRecordId,
+    String? restoreRecordId,
+    bool Function()? isStale}) async {
+  final tracker = ref.read(playbackHistoryTrackerProvider);
+  final engine = ref.read(playerEngineProvider);
+  if (historyRecordId == null) {
+    ref.read(autoLineSwitchProvider).disarm();
+  }
+  if (historyRecordId != null) {
+    tracker.track(historyRecordId);
+  } else {
+    unawaited(tracker.stop());
+  }
+  try {
+    await engine.play(spec);
+  } catch (_) {
+    if (isStale != null && isStale()) {
+      // 该次启动已作废（用户已返回主视图 / 已被新播放接管）：不得劫持当前跟踪对象。
+      rethrow;
+    }
+    // 启动失败：跟踪对象改回原记录（flushPrevious: false 避免把原集位置写进目标集记录）
+    tracker.track(restoreRecordId, flushPrevious: false);
+    rethrow;
+  }
+  if (isStale != null && isStale()) {
+    // 会话已关闭 / 被替换：不得提交播放规格。此时引擎可能已被唤醒，一并停掉并清除跟踪。
+    if (ref.read(activePlaySpecProvider) == null) {
+      await engine.stop();
+      tracker.track(null, flushPrevious: false);
+    }
+    return;
+  }
+  ref.read(activePlaySpecProvider.notifier).state = spec;
+  // 起播时收起设置中心，避免视频在隐藏状态下播放
+  ref.read(settingsPageOpenProvider.notifier).state = false;
+}
+
+/// 解析指定集数的播放地址（失败或地址为空返回 null，报错口径与既有选集一致）。
+Future<MediaPlaySpec?> _resolveEpisodeSpec(
+  WidgetRef ref, {
+  required Site? site,
+  required String sourceName,
+  required String episodeUrl,
+  Duration? timeout,
+}) async {
+  try {
+    final future = ref.read(siteApiProvider).resolvePlayback(
+          site,
+          id: episodeUrl,
+          flag: sourceName,
+          parses: ref.read(configRepositoryProvider).currentVodConfig.parses,
+          parseEngine: ref.read(parseEngineProvider),
+        );
+    final resolved =
+        timeout == null ? await future : await future.timeout(timeout);
+    if (resolved.url.isEmpty) return null;
+    return resolved;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// 构建目标集播放参数并写入历史记录（切集与详情页选集共用同一字段与记录 ID 规则）。
+({MediaPlaySpec spec, String recordId, HistoryResumeMatch? resumeMatch})
+    _prepareEpisodePlayback(
+  WidgetRef ref, {
+  required VodItem item,
+  required String sourceName,
+  required List<VodEpisode> episodes,
+  required int index,
+  required Site? site,
+  required MediaPlaySpec resolved,
+}) {
+  final repo = ref.read(configRepositoryProvider);
+  final episode = episodes[index];
+  final recordId = HistoryRecord.buildId(item.id, episode.name);
+  final resumeMatch = repo.findLatestResumeCandidate(
+    vodId: item.id,
+    vodName: item.name,
+    episodeName: episode.name,
+    // 单集影片（电影）跨站集名差异大：按最外层片名续播，不再死扣集名。
+    singleEpisode: episodes.length == 1 ||
+        (episodes.isNotEmpty &&
+            episodes.every((e) => isMovieEpisodeName(e.name))),
+  );
+  final existing = resumeMatch?.record;
+
+  // 片头跳过：起播位置取「续播位置」与「片头」的较大者（片头只提前、不回退）
+  final opening = _openingStart(ref, item.id);
+  final resume = existing?.resumePosition;
+  final startPosition =
+      (opening != null && (resume == null || resume < opening)) ? opening : resume;
+
+  final spec = MediaPlaySpec(
+    url: resolved.url,
+    headers: resolved.headers ?? site?.header,
+    title: '${item.name} - ${episode.name} ($sourceName)',
+    startPosition: startPosition,
+  );
+
+  // 记录播放历史（沿用已有进度，避免置顶时把断点清零）
+  unawaited(
+    repo.addHistory(
+      HistoryRecord(
+        id: recordId,
+        vodId: item.id,
+        vodName: item.name,
+        vodPic: item.pic,
+        episodeName: episode.name,
+        sourceName: sourceName,
+        playUrl: resolved.url,
+        episodeUrl: episode.url,
+        siteKey: item.siteKey ?? site?.key,
+        siteName: item.siteName ?? site?.name,
+        timestamp: DateTime.now().millisecondsSinceEpoch,
+        positionMs: existing?.positionMs ?? 0,
+        durationMs: existing?.durationMs ?? 0,
+      ),
+    ),
+  );
+  return (spec: spec, recordId: recordId, resumeMatch: resumeMatch);
+}
+
+/// 详情页选集播放：解析 → 记录 → 启动 → 建立播放会话。
+///
+/// 首轮自动换线（SET-12）：当前线路解析 / 启动失败时，按详情页顺序尝试
+/// 同站同片同集的最多 2 条备用线路；全部失败才返回错误。
+Future<({String? error, HistoryResumeMatch? resumeMatch})>
+    _startEpisodePlayback(
+  WidgetRef ref, {
+  required VodItem item,
+  required String sourceName,
+  required List<VodEpisode> episodes,
+  required int index,
+  Site? targetSite,
+  List<PlayFrom>? sources,
+  int sourceIndex = 0,
+}) async {
+  if (index < 0 || index >= episodes.length) {
+    return (error: '播放解析失败，请检查站源或解析配置', resumeMatch: null);
+  }
+  final site = targetSite ?? ref.read(configRepositoryProvider).selectedSite;
+  final allSources = (sources == null || sources.isEmpty)
+      ? <PlayFrom>[PlayFrom(name: sourceName, episodes: episodes)]
+      : sources;
+  final selectedIndex =
+      sourceIndex >= 0 && sourceIndex < allSources.length ? sourceIndex : 0;
+  final currentSource = allSources[selectedIndex];
+  final currentEpisode = episodes[index];
+  final tried = <String>{lineSwitchKey(selectedIndex, currentSource.name)};
+
+  final attempts = <LineCandidate>[
+    LineCandidate(
+      source: currentSource,
+      episode: currentEpisode,
+      sourceIndex: selectedIndex,
+      episodeIndex: index,
+    ),
+    ...planLineCandidates(
+      sources: allSources,
+      currentSourceIndex: selectedIndex,
+      episodeName: currentEpisode.name,
+      currentEpisodeUrl: currentEpisode.url,
+      tried: tried,
+    ),
+  ];
+
+  final epoch = _playbackSessionEpoch;
+  for (final candidate in attempts) {
+    if (epoch != _playbackSessionEpoch) {
+      return (error: null, resumeMatch: null);
+    }
+    tried.add(candidate.key);
+    final resolved = await _resolveEpisodeSpec(
+      ref,
+      site: site,
+      sourceName: candidate.source.name,
+      episodeUrl: candidate.episode.url,
+      timeout: attempts.length > 1 ? const Duration(seconds: 20) : null,
+    );
+    if (resolved == null) continue;
+    if (epoch != _playbackSessionEpoch) {
+      return (error: null, resumeMatch: null);
+    }
+
+    final prepared = _prepareEpisodePlayback(
+      ref,
+      item: item,
+      sourceName: candidate.source.name,
+      episodes: candidate.source.episodes,
+      index: candidate.episodeIndex,
+      site: site,
+      resolved: resolved,
+    );
+    try {
+      await _launchPlayback(
+        ref,
+        prepared.spec,
+        historyRecordId: prepared.recordId,
+        isStale: () => epoch != _playbackSessionEpoch,
+      );
+    } catch (_) {
+      continue;
+    }
+    if (epoch != _playbackSessionEpoch) {
+      return (error: null, resumeMatch: null);
+    }
+
+    // 建立播放会话（供播放器内切集 / 自动换线）；同时作废在途的旧切换结果
+    _playbackSessionEpoch++;
+    final session = PlaybackSession(
+      item: item,
+      sourceName: candidate.source.name,
+      episodes: candidate.source.episodes,
+      index: candidate.episodeIndex,
+      site: site,
+      sources: allSources,
+      sourceIndex: candidate.sourceIndex,
+      triedLines: Set.unmodifiable(tried),
+    );
+    ref.read(activePlaybackSessionProvider.notifier).state = session;
+    ref.read(autoLineSwitchProvider).arm(
+      sources: allSources,
+      currentSourceIndex: candidate.sourceIndex,
+      currentSourceName: candidate.source.name,
+      episodeName: candidate.episode.name,
+      currentEpisodeUrl: candidate.episode.url,
+      tried: tried,
+      epoch: _playbackSessionEpoch,
+      startPosition: prepared.spec.startPosition ?? Duration.zero,
+    );
+    if (tried.length > 1) {
+      final start = prepared.spec.startPosition ?? Duration.zero;
+      ref.read(lineSwitchNoticeProvider.notifier).state =
+          '已切换到线路「${candidate.source.name}」'
+          '${start > Duration.zero ? '，从 ${_formatPlaybackPosition(start)} 继续播放' : ''}';
+    }
+    return (error: null, resumeMatch: prepared.resumeMatch);
+  }
+
+  return (
+    error: attempts.length > 1
+        ? '所有备用线路均不可用，请稍后重试'
+        : '播放解析失败，请检查站源或解析配置',
+    resumeMatch: null,
+  );
+}
+
+String _formatPlaybackPosition(Duration position) {
+  final totalSeconds = position.inSeconds;
+  final hours = totalSeconds ~/ 3600;
+  final minutes = (totalSeconds % 3600) ~/ 60;
+  final seconds = totalSeconds % 60;
+  String two(int value) => value.toString().padLeft(2, '0');
+  return hours > 0
+      ? '$hours:${two(minutes)}:${two(seconds)}'
+      : '$minutes:${two(seconds)}';
+}
+
+/// 跨站续播提示（SET-11）：只在非精确 ID 命中时出现，并提供「从头播放」逃生口。
+void _showResumeHint(
+    BuildContext context, WidgetRef ref, HistoryResumeMatch? match) {
+  if (match == null || match.level == HistoryMatchLevel.exact) return;
+  final resume = match.record.resumePosition;
+  if (resume == null) return;
+  final source = match.record.siteName?.trim().isNotEmpty == true
+      ? match.record.siteName!.trim()
+      : (match.record.sourceName.trim().isNotEmpty
+          ? match.record.sourceName.trim()
+          : '其他站点');
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  if (messenger == null) return;
+  messenger.showSnackBar(SnackBar(
+    // Flutter 3.4x 起 `SnackBar.persist` 默认是 `action != null`：带按钮的提示
+    // 会永久常驻（不启动自动关闭计时器）。续播提示只是一次性告知，必须显式
+    // 关掉持久化，否则会一直挡在播放器上直到用户点掉。
+    persist: false,
+    duration: const Duration(seconds: 5),
+    content: Text('已从「$source」的观看进度续播'
+        '（${_formatPlaybackPosition(resume)}）'),
+    action: SnackBarAction(
+      label: '从头播放',
+      onPressed: () => unawaited(_restartCurrentFromStart(ref)),
+    ),
+  ));
+}
+
+/// 把当前记录进度清零并从 0 继续播放（只影响当前记录，不删除其他站点记录）。
+Future<void> _restartCurrentFromStart(WidgetRef ref) async {
+  final tracker = ref.read(playbackHistoryTrackerProvider);
+  final engine = ref.read(playerEngineProvider);
+  final recordId = tracker.activeRecordId;
+  try {
+    await engine.seek(Duration.zero);
+    await engine.resume();
+    if (recordId == null) return;
+    tracker.track(recordId, flushPrevious: false);
+    unawaited(ref.read(configRepositoryProvider).updateHistoryProgress(
+          recordId,
+          positionMs: 0,
+          durationMs: engine.duration.inMilliseconds,
+        ));
+  } catch (_) {
+    // 重播失败不影响当前播放；用户可再次点击。
+  }
+}
+
+/// 自动换线实际执行：解析候选线路 → 启动 → 保留位置与历史记录 → 更新会话。
+///
+/// 返回 true 表示已成功切换；false 表示该候选不可用 / 已作废。
+Future<bool> _autoSwitchToLine(
+  Ref ref,
+  LineCandidate candidate,
+  Duration position,
+  int epoch,
+) async {
+  if (epoch != _playbackSessionEpoch) return false;
+  final session = ref.read(activePlaybackSessionProvider);
+  if (session == null ||
+      session.switching ||
+      ref.read(playerRefreshBusyProvider)) {
+    return false;
+  }
+  final tracker = ref.read(playbackHistoryTrackerProvider);
+  final engine = ref.read(playerEngineProvider);
+  final recordId = tracker.activeRecordId;
+
+  try {
+    final resolved = await ref
+        .read(siteApiProvider)
+        .resolvePlayback(
+          session.site,
+          id: candidate.episode.url,
+          flag: candidate.source.name,
+          parses: ref.read(configRepositoryProvider).currentVodConfig.parses,
+          parseEngine: ref.read(parseEngineProvider),
+        )
+        .timeout(const Duration(seconds: 20));
+    if (resolved.url.isEmpty || epoch != _playbackSessionEpoch) return false;
+
+    final spec = MediaPlaySpec(
+      url: resolved.url,
+      headers: resolved.headers ?? session.site?.header,
+      title:
+          '${session.item.name} - ${candidate.episode.name} (${candidate.source.name})',
+      startPosition: position > Duration.zero ? position : null,
+    );
+
+    if (recordId != null) {
+      tracker.track(recordId);
+    } else {
+      unawaited(tracker.stop());
+    }
+    try {
+      await engine.play(spec);
+    } catch (_) {
+      tracker.track(recordId, flushPrevious: false);
+      return false;
+    }
+    if (epoch != _playbackSessionEpoch) {
+      if (ref.read(activePlaySpecProvider) == null) {
+        await engine.stop();
+        tracker.track(null, flushPrevious: false);
+      }
+      return false;
+    }
+    ref.read(activePlaySpecProvider.notifier).state = spec;
+    if (!ref.read(settingsPageOpenProvider)) {
+      ref.read(settingsPageOpenProvider.notifier).state = false;
+    }
+
+    // 恢复跟踪：以切换前位置为基线 / 下限，避免 seek 过渡期把断点改小。
+    if (recordId != null) {
+      tracker.track(
+        recordId,
+        flushPrevious: false,
+        baseline: position,
+        floor: position > Duration.zero ? position : null,
+      );
+      unawaited(ref.read(configRepositoryProvider).updateHistorySource(
+            recordId,
+            sourceName: candidate.source.name,
+            playUrl: resolved.url,
+            episodeUrl: candidate.episode.url,
+            siteKey: session.item.siteKey ?? session.site?.key,
+            siteName: session.item.siteName ?? session.site?.name,
+          ));
+    }
+
+    final current = ref.read(activePlaybackSessionProvider);
+    if (current != null && epoch == _playbackSessionEpoch) {
+      ref.read(activePlaybackSessionProvider.notifier).state = current.copyWith(
+        sourceName: candidate.source.name,
+        sourceIndex: candidate.sourceIndex,
+        episodes: candidate.source.episodes,
+        index: candidate.episodeIndex,
+        triedLines: {...current.triedLines, candidate.key},
+      );
+    }
+    ref.read(lineSwitchNoticeProvider.notifier).state =
+        '已切换到线路「${candidate.source.name}」'
+        '${position > Duration.zero ? '，从 ${_formatPlaybackPosition(position)} 继续播放' : ''}';
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// 播放内切集（上一集 / 下一集）：与详情页选集共用解析与记录链路。
+///
+/// 守卫：无会话 / 切换中 / 越界 / 原地切换 → 无任何副作用直接返回。
+/// 迟到结果在会话已关闭或被替换时作废（不播放、不写历史、不更新 UI）。
+/// 返回 null 表示成功或无事发生；否则为用户可展示的错误文案。
+Future<({String? error, HistoryResumeMatch? resumeMatch})> _switchEpisode(
+    WidgetRef ref, int targetIndex) async {
+  if (ref.read(playerRefreshBusyProvider) ||
+      ref.read(playerAutoSwitchBusyProvider)) {
+    return (error: null, resumeMatch: null); // 刷新 / 换线进行中：互斥
+  }
+  final session = ref.read(activePlaybackSessionProvider);
+  if (session == null || session.switching) {
+    return (error: null, resumeMatch: null);
+  }
+  if (targetIndex < 0 || targetIndex >= session.episodes.length) {
+    return (error: null, resumeMatch: null);
+  }
+  if (targetIndex == session.index) {
+    return (error: null, resumeMatch: null);
+  }
+
+  ref.read(autoLineSwitchProvider).disarm();
+  final epoch = ++_playbackSessionEpoch;
+  ref.read(activePlaybackSessionProvider.notifier).state =
+      session.copyWith(switching: true);
+
+  final resolved = await _resolveEpisodeSpec(
+    ref,
+    site: session.site,
+    sourceName: session.sourceName,
+    episodeUrl: session.episodes[targetIndex].url,
+  );
+
+  // 会话已关闭 / 被替换 / 有更新操作：迟到结果作废
+  if (epoch != _playbackSessionEpoch) {
+    return (error: null, resumeMatch: null);
+  }
+  final current = ref.read(activePlaybackSessionProvider);
+  if (current == null) return (error: null, resumeMatch: null);
+  if (resolved == null) {
+    ref.read(activePlaybackSessionProvider.notifier).state =
+        current.copyWith(switching: false);
+    return (error: '播放解析失败，请检查站源或解析配置', resumeMatch: null);
+  }
+
+  // 切换前快照：启动失败时用于把历史与跟踪对象恢复到「切换前」状态。
+  final repo = ref.read(configRepositoryProvider);
+  final previousRecordId = HistoryRecord.buildId(
+      current.item.id, current.episodes[current.index].name);
+  final previousRecord = repo.findHistoryById(previousRecordId);
+
+  final prepared = _prepareEpisodePlayback(
+    ref,
+    item: current.item,
+    sourceName: current.sourceName,
+    episodes: current.episodes,
+    index: targetIndex,
+    site: current.site,
+    resolved: resolved,
+  );
+
+  // 历史回滚：恢复切换前快照（同源去重会顺带移除目标集记录）。
+  Future<void> restoreHistory() async {
+    if (previousRecord == null) return;
+    try {
+      await repo.addHistory(previousRecord);
+    } catch (_) {
+      // 历史回滚失败不应掩盖失败提示 / 影响返回主视图
+    }
+  }
+
+  try {
+    await _launchPlayback(
+      ref,
+      prepared.spec,
+      historyRecordId: prepared.recordId,
+      restoreRecordId: previousRecordId,
+      isStale: () => epoch != _playbackSessionEpoch,
+    );
+  } catch (_) {
+    // 启动失败：保持当前播放与索引，恢复闸门 / 历史 / 跟踪对象（与解析失败同口径）。
+    if (epoch != _playbackSessionEpoch) {
+      // 已作废的启动不放马后炮：不弹提示；仅当没有新播放接管时才回滚历史。
+      if (ref.read(activePlaySpecProvider) == null) await restoreHistory();
+      return (error: null, resumeMatch: null);
+    }
+    await restoreHistory();
+    final failed = ref.read(activePlaybackSessionProvider);
+    if (failed != null) {
+      ref.read(activePlaybackSessionProvider.notifier).state =
+          failed.copyWith(switching: false);
+    }
+    return (error: '播放启动失败，请重试', resumeMatch: null);
+  }
+
+  if (epoch != _playbackSessionEpoch) {
+    // 引擎启动窗口内返回主视图：目标集记录已在起播前写入（同源去重已删掉原集记录），
+    // 需回滚到切换前状态，避免历史出现用户未观看的集数、当前集断点丢失。
+    if (ref.read(activePlaySpecProvider) == null) await restoreHistory();
+    return (error: null, resumeMatch: null);
+  }
+
+  final latest = ref.read(activePlaybackSessionProvider);
+  if (latest != null) {
+    final resetTried = <String>{
+      lineSwitchKey(latest.sourceIndex, latest.sourceName),
+    };
+    ref.read(activePlaybackSessionProvider.notifier).state = latest.copyWith(
+          index: targetIndex,
+          switching: false,
+          triedLines: resetTried,
+        );
+    ref.read(autoLineSwitchProvider).arm(
+      sources: latest.sources,
+      currentSourceIndex: latest.sourceIndex,
+      currentSourceName: latest.sourceName,
+      episodeName: latest.episodes[targetIndex].name,
+      currentEpisodeUrl: latest.episodes[targetIndex].url,
+      tried: resetTried,
+      epoch: _playbackSessionEpoch,
+      startPosition: prepared.spec.startPosition ?? Duration.zero,
+    );
+  }
+  return (error: null, resumeMatch: prepared.resumeMatch);
+}
+
+// --- 片头 / 片尾跳过 ---
+
+/// 允许设置片头 / 片尾的窗口：min(时长 / 2, 10 分钟)。
+Duration _skipSetLimit(Duration duration) {
+  final half = Duration(milliseconds: duration.inMilliseconds ~/ 2);
+  const tenMinutes = Duration(minutes: 10);
+  return half < tenMinutes ? half : tenMinutes;
+}
+
+/// 当前影片生效的片头起点（未设置或总开关关闭时为 null）。
+Duration? _openingStart(WidgetRef ref, String vodId) {
+  final preferences = ref.read(settingsRepositoryProvider).playSkipPreferences;
+  if (!preferences.enabled) return null;
+  final entry = preferences.entryFor(vodId);
+  if (entry == null || entry.openingMs <= 0) return null;
+  return Duration(milliseconds: entry.openingMs);
+}
+
+/// 由播放会话装配片头 / 片尾视图模型；无会话返回 null（直播 / 推送 / 续播不显示）。
+PlayerSkipNav? _buildSkipNav(WidgetRef ref, PlaybackSession? session,
+    BuildContext playerContext, PlaySkipPreferences preferences) {
+  if (session == null) return null;
+  final entry = preferences.entryFor(session.item.id);
+  return PlayerSkipNav(
+    openingMs: entry?.openingMs ?? 0,
+    endingMs: entry?.endingMs ?? 0,
+    // 总开关关闭时，「跳过片头」胶囊不应出现（自动跳过已被 _openingStart 关闭）。
+    enabled: preferences.enabled,
+    onOpeningPressed: () =>
+        unawaited(_editSkipMarker(playerContext, ref, ending: false)),
+    onEndingPressed: () =>
+        unawaited(_editSkipMarker(playerContext, ref, ending: true)),
+  );
+}
+
+/// 打开设置面板并保存片头 / 片尾（含重叠校验与失败重试）。
+Future<void> _editSkipMarker(BuildContext context, WidgetRef ref,
+    {required bool ending}) async {
+  final session = ref.read(activePlaybackSessionProvider);
+  if (session == null || ref.read(activePlaySpecProvider) == null) return;
+  // 切换 / 刷新过渡期时长与位置可能仍属上一集：避免据此写入错误时间点
+  if (session.switching || ref.read(playerRefreshBusyProvider)) return;
+  final engine = ref.read(playerEngineProvider);
+  final duration = engine.duration;
+  final label = ending ? '片尾' : '片头';
+  if (duration <= Duration.zero) {
+    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('时长未知，暂时无法设置片头 / 片尾')));
+    return;
+  }
+
+  final repository = ref.read(settingsRepositoryProvider);
+  final preferences = repository.playSkipPreferences;
+  final entry = preferences.entryFor(session.item.id);
+  final currentMs = entry == null ? 0 : (ending ? entry.endingMs : entry.openingMs);
+  final positionMs = ending
+      ? (duration - engine.position).inMilliseconds
+      : engine.position.inMilliseconds;
+  final limitMs = _skipSetLimit(duration).inMilliseconds;
+
+  final value = await showEpisodeSkipDialog(
+    context,
+    label: label,
+    currentMs: currentMs,
+    positionMs: positionMs,
+    limitMs: limitMs,
+  );
+  if (value == null || !context.mounted) return;
+
+  // 重叠校验：片头起点 + 片尾偏移必须小于总时长（留 1s 余量）
+  final otherMs =
+      entry == null ? 0 : (ending ? entry.openingMs : entry.endingMs);
+  if (value > 0 &&
+      otherMs > 0 &&
+      value + otherMs >= duration.inMilliseconds - 1000) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('片头与片尾重叠，请调整后再设置')));
+    return;
+  }
+
+  // updatedAt 单调递增：系统时钟回拨时不至于让自己刚写的条目成为「最旧」而被淘汰
+  final now = DateTime.now().millisecondsSinceEpoch;
+  final newest = preferences.items.values.fold<int>(
+      0, (acc, item) => item.updatedAt > acc ? item.updatedAt : acc);
+  final updated = preferences.upsert(
+    session.item.id,
+    PlaySkipEntry(
+      openingMs: ending ? (entry?.openingMs ?? 0) : value,
+      endingMs: ending ? value : (entry?.endingMs ?? 0),
+      updatedAt: now > newest ? now : newest + 1,
+    ),
+  );
+  try {
+    await repository.updatePlaySkipPreferences(updated);
+  } catch (_) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('$label保存失败，请重试'),
+      action: SnackBarAction(
+        label: '重试',
+        // 用仓库的失败重试（取当前内存快照），避免回放本次的旧快照覆盖后续修改
+        onPressed: () => unawaited(repository.retryFailedSaves()),
+      ),
+    ));
+    return;
+  }
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context)
+      .showSnackBar(SnackBar(content: Text('$label已更新')));
+}
+
+/// 播放器切集入口：失败时以 SnackBar 提示（与详情页选集失败口径一致）。
+Future<void> _handleEpisodeSwitch(
+    BuildContext context, WidgetRef ref, int targetIndex) async {
+  final result = await _switchEpisode(ref, targetIndex);
+  if (!context.mounted) return;
+  if (result.error != null) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(result.error!)));
+    return;
+  }
+  _showResumeHint(context, ref, result.resumeMatch);
+}
+
+/// 刷新当前播放：可解析场景（点播剧集）重新解析，其余原样重载。
+///
+/// 保留刷新前位置、不新增历史记录、失败不打断当前播放；
+/// 返回 `refreshed` 表示是否真的重载过，`error` 为用户可展示的错误文案。
+Future<({String? error, bool refreshed})> _refreshPlayback(WidgetRef ref) async {
+  final spec = ref.read(activePlaySpecProvider);
+  if (spec == null) return (error: null, refreshed: false);
+  if (ref.read(playerRefreshBusyProvider) ||
+      ref.read(playerAutoSwitchBusyProvider)) {
+    return (error: null, refreshed: false);
+  }
+  // 切集进行中互斥：否则会作废切集代际，使会话卡在 switching=true
+  if (ref.read(activePlaybackSessionProvider)?.switching ?? false) {
+    return (error: null, refreshed: false);
+  }
+
+  final epoch = ++_playbackSessionEpoch; // 作废在途的切集 / 刷新
+  _refreshOwnerEpoch = epoch;
+  ref.read(playerRefreshBusyProvider.notifier).state = true;
+  ref.read(autoLineSwitchProvider).disarm();
+
+  var refreshed = false;
+  String? error;
+  try {
+    final tracker = ref.read(playbackHistoryTrackerProvider);
+    final engine = ref.read(playerEngineProvider);
+    final recordId = tracker.activeRecordId;
+    final position = engine.position;
+
+    // 刷新期间不落盘：避免解析 / seek 过渡期的位置事件把断点改小
+    tracker.track(null, flushPrevious: false);
+
+    var target = spec;
+
+    final session = ref.read(activePlaybackSessionProvider);
+    final resetTried = session == null
+        ? const <String>{}
+        : <String>{lineSwitchKey(session.sourceIndex, session.sourceName)};
+    if (session != null) {
+      ref.read(activePlaybackSessionProvider.notifier).state =
+          session.copyWith(triedLines: resetTried);
+    }
+    if (session != null) {
+      // 点播剧集：重新解析当前集（与详情页选集 / 切集同一调用）
+      final episode = session.episodes[session.index];
+      var timedOut = false;
+      MediaPlaySpec? resolved;
+      try {
+        resolved = await ref
+            .read(siteApiProvider)
+            .resolvePlayback(
+              session.site,
+              id: episode.url,
+              flag: session.sourceName,
+              parses:
+                  ref.read(configRepositoryProvider).currentVodConfig.parses,
+              parseEngine: ref.read(parseEngineProvider),
+            )
+            .timeout(const Duration(seconds: 20));
+        if (resolved.url.isEmpty) resolved = null;
+      } on TimeoutException {
+        timedOut = true;
+      } catch (_) {
+        resolved = null;
+      }
+      if (resolved == null) {
+        error = timedOut
+            ? '刷新失败：解析超时，请稍后重试'
+            : '刷新失败：播放解析失败，请检查站源或解析配置';
+      } else {
+        target = MediaPlaySpec(
+          url: resolved.url,
+          headers: resolved.headers ?? session.site?.header,
+          title: spec.title,
+          startPosition: position > Duration.zero ? position : null,
+        );
+      }
+    } else {
+      // 直播 / 推送直链 / 历史续播等无剧集上下文：原样重载当前播放参数
+      target = MediaPlaySpec(
+        url: spec.url,
+        headers: spec.headers,
+        title: spec.title,
+        isLive: spec.isLive,
+        startPosition: position > Duration.zero ? position : null,
+      );
+    }
+
+    if (error == null && epoch == _playbackSessionEpoch) {
+      try {
+        await _launchPlayback(ref, target,
+            isStale: () => epoch != _playbackSessionEpoch);
+        refreshed = epoch == _playbackSessionEpoch;
+      } catch (_) {
+        error = '刷新失败：播放启动失败，请重试';
+      }
+    }
+
+    // 恢复进度跟踪：以刷新前位置为下限 + 基线（seek 过渡期的小位置既不落盘也不回写）
+    if (epoch == _playbackSessionEpoch &&
+        recordId != null &&
+        ref.read(activePlaySpecProvider) != null) {
+      tracker.track(recordId,
+          flushPrevious: false,
+          baseline: position,
+          floor: position > Duration.zero ? position : null);
+      if (error == null && position > Duration.zero) {
+        unawaited(ref.read(configRepositoryProvider).updateHistoryProgress(
+              recordId,
+              positionMs: position.inMilliseconds,
+              durationMs: engine.duration.inMilliseconds,
+            ));
+      }
+      if (session != null && ref.read(activePlaySpecProvider) != null) {
+        ref.read(autoLineSwitchProvider).arm(
+          sources: session.sources,
+          currentSourceIndex: session.sourceIndex,
+          currentSourceName: session.sourceName,
+          episodeName: session.episodes[session.index].name,
+          currentEpisodeUrl: session.episodes[session.index].url,
+          tried: resetTried,
+          epoch: _playbackSessionEpoch,
+          startPosition: position,
+        );
+      }
+    }
+  } finally {
+    // 无论成功 / 失败 / 抛错 / 已被新播放接管，都由本次刷新的持有者复位忙碌态，
+    // 避免永久灰显（新刷新会改写持有者，旧的一律不复位）。
+    if (_refreshOwnerEpoch == epoch) {
+      _refreshOwnerEpoch = null;
+      ref.read(playerRefreshBusyProvider.notifier).state = false;
+    }
+  }
+
+  return (error: error, refreshed: refreshed);
+}
+
+/// 从头重播当前播放：只移动播放位置并继续播放，不重新解析、不重建播放器。
+///
+/// 位置归零后由既有 tracker 继续跟踪同一历史记录（不新增记录、不改记录 ID），
+/// 并把断点显式清零——同时清掉刷新遗留的位置下限，避免回退事件被拦掉。
+/// 返回 null 表示成功或无事发生；否则为用户可展示的错误文案。
+Future<String?> _replayFromStart(WidgetRef ref, MpvPlayerEngine engine) async {
+  // provider 级复核：组件按钮的 busy 只是构建期快照，切换 / 刷新可能刚刚开始
+  if (ref.read(playerRefreshBusyProvider) ||
+      (ref.read(activePlaybackSessionProvider)?.switching ?? false)) {
+    return null;
+  }
+  final epoch = _playbackSessionEpoch;
+  final tracker = ref.read(playbackHistoryTrackerProvider);
+  final recordId = tracker.activeRecordId;
+  try {
+    await engine.seek(Duration.zero);
+    if (epoch != _playbackSessionEpoch) return null; // 期间已切集 / 开始新播放
+    if (recordId != null) {
+      // 在 resume 之前清零：清 floor / 基线并显式写 0，
+      // 这样即使随后立刻返回主视图，也不会残留旧断点。
+      tracker.track(recordId, flushPrevious: false);
+      unawaited(ref.read(configRepositoryProvider).updateHistoryProgress(
+            recordId,
+            positionMs: 0,
+            durationMs: engine.duration.inMilliseconds,
+          ));
+    }
+    if (epoch != _playbackSessionEpoch) return null;
+    await engine.resume();
+  } catch (_) {
+    return '重播失败，请稍后再试';
+  }
+  return null;
+}
+
+/// 重播入口：失败时以 SnackBar 提示（与刷新失败同口径）。
+Future<void> _handleReplayRequested(
+    BuildContext context, WidgetRef ref, MpvPlayerEngine engine) async {
+  final error = await _replayFromStart(ref, engine);
+  if (error != null && context.mounted) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(error)));
+  }
+}
+
+/// 播放器刷新入口：失败或成功均给出明确反馈。
+Future<void> _handleRefreshPlayback(BuildContext context, WidgetRef ref) async {
+  final result = await _refreshPlayback(ref);
+  if (!context.mounted) return;
+  final message = result.error ?? (result.refreshed ? '已刷新' : null);
+  if (message != null) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+}
+
+/// 由播放会话装配切集视图模型；无会话或单集（≤1 集）返回 null（按钮整对隐藏）。
+/// [refreshBusy] 为真（刷新进行中）时两个切集按钮一并禁用，避免两条启动链路竞争。
+PlayerEpisodeNav? _buildEpisodeNav(
+    WidgetRef ref, PlaybackSession? session, BuildContext playerContext,
+    {bool refreshBusy = false}) {
+  if (session == null || session.episodes.length <= 1) return null;
+  return PlayerEpisodeNav(
+    canPrev: session.hasPrev && !session.switching && !refreshBusy,
+    canNext: session.hasNext && !session.switching && !refreshBusy,
+    switching: session.switching,
+    onPrevEpisode: () =>
+        _handleEpisodeSwitch(playerContext, ref, session.index - 1),
+    onNextEpisode: () =>
+        _handleEpisodeSwitch(playerContext, ref, session.index + 1),
+  );
+}
+
+/// 播放器内线路视图模型（SET-12 重做）：只列「本片这一集确实存在」的线路。
+///
+/// 当前线路打勾、已失败灰显、缺集线路不出现；只剩当前线路时不显示整个分组。
+PlayerLineNav? _buildLineNav(WidgetRef ref, PlaybackSession? session,
+    {bool busy = false}) {
+  if (session == null || session.sources.length <= 1) return null;
+  final episodeName = session.episodes[session.index].name;
+  final options = <PlayerLineOption>[];
+  for (var i = 0; i < session.sources.length; i++) {
+    final source = session.sources[i];
+    if (matchEpisodeOnLine(source, episodeName) == null) continue;
+    options.add(PlayerLineOption(
+      index: i,
+      name: source.name,
+      current: i == session.sourceIndex,
+      tried: session.triedLines.contains(lineSwitchKey(i, source.name)),
+    ));
+  }
+  if (options.length <= 1) return null;
+  return PlayerLineNav(
+    options: options,
+    busy: busy || session.switching,
+    onSelect: (index) =>
+        unawaited(ref.read(manualLineSwitchProvider)(session, index)),
+  );
+}
+
+/// 播放器内手动换线（SET-12 重做）：与自动换线共用 `_autoSwitchToLine`，
+/// 保证位置保持、历史回写、提示口径完全一致。
+Future<void> _manualSwitchToLine(
+    Ref ref, PlaybackSession session, int sourceIndex) async {
+  final current = ref.read(activePlaybackSessionProvider);
+  if (current == null) return;
+  if (sourceIndex == current.sourceIndex) return;
+  if (sourceIndex < 0 || sourceIndex >= current.sources.length) return;
+  if (ref.read(playerRefreshBusyProvider) ||
+      ref.read(playerAutoSwitchBusyProvider) ||
+      current.switching) {
+    ref.read(lineSwitchNoticeProvider.notifier).state = '正在切换，请稍候…';
+    return;
+  }
+  final target = current.sources[sourceIndex];
+  final episodeName = current.episodes[current.index].name;
+  final match = matchEpisodeOnLine(target, episodeName);
+  if (match == null) {
+    ref.read(lineSwitchNoticeProvider.notifier).state =
+        '线路「${target.name}」没有「$episodeName」，请换一条';
+    return;
+  }
+
+  // 作废在途的自动换线 / 切集结果，并关闭自动换线（新线路由用户选定）。
+  final epoch = ++_playbackSessionEpoch;
+  ref.read(autoLineSwitchProvider).disarm();
+  final position = ref.read(playerEngineProvider).position;
+  final candidate = LineCandidate(
+    source: target,
+    episode: target.episodes[match.episodeIndex],
+    sourceIndex: sourceIndex,
+    episodeIndex: match.episodeIndex,
+    matchedBy: match.matchedBy,
+  );
+
+  ref.read(playerAutoSwitchBusyProvider.notifier).state = true;
+  try {
+    final switched = await _autoSwitchToLine(ref, candidate, position, epoch);
+    if (!switched && epoch == _playbackSessionEpoch) {
+      ref.read(lineSwitchNoticeProvider.notifier).state =
+          '切换到线路「${target.name}」失败，请稍后重试';
+    }
+  } finally {
+    ref.read(playerAutoSwitchBusyProvider.notifier).state = false;
+  }
+}
+
+/// 显示配置输入弹窗
+void showConfigDialog(BuildContext context, WidgetRef ref) {
+  final repo = ref.read(configRepositoryProvider);
+  showDialog<void>(
+    context: context,
+    builder: (_) => ConfigDialog(repository: repo),
+  );
+}
+
+/// 打开设置中心
+void openSettingsPage(WidgetRef ref) {
+  ref.read(settingsPageOpenProvider.notifier).state = true;
+}
+
+/// 显示站点切换弹窗
+void showSiteSelectorDialog(BuildContext context, WidgetRef ref) {
+  final repo = ref.read(configRepositoryProvider);
+  final config = repo.currentVodConfig;
+  final currentSite = repo.selectedSite;
+
+  if (config.sites.isEmpty) {
+    showConfigDialog(context, ref);
+    return;
+  }
+
+  showDialog<void>(
+    context: context,
+    builder: (_) => SiteSelectorDialog(
+      sites: config.sites,
+      currentSite: currentSite,
+      onSiteSelected: (site) {
+        repo.selectSite(site);
+      },
+    ),
+  );
+}
+
+/// 配置源设置弹窗：支持 URL 加载、粘贴 JSON/Base64 与导入本地配置文件
+class ConfigDialog extends StatefulWidget {
+  final ConfigRepository repository;
+
+  /// 本地配置文件选择器（可注入以便测试；缺省弹出系统文件对话框）
+  final Future<String?> Function()? pickConfigFile;
+
+  const ConfigDialog(
+      {super.key, required this.repository, this.pickConfigFile});
+
+  @override
+  State<ConfigDialog> createState() => _ConfigDialogState();
+}
+
+class _ConfigDialogState extends State<ConfigDialog> {
+  late final TextEditingController _controller;
+  bool _isLoading = false;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(
+      text: widget.repository.currentWindowConfig.lastConfigUrl ?? '',
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  /// 多仓选择回调（URL / 粘贴 / 本地文件三条路径共用同一选择弹窗）
+  Future<int?> _selectDepot(List<DepotEntry> entries) => showDialog<int>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => DepotSelectionDialog(entries: entries),
+      );
+
+  Future<void> _load() async {
+    final input = _controller.text.trim();
+    if (input.isEmpty) {
+      setState(() => _errorMessage = '请输入配置 URL，或直接粘贴 JSON/Base64 配置内容');
+      return;
+    }
+
+    await _runLoad(() =>
+        widget.repository.loadFromInput(input, selectDepot: _selectDepot));
+  }
+
+  /// 导入本地配置文件（TVBox 标准 JSON / Base64、多仓清单、CMS 资源站清单）
+  Future<void> _importFromFile() async {
+    if (_isLoading) return;
+    final picker = widget.pickConfigFile ?? _pickConfigFile;
+
+    String? path;
+    try {
+      path = await picker();
+    } catch (error) {
+      if (mounted) setState(() => _errorMessage = _formatError(error));
+      return;
+    }
+    if (path == null || path.isEmpty) return; // 用户取消了文件选择
+
+    final selectedPath = path;
+    await _runLoad(() => widget.repository
+        .loadFromFile(selectedPath, selectDepot: _selectDepot));
+  }
+
+  /// 系统文件选择对话框（配置 / 订阅文件）
+  Future<String?> _pickConfigFile() async {
+    const typeGroup = XTypeGroup(
+      label: '配置文件',
+      extensions: ['json', 'txt', 'm3u', 'conf'],
+    );
+    final file = await openFile(acceptedTypeGroups: [typeGroup]);
+    return file?.path;
+  }
+
+  /// 统一的加载执行与错误处理：成功后关闭弹窗；取消多仓选择时静默复位
+  Future<void> _runLoad(Future<void> Function() task) async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      await task();
+      if (mounted) Navigator.of(context).pop();
+    } on DepotSelectionCancelled {
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _errorMessage = _formatError(error);
+      });
+    }
+  }
+
+  String _formatError(Object error) {
+    if (error is FormatException) return error.message.toString();
+    if (error is FileSystemException) {
+      return error.path != null
+          ? '${error.message}：${error.path}'
+          : error.message;
+    }
+    return error.toString().replaceFirst('Exception: ', '');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: const Color(0xFF202026),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      title: const Row(
+        children: [
+          Icon(Icons.settings_outlined, color: Color(0xFFE50914), size: 20),
+          SizedBox(width: 8),
+          Text('配置源设置',
+              style: TextStyle(
+                  fontSize: 16,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold)),
+        ],
+      ),
+      content: SizedBox(
+        width: 560,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '输入配置文件地址，粘贴 JSON / Base64 内容，或导入本地文件：',
+              style: TextStyle(fontSize: 13, color: Color(0xFFB0B0C0)),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _controller,
+              enabled: !_isLoading,
+              minLines: 1,
+              maxLines: 6,
+              style: const TextStyle(fontSize: 13, color: Colors.white),
+              decoration: InputDecoration(
+                hintText: 'https://example.com/tv.json 或粘贴配置内容',
+                hintStyle: const TextStyle(color: Color(0xFF606070)),
+                filled: true,
+                fillColor: const Color(0xFF16161A),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: Color(0xFF383844)),
+                ),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _isLoading ? null : _importFromFile,
+                  icon: const Icon(Icons.folder_open_rounded, size: 16),
+                  label:
+                      const Text('导入本地文件…', style: TextStyle(fontSize: 12.5)),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFD0D0DE),
+                    side: const BorderSide(color: Color(0xFF383844)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    '支持 TVBox 配置 / 多仓清单 / CMS 资源站清单',
+                    style: TextStyle(fontSize: 11.5, color: Color(0xFF707082)),
+                  ),
+                ),
+              ],
+            ),
+            if (_errorMessage != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF3A171B),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: const Color(0xFF8F2D36)),
+                ),
+                child: Text(
+                  _errorMessage!,
+                  style: const TextStyle(
+                      fontSize: 12, height: 1.4, color: Color(0xFFFFB5BA)),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _isLoading ? null : () => Navigator.of(context).pop(),
+          child: const Text('取消', style: TextStyle(color: Color(0xFF888896))),
+        ),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFFE50914),
+            foregroundColor: Colors.white,
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+          ),
+          onPressed: _isLoading ? null : _load,
+          child: _isLoading
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white),
+                )
+              : const Text('加载配置',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+        ),
+      ],
+    );
+  }
+}
+
+/// 片尾跳过监听：只在播放器子树内挂载（此时引擎一定已注入）。
+///
+/// 到达「时长 − 片尾」时调用 SET-17 的切集入口；本集只触发一次，
+/// 且要求本集先上报过片尾点之前的位置（视为真正起播）。
+class _PlaySkipWatcher extends ConsumerStatefulWidget {
+  final MpvPlayerEngine engine;
+  final Widget child;
+
+  const _PlaySkipWatcher({required this.engine, required this.child});
+
+  @override
+  ConsumerState<_PlaySkipWatcher> createState() => _PlaySkipWatcherState();
+}
+
+class _PlaySkipWatcherState extends ConsumerState<_PlaySkipWatcher> {
+  StreamSubscription<Duration>? _subscription;
+
+  /// 单订阅流（部分测试替身）已被播放器内部消费时的回退时钟。
+  Timer? _timer;
+  String? _triggeredFor;
+  String? _armedKey;
+
+  @override
+  void initState() {
+    super.initState();
+    try {
+      _subscription = widget.engine.positionStream.listen(_onPosition);
+    } on StateError {
+      // 该引擎的位置流是单订阅且已被播放器消费：退回 500ms 轮询（真机引擎为广播流，走上面分支）。
+      _timer = Timer.periodic(const Duration(milliseconds: 500),
+          (_) => _onPosition(widget.engine.position));
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(_subscription?.cancel());
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _onPosition(Duration position) {
+    if (!mounted) return;
+    // 设置中心打开时不自动切集：否则会把用户的设置面板强行关掉并丢失未提交输入
+    if (ref.read(settingsPageOpenProvider)) return;
+    final session = ref.read(activePlaybackSessionProvider);
+    if (session == null) return;
+    if (session.switching || ref.read(playerRefreshBusyProvider)) return;
+    final preferences = ref.read(settingsRepositoryProvider).playSkipPreferences;
+    if (!preferences.enabled) return;
+    final entry = preferences.entryFor(session.item.id);
+    if (entry == null || entry.endingMs <= 0) return;
+    if (!session.hasNext) return;
+    final duration = widget.engine.duration;
+    if (duration <= Duration.zero) return;
+    final endAt = duration - Duration(milliseconds: entry.endingMs);
+    if (endAt <= Duration.zero) return;
+
+    final key = '${session.item.id}#${session.index}';
+    if (_triggeredFor != null && _triggeredFor != key) {
+      // 新的一集：解除上一次的触发标记
+      _triggeredFor = null;
+    }
+    if (position < endAt) {
+      _armedKey = key;
+      return;
+    }
+    if (_armedKey != key) return;
+    if (_triggeredFor == key) return;
+    _triggeredFor = key;
+    unawaited(_handleEpisodeSwitch(context, ref, session.index + 1));
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+/// 画面比例选择：复用 SET-04 的 `PlayerSettings.scale`（持久化 + 实时重排）。
+Future<void> _handleScaleChanged(WidgetRef ref, String scale) async {
+  await applyPlayerScale(ref.read(settingsRepositoryProvider), scale);
+}
+
+/// 重置播放器数据：当前影片片头 / 片尾 + 播放器设置（含画面比例）+ 即时应用。
+Future<void> _handleResetPlayerData(
+    WidgetRef ref, MpvPlayerEngine engine) async {
+  final session = ref.read(activePlaybackSessionProvider);
+  await resetPlayerData(
+    settings: ref.read(settingsRepositoryProvider),
+    engine: engine,
+    vodId: session?.item.id,
+  );
+}
+
+/// 订阅播放器设置流（流对象仅建立一次），把「画面缩放」模式实时传给播放器。
+class _VideoScaleBinding extends StatefulWidget {
+  final SettingsRepository repository;
+  final Widget Function(BuildContext context, String scale) builder;
+
+  const _VideoScaleBinding({required this.repository, required this.builder});
+
+  @override
+  State<_VideoScaleBinding> createState() => _VideoScaleBindingState();
+}
+
+class _VideoScaleBindingState extends State<_VideoScaleBinding> {
+  late final Stream<PlayerSettings> _stream =
+      widget.repository.playerSettingsStream;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<PlayerSettings>(
+      stream: _stream,
+      initialData: widget.repository.playerSettings,
+      builder: (context, snapshot) => widget.builder(
+          context, (snapshot.data ?? PlayerSettings.defaults).scale),
+    );
+  }
+}
+
+/// Windows 桌面应用程序顶层组件
+class XiugouTvApp extends ConsumerWidget {
+  const XiugouTvApp({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final windowMgr = ref.watch(windowManagerProvider);
+    final currentSite = ref.watch(currentSiteProvider);
+    final activeSiteName = currentSite?.name;
+    final activePlaySpec = ref.watch(activePlaySpecProvider);
+    final activeSession = ref.watch(activePlaybackSessionProvider);
+    final playerEngine = ref.watch(playerEngineProvider);
+    final showSettings = ref.watch(settingsPageOpenProvider);
+    final refreshBusy = ref.watch(playerRefreshBusyProvider);
+    final autoSwitchBusy = ref.watch(playerAutoSwitchBusyProvider);
+    final playSkipPreferences = ref
+            .watch(playSkipPreferencesProvider)
+            .valueOrNull ??
+        ref.read(settingsRepositoryProvider).playSkipPreferences;
+    final isRealMpvEngine = playerEngine.runtimeType == MpvPlayerEngine;
+    final trackNavs =
+        isRealMpvEngine ? buildPlayerTrackNavs(playerEngine) : null;
+
+    return MaterialApp(
+      title: '修狗TV',
+      debugShowCheckedModeBanner: false,
+      themeMode: ThemeMode.dark,
+      darkTheme: ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF101014),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFFE50914),
+          surface: Color(0xFF18181C),
+        ),
+        fontFamily: 'Segoe UI',
+        fontFamilyFallback: const [
+          'Microsoft YaHei',
+          'PingFang SC',
+          'sans-serif'
+        ],
+      ),
+      home: Builder(
+        builder: (innerContext) => DesktopWindowFrame(
+          windowManager: windowMgr,
+          activeSiteName: activeSiteName,
+          onSettingsPressed: () => openSettingsPage(ref),
+          onSiteSelectorPressed: () =>
+              showSiteSelectorDialog(innerContext, ref),
+          child: DesktopShell(
+            showPlayer: activePlaySpec != null,
+            showSettings: showSettings,
+            settingsView: showSettings
+                ? SettingsPage(
+                    playerSettingsApplication: playerEngine.settingsApplication,
+                    playerEngine: playerEngine,
+                    configRepository: ref.read(configRepositoryProvider),
+                    settingsRepository: ref.read(settingsRepositoryProvider),
+                    cacheMaintenance: ref.read(cacheMaintenanceProvider),
+                    epgRepository: ref.read(epgRepositoryProvider),
+                    dataBackupService: ref.read(dataBackupServiceProvider),
+                    wallpaperStore: ref.read(wallpaperStoreProvider),
+                    isPlaybackActive: () =>
+                        ref.read(activePlaySpecProvider) != null,
+                    onClose: () => ref
+                        .read(settingsPageOpenProvider.notifier)
+                        .state = false,
+                    onAddConfig: (pageContext) => showDialog<void>(
+                      context: pageContext,
+                      builder: (_) => ConfigDialog(
+                          repository: ref.read(configRepositoryProvider)),
+                    ),
+                  )
+                : null,
+            mainView: WallpaperBackdrop(
+              store: ref.read(wallpaperStoreProvider),
+              child: const DesktopMainView(),
+            ),
+            playerView: activePlaySpec == null
+                ? null
+                : _LineSwitchNoticeHost(
+                    child: _PlaySkipWatcher(
+                    engine: playerEngine,
+                    child: _VideoScaleBinding(
+                      repository: ref.read(settingsRepositoryProvider),
+                      builder: (playerContext, scale) => DesktopVideoPlayer(
+                      playerEngine: playerEngine,
+                      windowManager: windowMgr,
+                      scale: scale,
+                      playerInfoLabel: 'MPV 播放器',
+                      episodeNav: _buildEpisodeNav(
+                          ref, activeSession, playerContext,
+                          refreshBusy: refreshBusy || autoSwitchBusy),
+                      lineNav: _buildLineNav(
+                          ref, activeSession,
+                          busy: refreshBusy || autoSwitchBusy),
+                      refreshNav: PlayerRefreshNav(
+                        busy: refreshBusy ||
+                            autoSwitchBusy ||
+                            (activeSession?.switching ?? false),
+                        onRefresh: () =>
+                            _handleRefreshPlayback(playerContext, ref),
+                      ),
+                      skipNav: _buildSkipNav(
+                          ref, activeSession, playerContext, playSkipPreferences),
+                      replayNav: PlayerReplayNav(
+                        busy: refreshBusy ||
+                            autoSwitchBusy ||
+                            (activeSession?.switching ?? false),
+                        onReplay: () => unawaited(_handleReplayRequested(
+                            playerContext, ref, playerEngine)),
+                      ),
+                      videoTracksNav: trackNavs?.video,
+                      audioTracksNav: trackNavs?.audio,
+                      subtitleTracksNav: trackNavs?.subtitle,
+                      onScaleChanged: (value) =>
+                          _handleScaleChanged(ref, value),
+                      resetNav: PlayerResetNav(
+                        enabled: !refreshBusy &&
+                            !autoSwitchBusy &&
+                            !(activeSession?.switching ?? false),
+                        onReset: () =>
+                            _handleResetPlayerData(ref, playerEngine),
+                      ),
+                      onBack: () {
+                        ref.read(autoLineSwitchProvider).disarm();
+                        // 先同步捕获最终播放位置写入历史，再停止引擎（stop 会重置位置）
+                        unawaited(
+                            ref.read(playbackHistoryTrackerProvider).stop());
+                        playerEngine.stop();
+                        ref.read(activePlaySpecProvider.notifier).state = null;
+                        // 关闭播放会话并作废在途切换结果
+                        _playbackSessionEpoch++;
+                        ref
+                            .read(activePlaybackSessionProvider.notifier)
+                            .state = null;
+                      },
+                    ),
+                    ),
+                  ),
+                ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 监听自动换线提示并显示 SnackBar（SET-12）。
+class _LineSwitchNoticeHost extends ConsumerStatefulWidget {
+  final Widget child;
+
+  const _LineSwitchNoticeHost({required this.child});
+
+  @override
+  ConsumerState<_LineSwitchNoticeHost> createState() =>
+      _LineSwitchNoticeHostState();
+}
+
+class _LineSwitchNoticeHostState extends ConsumerState<_LineSwitchNoticeHost> {
+  String? _last;
+
+  void _schedule(String message) {
+    if (message == _last) return;
+    _last = message;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      if (messenger == null) return;
+      // 不能 hideCurrentSnackBar：SET-11 的续播提示（带「从头播放」）正在展示
+      // 或排队时会被吞掉（评审 N7）。改为纯排队；「进行中」提示压到 1.2 秒，
+      // 避免把后面的结果提示压到用户已经换台之后才出现。
+      final isProgress =
+          message.contains('正在尝试') || message.contains('正在切换');
+      messenger.showSnackBar(SnackBar(
+        duration: isProgress
+            ? const Duration(milliseconds: 1200)
+            : const Duration(seconds: 3),
+        content: Text(message),
+      ));
+      ref.read(lineSwitchNoticeProvider.notifier).state = null;
+      // 复位去重键：同一文案在后续会话/再次换线时仍需提示，只抑制同一帧内的重复。
+      _last = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final current = ref.watch(lineSwitchNoticeProvider);
+    if (current != null) _schedule(current);
+    ref.listen<String?>(lineSwitchNoticeProvider, (previous, next) {
+      if (next != null) _schedule(next);
+    });
+    return widget.child;
+  }
+}
+
+/// 桌面主区域外壳：在「主视图 ⇄ 播放器 ⇄ 设置中心」之间切换。
+///
+/// 契约：播放或打开设置期间主视图必须保持挂载（仅隐藏，不销毁），
+/// 返回时恢复此前的分类选择 / 搜索结果 / 列表数据，而不是重新加载回首页默认状态；
+/// 设置中心覆盖在播放器之上时，播放器同样保持挂载。
+/// 主视图壁纸背景（SET-08）。
+///
+/// 只包住主视图：播放器 / 设置页在 [DesktopShell] 的更高层，不受影响。未设置壁纸时
+/// 与旧版视觉一致（只铺一层深色底，不额外压暗）；设置后固定叠一层 55% 黑遮罩，
+/// 保证任何图片下左侧导航 / 分类栏 / 标题文字都有对比度。
+class WallpaperBackdrop extends ConsumerStatefulWidget {
+  final WallpaperStore store;
+  final Widget child;
+
+  const WallpaperBackdrop({super.key, required this.store, required this.child});
+
+  @override
+  ConsumerState<WallpaperBackdrop> createState() => _WallpaperBackdropState();
+}
+
+class _WallpaperBackdropState extends ConsumerState<WallpaperBackdrop> {
+  String? _fileName;
+  Future<String?>? _resolved;
+
+  static const Color _baseColor = Color(0xFF101014);
+
+  /// 55% 黑遮罩（`0x8C`）。固定值、不提供滑杆：可调透明度会让对比度变成用户责任。
+  static const Color _scrimColor = Color(0x8C000000);
+
+  @override
+  Widget build(BuildContext context) {
+    final preferences = ref.watch(appearancePreferencesProvider).valueOrNull ??
+        AppearancePreferences.none;
+    if (preferences.wallpaperFileName != _fileName) {
+      _fileName = preferences.wallpaperFileName;
+      _resolved = widget.store.resolvePath(_fileName);
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const ColoredBox(color: _baseColor),
+        FutureBuilder<String?>(
+          future: _resolved,
+          builder: (context, snapshot) {
+            final path = snapshot.data;
+            if (path == null) return const SizedBox.shrink();
+            final windowWidth = MediaQuery.sizeOf(context).width;
+            final cacheWidth =
+                windowWidth <= 0 ? null : windowWidth.clamp(1, 2560).round();
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.file(
+                  File(path),
+                  fit: BoxFit.cover,
+                  filterQuality: FilterQuality.medium,
+                  cacheWidth: cacheWidth,
+                  errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                ),
+                const ColoredBox(color: _scrimColor),
+              ],
+            );
+          },
+        ),
+        widget.child,
+      ],
+    );
+  }
+}
+
+class DesktopShell extends StatelessWidget {
+  final bool showPlayer;
+  final Widget mainView;
+  final Widget? playerView;
+  final bool showSettings;
+  final Widget? settingsView;
+
+  const DesktopShell({
+    super.key,
+    required this.showPlayer,
+    required this.mainView,
+    this.playerView,
+    this.showSettings = false,
+    this.settingsView,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final settingsVisible = showSettings && settingsView != null;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // 隐藏层与其浮层必须共享语义生命周期，同时禁止隐藏层持有键盘焦点。
+        Offstage(
+          offstage: showPlayer || settingsVisible,
+          child: ExcludeFocus(
+            excluding: showPlayer || settingsVisible,
+            child: Overlay.wrap(child: mainView),
+          ),
+        ),
+        if (showPlayer && playerView != null)
+          Offstage(
+            offstage: settingsVisible,
+            child: ExcludeFocus(
+              excluding: settingsVisible,
+              child: Overlay.wrap(child: playerView!),
+            ),
+          ),
+        if (settingsVisible) settingsView!,
+      ],
+    );
+  }
+}
+
+/// 桌面主体视图（左侧垂直导航面板 + 顶部搜索栏 + 站源动态分类滚动条 + 影视海报瀑布流）
+class DesktopMainView extends ConsumerStatefulWidget {
+  const DesktopMainView({super.key});
+
+  @override
+  ConsumerState<DesktopMainView> createState() => _DesktopMainViewState();
+}
+
+class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
+  final TextEditingController _searchController = TextEditingController();
+  final ScrollController _categoryScrollController = ScrollController();
+  final ScrollController _searchSiteScrollController = ScrollController();
+
+  List<VodItem> _items = [];
+  List<VodCategory> _categories = [];
+  VodCategory? _selectedCategory;
+  bool _isLoading = false;
+  String? _errorMessage;
+  bool _isSearching = false;
+
+  /// 搜索态下按站点筛选的分组键；null 表示「全部」
+  String? _searchSiteGroupKey;
+
+  /// 搜索相关提示（如当前站源不支持搜索）；为空时按加载 / 搜索状态显示默认文案
+  String? _searchNotice;
+
+  /// 聚合搜索进行中：结果边到边显示，结束前不显示「未找到」
+  bool _searchPending = false;
+  StreamSubscription<SearchBatch>? _searchSub;
+  final Set<String> _searchSeenKeys = <String>{};
+  int _searchCompleted = 0;
+  int _searchTotal = 0;
+
+  String? _loadedSiteIdentity;
+  int _contentGeneration = 0;
+
+  /// 冷启动直播入口：在直播弹窗关闭前推迟主视图初始加载
+  bool _startupLiveEntryPending = false;
+
+  /// 本次直播弹窗内是否已启动频道播放（用于区分「关闭后回到点播」）
+  bool _livePlaybackStartedInDialog = false;
+
+  /// 从「详情/选集弹窗」起播时记住来源：退出播放器后要回到这个弹窗，而不是首页。
+  VodDetail? _playbackOriginDetail;
+  Site? _playbackOriginSite;
+  bool _restoringDetailDialog = false;
+
+  String? _currentSiteIdentity() {
+    final repository = ref.read(configRepositoryProvider);
+    final site = repository.selectedSite;
+    return site == null
+        ? null
+        : '${repository.currentConfigIdentity}:${HomeSitePreference.requestIdentity(site)}';
+  }
+
+  bool _acceptContent(int generation, String? identity) =>
+      mounted &&
+      generation == _contentGeneration &&
+      identity == _currentSiteIdentity();
+
+  /// 取消在途的增量搜索：停止接收后续批次并退出「搜索中」状态。
+  void _cancelSearchStream() {
+    _searchSub?.cancel();
+    _searchSub = null;
+    _searchPending = false;
+  }
+
+  void _synchronizeSite() {
+    if (!mounted || _loadedSiteIdentity == _currentSiteIdentity()) return;
+    _searchController.clear();
+    loadSiteData();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    // 冷启动直播入口：推迟主视图初始加载，首帧后打开直播入口；其余入口保持原有加载行为
+    _startupLiveEntryPending =
+        ref.read(startupEntryProvider) == StartupEntry.live;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_startupLiveEntryPending) {
+        unawaited(_showLiveDialog());
+      } else {
+        loadSiteData();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _cancelSearchStream();
+    _searchController.dispose();
+    _categoryScrollController.dispose();
+    _searchSiteScrollController.dispose();
+    super.dispose();
+  }
+
+  /// 加载当前站源数据：
+  /// - 当 category 为 null 时：拉取该站源的首页信息动态填充分类滚动条，并默认选中第一个分类，展示该分类下的视频数据；
+  /// - 当指定 category 时：拉取对应分类的视频数据并刷新瀑布流。
+  Future<void> loadSiteData(
+      {VodCategory? category, bool preserveCategories = false}) async {
+    // 冷启动直播入口期间推迟主视图加载，避免因页面偏好发起站源请求
+    if (_startupLiveEntryPending) return;
+    if (!mounted) return;
+    _searchNotice = null;
+    final site = ref.read(configRepositoryProvider).selectedSite;
+    debugPrint('${site?.toJson()}'); // Map 直接打印
+    final identity = _currentSiteIdentity();
+    final changed = identity != _loadedSiteIdentity;
+    _loadedSiteIdentity = identity;
+    final generation = ++_contentGeneration;
+    _cancelSearchStream();
+    if (site == null) {
+      setState(() {
+        _items = [];
+        _categories = [];
+        _selectedCategory = null;
+        _isLoading = false;
+        _isSearching = false;
+        _searchSiteGroupKey = null;
+        _errorMessage = null;
+      });
+      return;
+    }
+    if (changed) _items = [];
+
+    // 格式化输出切换/加载站源的清晰调试信息
+    // ignore: avoid_print
+    print('\n================ [xiugou-tv 站源调试] ================');
+    // ignore: avoid_print
+    print(
+        '[站源信息]: ${site.name} (Key: ${site.key}, Type: ${site.type}, Api: ${site.api})');
+    // ignore: avoid_print
+    print(
+        '[当前操作]: ${category == null ? "获取站源首页推荐与动态分类" : "切换到分类: ${category.name} (ID: ${category.id})"}');
+    // ignore: avoid_print
+    print('===========================================================');
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+      _isSearching = false;
+      _searchSiteGroupKey = null;
+      if (!preserveCategories && category == null) {
+        _categories = [];
+        _selectedCategory = null;
+      }
+    });
+
+    try {
+      final siteApi = ref.read(siteApiProvider);
+
+      if (category == null) {
+        // 请求站源首页，动态拉取该站源专属的分类列表
+        final homeRes = await siteApi.fetchHome(site);
+        if (!_acceptContent(generation, identity)) return;
+        final fetchedCats = homeRes.categories;
+
+        // ignore: avoid_print
+        print(
+            '--> [站源返回分类数]: ${fetchedCats.length} 个 -> [ ${fetchedCats.map((c) => "${c.name}(${c.id})").join(", ")} ]');
+
+        if (fetchedCats.isNotEmpty) {
+          final firstCat = fetchedCats.first;
+          if (mounted) {
+            setState(() {
+              _categories = fetchedCats;
+              _selectedCategory = firstCat;
+            });
+          }
+
+          // 默认加载站源第 1 个分类的数据
+          if (firstCat.id.isNotEmpty) {
+            // ignore: avoid_print
+            print('--> 默认拉取第 1 个分类: ${firstCat.name} (ID: ${firstCat.id})');
+            final catRes =
+                await siteApi.fetchCategory(site, categoryId: firstCat.id);
+            if (!_acceptContent(generation, identity)) return;
+            // ignore: avoid_print
+            print('--> [第 1 分类视频数]: ${catRes.list.length} 部');
+            final itemsToShow =
+                catRes.list.isNotEmpty ? catRes.list : homeRes.list;
+            if (mounted) {
+              setState(() {
+                _items = itemsToShow;
+                _isLoading = false;
+              });
+            }
+          } else {
+            // ignore: avoid_print
+            print('--> [首页推荐视频数]: ${homeRes.list.length} 部');
+            if (mounted) {
+              setState(() {
+                _items = homeRes.list;
+                _isLoading = false;
+              });
+            }
+          }
+        } else {
+          // 站源未返回分类结构，展示首页推荐数据
+          // ignore: avoid_print
+          print('--> [首页推荐视频数]: ${homeRes.list.length} 部 (站源未声明独立分类)');
+          if (mounted) {
+            setState(() {
+              _categories = [];
+              _selectedCategory = null;
+              _items = homeRes.list;
+              _isLoading = false;
+            });
+          }
+        }
+      } else {
+        // 用户手动切换点击某一分类
+        setState(() {
+          _selectedCategory = category;
+        });
+
+        VodPageResult catRes;
+        if (category.id.isNotEmpty) {
+          catRes = await siteApi.fetchCategory(site, categoryId: category.id);
+        } else {
+          catRes = await siteApi.fetchHome(site);
+        }
+        if (!_acceptContent(generation, identity)) return;
+        // ignore: avoid_print
+        print(
+            '--> [分类切换成功]: ${category.name} (ID: ${category.id})，返回视频数: ${catRes.list.length} 部');
+
+        if (mounted) {
+          setState(() {
+            _items = catRes.list;
+            _isLoading = false;
+          });
+        }
+      }
+    } catch (e) {
+      if (!_acceptContent(generation, identity)) return;
+      final errorMsg = e is UnsupportedError
+          ? (e.message?.toString() ?? e.toString())
+          : '加载站点内容失败: $e';
+      // ignore: avoid_print
+      print('--> [站源数据加载失败]: $errorMsg');
+      if (mounted) {
+        setState(() {
+          _errorMessage = errorMsg;
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  /// 搜索：聚合开时逐站增量渲染（先完成先显示）；聚合关时仅检索当前站源（不受支持时明确提示且不发起请求）
+  Future<void> _handleSearch(String keyword) async {
+    final query = keyword.trim();
+    if (query.isEmpty) {
+      loadSiteData();
+      return;
+    }
+
+    final settings = ref.read(settingsRepositoryProvider);
+    final config = ref.read(configRepositoryProvider);
+    final generation = ++_contentGeneration;
+    final identity = _currentSiteIdentity();
+    final isAggregate = settings.searchPreferences.aggregate;
+    _cancelSearchStream();
+    _searchSeenKeys.clear();
+    _searchCompleted = 0;
+    _searchTotal = 0;
+    setState(() {
+      // 聚合搜索不再整块转圈：结果区边到边显示，进度由站点栏尾部胶囊承担
+      _isLoading = !isAggregate;
+      _errorMessage = null;
+      _searchNotice = null;
+      _selectedCategory = null;
+      _searchSiteGroupKey = null;
+      _isSearching = true;
+      _searchPending = isAggregate;
+      if (isAggregate) _items = [];
+    });
+
+    try {
+      final searchEngine = ref.read(searchEngineProvider);
+      if (isAggregate) {
+        _listenToSearch(
+          searchEngine.searchAllIncremental(
+              config.currentVodConfig.sites, query),
+          generation: generation,
+          identity: identity,
+        );
+        return;
+      }
+
+      final site = config.selectedSite;
+      if (site == null) {
+        if (_acceptContent(generation, identity)) {
+          setState(() {
+            _items = [];
+            _isLoading = false;
+          });
+        }
+        return;
+      }
+      if (!searchEngine.supportsSearch(site)) {
+        if (_acceptContent(generation, identity)) {
+          setState(() {
+            _items = [];
+            _isLoading = false;
+            _searchNotice = '当前站源不支持搜索，未发起检索';
+          });
+        }
+        return;
+      }
+      final results = await searchEngine.searchSite(site, query);
+      if (_acceptContent(generation, identity)) {
+        setState(() {
+          _items = results;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (_acceptContent(generation, identity)) {
+        setState(() {
+          _errorMessage = '聚合搜索失败: $e';
+          _isLoading = false;
+          _searchPending = false;
+        });
+      }
+    }
+  }
+
+  /// 桌面竖滚轮 → 站点栏横向滚动（N-3）。
+  ///
+  /// 横向 `ListView` 默认只吃 `scrollDelta.dx`；桌面鼠标只有 dy，因此只映射 dy。
+  /// 横向滚轮 / 触控板横滑（dx）留给 Scrollable 自己处理，避免双倍滚动。
+  void _handleSearchSiteBarPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    final delta = event.scrollDelta.dy;
+    if (delta == 0 || !_searchSiteScrollController.hasClients) return;
+    final position = _searchSiteScrollController.position;
+    final target = (position.pixels + delta)
+        .clamp(position.minScrollExtent, position.maxScrollExtent);
+    if (target != position.pixels) {
+      _searchSiteScrollController.jumpTo(target);
+    }
+  }
+
+  /// 订阅增量搜索：每批去重后追加；迟到批次按代际 / 身份丢弃。
+  void _listenToSearch(
+    Stream<SearchBatch> stream, {
+    required int generation,
+    required String? identity,
+  }) {
+    _searchSub = stream.listen(
+      (batch) {
+        if (!_acceptContent(generation, identity)) return;
+        final added = <VodItem>[];
+        appendUniqueSearchItems(added, _searchSeenKeys, batch.items);
+        setState(() {
+          if (added.isNotEmpty) _items = [..._items, ...added];
+          _searchCompleted = batch.completed;
+          _searchTotal = batch.total;
+        });
+      },
+      onError: (Object error) {
+        if (!_acceptContent(generation, identity)) return;
+        setState(() {
+          _errorMessage = '聚合搜索失败: $error';
+          _searchPending = false;
+          _isLoading = false;
+        });
+      },
+      onDone: () {
+        if (!_acceptContent(generation, identity)) return;
+        setState(() {
+          _searchPending = false;
+        });
+        _searchSub = null;
+      },
+    );
+  }
+
+  Future<void> _onItemClicked(VodItem item) async {
+    final repo = ref.read(configRepositoryProvider);
+    // 优先使用条目自带的 siteKey (跨站聚合搜索条目)，其次回退为当前选定站源
+    Site? targetSite;
+    if (item.siteKey != null && item.siteKey!.isNotEmpty) {
+      final matches =
+          repo.currentVodConfig.sites.where((s) => s.key == item.siteKey);
+      if (matches.isNotEmpty) {
+        targetSite = matches.first;
+      }
+    }
+    targetSite ??= repo.selectedSite;
+    if (targetSite == null) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: CircularProgressIndicator(color: Color(0xFFE50914)),
+      ),
+    );
+
+    try {
+      final siteApi = ref.read(siteApiProvider);
+      final detail = await siteApi.fetchDetail(targetSite, vodId: item.id);
+      if (mounted) {
+        Navigator.of(context).pop(); // 关闭 loading 弹窗
+        if (detail == null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('获取详情失败: 详情为空')),
+          );
+          return;
+        }
+        _showDetailDialog(detail, targetSite);
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('获取详情失败: $e')),
+        );
+      }
+    }
+  }
+
+  /// 统一打开「详情 / 选集」弹窗。
+  ///
+  /// 同时记住起播来源：用户从选集里点某一集后，弹窗会先关闭、进入播放器；
+  /// 退出播放器时应回到这个弹窗继续选集，而不是掉回首页。
+  void _showDetailDialog(VodDetail detail, Site? site) {
+    final repo = ref.read(configRepositoryProvider);
+    showDialog<void>(
+      context: context,
+      builder: (_) => VodDetailDialog(
+        detail: detail,
+        isFavorite: repo.isFavorite(detail.item.id),
+        onToggleFavorite: () async {
+          try {
+            await repo.toggleFavorite(detail.item);
+            return null;
+          } on DataRestorePendingRestartException catch (error) {
+            return error.message;
+          } catch (_) {
+            return '收藏保存失败，请稍后重试';
+          }
+        },
+        onPlayEpisode: (selection) {
+          _playbackOriginDetail = detail;
+          _playbackOriginSite = site;
+          unawaited(_startPlayEpisode(detail.item, selection, targetSite: site));
+        },
+      ),
+    );
+  }
+
+  /// 播放器退出后恢复「选集弹窗」。只对「从详情弹窗起播」的会话生效；
+  /// 从历史/直播等入口起播时来源为空，行为与以前一致（回主视图）。
+  Future<void> _restorePlaybackOriginDetail() async {
+    final detail = _playbackOriginDetail;
+    if (detail == null || _restoringDetailDialog) return;
+    final site = _playbackOriginSite;
+    _playbackOriginDetail = null;
+    _playbackOriginSite = null;
+    _restoringDetailDialog = true;
+    try {
+      // 等播放器层先完成一次重建，避免与「隐藏播放器」抢同一帧
+      await Future<void>.delayed(Duration.zero);
+      if (!mounted) return;
+      _showDetailDialog(detail, site);
+    } finally {
+      _restoringDetailDialog = false;
+    }
+  }
+
+  /// 详情页选集播放（薄封装）：解析 → 记录 → 启动 → 建立播放会话。
+  /// 管线与播放内切集共用（顶层 `_startEpisodePlayback` / `_switchEpisode`）。
+  Future<void> _startPlayEpisode(VodItem item, EpisodeSelection selection,
+      {Site? targetSite}) async {
+    final result = await _startEpisodePlayback(
+      ref,
+      item: item,
+      sourceName: selection.sourceName,
+      episodes: selection.episodes,
+      index: selection.index,
+      targetSite: targetSite,
+      sources: selection.sources,
+      sourceIndex: selection.sourceIndex,
+    );
+    if (!mounted) return;
+    if (result.error != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(result.error!)));
+      return;
+    }
+    _showResumeHint(context, ref, result.resumeMatch);
+  }
+
+  /// 续播时重新解析选集；Spider 失败明确报错，CMS 保留历史直链兜底。
+  Future<void> _resumeHistoryRecord(HistoryRecord record) async {
+    final repo = ref.read(configRepositoryProvider);
+    Site? site;
+    if (record.siteKey != null && record.siteKey!.isNotEmpty) {
+      final matches =
+          repo.currentVodConfig.sites.where((s) => s.key == record.siteKey);
+      if (matches.isNotEmpty) site = matches.first;
+    }
+
+    if (site == null &&
+        record.episodeUrl.isNotEmpty &&
+        !(Uri.tryParse(record.episodeUrl)?.hasScheme ?? false)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('原站源已不可用，请重新导入配置后续播')),
+      );
+      return;
+    }
+
+    var playUrl = record.playUrl;
+    Map<String, String>? headers;
+    if (record.episodeUrl.isNotEmpty) {
+      try {
+        final resolved = await ref.read(siteApiProvider).resolvePlayback(
+              site,
+              id: record.episodeUrl,
+              flag: record.sourceName,
+              parses: repo.currentVodConfig.parses,
+              parseEngine: ref.read(parseEngineProvider),
+            );
+        if (resolved.url.isNotEmpty) {
+          playUrl = resolved.url;
+          headers = resolved.headers;
+        }
+      } catch (_) {
+        if (site?.usesCompanion ?? false) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('播放解析失败，请检查站源或解析配置')),
+            );
+          }
+          return;
+        }
+      }
+    }
+    if (!mounted) return;
+    if (playUrl.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('该记录缺少可用播放地址，无法续播')),
+        );
+      }
+      return;
+    }
+
+    final playSpec = MediaPlaySpec(
+      url: playUrl,
+      headers: headers ?? site?.header,
+      title: '${record.vodName} - ${record.episodeName} (${record.sourceName})',
+      startPosition: record.resumePosition,
+    );
+
+    // 置顶并刷新最近观看时间与最新直链，进度原样保留
+    unawaited(
+      repo.addHistory(
+        record.copyWith(
+          playUrl: playUrl,
+          timestamp: DateTime.now().millisecondsSinceEpoch,
+        ),
+      ),
+    );
+
+    // 历史续播不建立剧集会话；作废旧会话与自动换线状态，避免旧候选抢播放。
+    _playbackSessionEpoch++;
+    ref.read(activePlaybackSessionProvider.notifier).state = null;
+    ref.read(autoLineSwitchProvider).disarm();
+    await _launchPlayback(ref, playSpec, historyRecordId: record.id);
+  }
+
+  // --- 左侧 4 大核心功能弹窗 ---
+
+  void _showHistoryDialog() {
+    final repo = ref.read(configRepositoryProvider);
+
+    showDialog(
+      context: context,
+      // 经 Consumer 监听 historyProvider：删除 / 清空 / 进度更新后弹窗内容实时刷新
+      builder: (_) => Consumer(
+        builder: (_, dialogRef, __) => HistoryDialog(
+          records: dialogRef.watch(historyProvider),
+          onPlayRecord: _resumeHistoryRecord,
+          onDeleteRecord: (id) => repo.removeHistory(id),
+          onClearAll: () => repo.clearHistory(),
+        ),
+      ),
+    );
+  }
+
+  void _recordStartupEntry(StartupEntry entry) {
+    unawaited(ref.read(settingsRepositoryProvider).recordLastEntry(entry));
+  }
+
+  Future<void> _showLiveDialog() async {
+    final repo = ref.read(configRepositoryProvider);
+    final sourceUrl = repo.currentWindowConfig.lastConfigUrl;
+
+    _livePlaybackStartedInDialog = false;
+    _recordStartupEntry(StartupEntry.live);
+    await showDialog<void>(
+      context: context,
+      builder: (_) => Consumer(
+        builder: (_, dialogRef, __) => LiveChannelsDialog(
+          lives: dialogRef.watch(vodConfigProvider).lives,
+          repository: dialogRef.watch(liveRepositoryProvider),
+          epgRepository: dialogRef.watch(epgRepositoryProvider),
+          baseUri: sourceUrl == null ? null : Uri.tryParse(sourceUrl),
+          onPlayLive: _playLive,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    // 未启动频道播放的关闭视为回到点播主入口
+    if (!_livePlaybackStartedInDialog) _recordStartupEntry(StartupEntry.vod);
+    // 冷启动直播入口结束后，恢复被推迟的主视图加载
+    if (_startupLiveEntryPending) {
+      _startupLiveEntryPending = false;
+      loadSiteData();
+    }
+  }
+
+  Future<void> _playLive(Live live) async {
+    _livePlaybackStartedInDialog = true;
+    _recordStartupEntry(StartupEntry.live);
+    try {
+      await _launchPlayback(ref, MediaPlaySpec(
+        url: live.url,
+        headers: live.headers.isEmpty ? null : live.headers,
+        title: live.name,
+        isLive: true,
+      ));
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('直播播放失败，请检查地址或尝试其他频道')),
+        );
+      }
+    }
+  }
+
+  void _showPushDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => PushStreamDialog(
+        onPlayPush: (spec) => _launchPlayback(ref, spec),
+      ),
+    );
+  }
+
+  void _showFavoritesDialog() {
+    final repo = ref.read(configRepositoryProvider);
+    final favoritesList = ref.read(favoritesProvider);
+
+    showDialog(
+      context: context,
+      builder: (_) => FavoritesDialog(
+        items: favoritesList,
+        onItemTap: (item) => _onItemClicked(item),
+        onRemoveItem: (id) async {
+          try {
+            await repo.removeFavorite(id);
+            return null;
+          } on DataRestorePendingRestartException catch (error) {
+            return error.message;
+          } catch (_) {
+            return '收藏保存失败，请稍后重试';
+          }
+        },
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    ref.listen<Site?>(currentSiteProvider, (_, __) => _synchronizeSite());
+    ref.listen<VodConfig>(vodConfigProvider, (_, __) => _synchronizeSite());
+    ref.listen<MediaPlaySpec?>(activePlaySpecProvider, (previous, next) {
+      // 播放器关闭（返回主视图）：「上次入口」回到点播
+      if (previous != null && next == null) {
+        _recordStartupEntry(StartupEntry.vod);
+        _restorePlaybackOriginDetail();
+      }
+    });
+
+    final config = ref.watch(vodConfigProvider);
+    final searchPrefs = ref.watch(searchPreferencesProvider).valueOrNull ??
+        const SearchPreferences();
+
+    // 搜索态：由结果本地派生站点分组与筛选；非搜索态保持原分类内容。
+    final searchSiteGroups = _isSearching
+        ? groupSearchResultsBySite(_items)
+        : const <SearchSiteGroup>[];
+    final activeSearchSiteKey = _isSearching &&
+            _searchSiteGroupKey != null &&
+            searchSiteGroups.any((group) => group.key == _searchSiteGroupKey)
+        ? _searchSiteGroupKey
+        : null;
+    final visibleItems = _isSearching
+        ? filterSearchResultsBySite(_items, activeSearchSiteKey)
+        : _items;
+    final showSearchSiteAll = searchSiteGroups.length >= 2;
+
+    if (config.sites.isEmpty && config.lives.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                color: const Color(0xFF181820),
+                borderRadius: BorderRadius.circular(40),
+                border: Border.all(color: const Color(0xFF282834), width: 1.5),
+              ),
+              child: const Icon(Icons.tv_rounded,
+                  size: 42, color: Color(0xFFE50914)),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              '修狗TV',
+              style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                  letterSpacing: 0.5),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              '尚未加载影视配置，请添加 TVBox 影视配置订阅源',
+              style: TextStyle(fontSize: 13, color: Color(0xFF888898)),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFE50914),
+                foregroundColor: Colors.white,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8)),
+              ),
+              icon: const Icon(Icons.settings_outlined, size: 18),
+              label: const Text('立即配置影视源',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+              onPressed: () {
+                showConfigDialog(context, ref);
+              },
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _showLiveDialog,
+              icon: const Icon(Icons.live_tv_outlined, size: 18),
+              label: const Text('打开电视直播'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _showPushDialog,
+              icon: const Icon(Icons.send_outlined, size: 18),
+              label: const Text('打开直链推送'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ==================== 左侧导航面板 (历史 / 直播 / 推送 / 收藏) ====================
+          Container(
+            width: 140,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
+            decoration: BoxDecoration(
+              color: const Color(0xFF15151E),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: const Color(0xFF262634), width: 1.2),
+            ),
+            child: Column(
+              children: [
+                // 1. [ 历史 ] 按钮
+                _NavButton(
+                  title: '历史',
+                  icon: Icons.history_rounded,
+                  onTap: _showHistoryDialog,
+                ),
+                const SizedBox(height: 14),
+
+                // 2. [ 直播 ] 按钮
+                _NavButton(
+                  title: '直播',
+                  icon: Icons.live_tv_rounded,
+                  onTap: _showLiveDialog,
+                ),
+                const SizedBox(height: 14),
+
+                // 3. [ 推送 ] 按钮
+                _NavButton(
+                  title: '推送',
+                  icon: Icons.send_rounded,
+                  onTap: _showPushDialog,
+                ),
+                const SizedBox(height: 14),
+
+                // 4. [ 收藏 ] 按钮
+                _NavButton(
+                  title: '收藏',
+                  icon: Icons.star_rounded,
+                  onTap: _showFavoritesDialog,
+                ),
+
+                const Spacer(),
+
+                // 底部设置中心入口
+                MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: GestureDetector(
+                    onTap: () => openSettingsPage(ref),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          vertical: 8, horizontal: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E1E2A),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.settings_outlined,
+                              size: 14, color: Color(0xFF888898)),
+                          SizedBox(width: 4),
+                          Text('设置中心',
+                              style: TextStyle(
+                                  fontSize: 11, color: Color(0xFF888898))),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(width: 14),
+
+          // ==================== 右侧主内容区域 ====================
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 1. 顶部全宽搜索栏 [ 搜索 ] (支持全站聚合搜索)
+                Row(
+                  children: [
+                    Expanded(
+                      child: Container(
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF161620),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                              color: const Color(0xFF282836), width: 1.0),
+                        ),
+                        child: TextField(
+                          controller: _searchController,
+                          style: const TextStyle(
+                              fontSize: 13, color: Colors.white),
+                          textAlignVertical: TextAlignVertical.center,
+                          decoration: InputDecoration(
+                            isDense: true,
+                            hintText: searchPrefs.aggregate
+                                ? '搜索全网影片 (回车聚合检索所有站源)'
+                                : '搜索当前站源影片 (回车检索当前站源)',
+                            hintStyle: const TextStyle(
+                                fontSize: 13, color: Color(0xFF6E6E82)),
+                            prefixIcon: const Icon(Icons.search_rounded,
+                                size: 20, color: Color(0xFF808094)),
+                            suffixIcon: _searchController.text.isNotEmpty
+                                ? IconButton(
+                                    icon: const Icon(Icons.clear_rounded,
+                                        size: 18, color: Color(0xFF808094)),
+                                    onPressed: () {
+                                      _searchController.clear();
+                                      loadSiteData();
+                                    },
+                                  )
+                                : null,
+                            border: InputBorder.none,
+                            contentPadding:
+                                const EdgeInsets.symmetric(horizontal: 14),
+                          ),
+                          onSubmitted: _handleSearch,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    // 搜索执行按钮
+                    IconButton(
+                      icon: const Icon(Icons.search_rounded,
+                          size: 22, color: Color(0xFFE50914)),
+                      tooltip: searchPrefs.aggregate ? '聚合搜索' : '搜索当前站源',
+                      onPressed: () => _handleSearch(_searchController.text),
+                    ),
+                    // 刷新按钮
+                    IconButton(
+                      icon: const Icon(Icons.refresh_rounded,
+                          size: 22, color: Color(0xFFA0A0B4)),
+                      tooltip: '刷新内容',
+                      onPressed: () => loadSiteData(
+                          category: _selectedCategory,
+                          preserveCategories: true),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+
+                // 2. 搜索态：命中站点胶囊（站点名 + 数量）；否则：站源动态分类滚动条
+                if (_isSearching) ...[
+                  if (!_isLoading &&
+                      _errorMessage == null &&
+                      (searchSiteGroups.isNotEmpty || _searchPending)) ...[
+                    Container(
+                      height: 38,
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Listener(
+                        onPointerSignal: _handleSearchSiteBarPointerSignal,
+                        child: ListView.separated(
+                          key: const ValueKey('search-site-bar'),
+                          controller: _searchSiteScrollController,
+                          scrollDirection: Axis.horizontal,
+                          itemCount: searchSiteGroups.length +
+                              (showSearchSiteAll ? 1 : 0) +
+                              (_searchPending ? 1 : 0),
+                          separatorBuilder: (_, __) => const SizedBox(width: 8),
+                          itemBuilder: (context, index) {
+                          if (showSearchSiteAll && index == 0) {
+                            return _FilterPill(
+                              key: const ValueKey('search-site-pill-all'),
+                              label: '全部',
+                              count: _items.length,
+                              isSelected: activeSearchSiteKey == null,
+                              onTap: () =>
+                                  setState(() => _searchSiteGroupKey = null),
+                            );
+                          }
+                          final groupIndex =
+                              index - (showSearchSiteAll ? 1 : 0);
+                          if (groupIndex >= searchSiteGroups.length) {
+                            // 搜索中：尾部进度胶囊（不可点，完成后自动消失）
+                            return _SearchProgressPill(
+                              completed: _searchCompleted,
+                              total: _searchTotal,
+                            );
+                          }
+                          final group = searchSiteGroups[groupIndex];
+                          final isSelected = activeSearchSiteKey == group.key;
+                          return _FilterPill(
+                            key: ValueKey('search-site-pill-${group.key}'),
+                            label: group.name,
+                            count: group.count,
+                            isSelected: isSelected,
+                            onTap: () => setState(() {
+                              _searchSiteGroupKey =
+                                  isSelected ? null : group.key;
+                            }),
+                          );
+                        },
+                      ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                ] else if (_categories.isNotEmpty) ...[
+                  Container(
+                    height: 38,
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: ListView.separated(
+                      controller: _categoryScrollController,
+                      scrollDirection: Axis.horizontal,
+                      itemCount: _categories.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 8),
+                      itemBuilder: (context, index) {
+                        final cat = _categories[index];
+                        final isSelected = _selectedCategory?.id == cat.id;
+
+                        return _FilterPill(
+                          label: cat.name,
+                          isSelected: isSelected,
+                          onTap: () {
+                            _searchController.clear();
+                            loadSiteData(
+                                category: cat, preserveCategories: true);
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+
+                // 3. 影视海报瀑布流网格容器 (已按要求彻底删除 '豆瓣电影排行' 副标题，直接显示分类内容)
+                Expanded(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF121218),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                          color: const Color(0xFF242430), width: 1.0),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: _isLoading
+                        ? const Center(
+                            child: CircularProgressIndicator(
+                                color: Color(0xFFE50914)),
+                          )
+                        : _errorMessage != null
+                            ? Center(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.error_outline_rounded,
+                                        size: 36, color: Color(0xFFFF6B6B)),
+                                    const SizedBox(height: 10),
+                                    Text(_errorMessage!,
+                                        style: const TextStyle(
+                                            color: Color(0xFFFFB5BA),
+                                            fontSize: 13)),
+                                    const SizedBox(height: 16),
+                                    ElevatedButton(
+                                      style: ElevatedButton.styleFrom(
+                                          backgroundColor:
+                                              const Color(0xFFE50914)),
+                                      onPressed: () => _isSearching
+                                          ? _handleSearch(
+                                              _searchController.text)
+                                          : loadSiteData(
+                                              category: _selectedCategory,
+                                              preserveCategories: true),
+                                      child: const Text('重试',
+                                          style:
+                                              TextStyle(color: Colors.white)),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : visibleItems.isEmpty
+                                ? Center(
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          _isSearching
+                                              ? Icons.search_off_rounded
+                                              : Icons.inbox_rounded,
+                                          size: 40,
+                                          color: const Color(0xFF5A5A6C),
+                                        ),
+                                        const SizedBox(height: 10),
+                                        Text(
+                                          _searchNotice ??
+                                              (_isSearching
+                                                  ? (_searchPending
+                                                      ? (activeSearchSiteKey !=
+                                                              null
+                                                          ? '正在搜索…（该站点暂无结果）'
+                                                          : '正在搜索…（已返回 0 条）')
+                                                      : (searchPrefs.aggregate
+                                                          ? '未找到相关聚合搜索结果'
+                                                          : '未找到相关搜索结果'))
+                                                  : '当前分类下暂无内容'),
+                                          style: const TextStyle(
+                                              color: Color(0xFF888898),
+                                              fontSize: 13),
+                                        ),
+                                      ],
+                                    ),
+                                  )
+                                : (_isSearching &&
+                                        searchPrefs.display ==
+                                            SearchDisplay.list)
+                                    ? VodListView(
+                                        items: visibleItems,
+                                        onItemTap: _onItemClicked,
+                                      )
+                                    : VodGridView(
+                                        items: visibleItems,
+                                        onItemTap: _onItemClicked,
+                                      ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 左侧垂直导航按钮组件 [ 历史 / 直播 / 推送 / 收藏 ]
+class _NavButton extends StatefulWidget {
+  final String title;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  const _NavButton({
+    required this.title,
+    required this.icon,
+    required this.onTap,
+  });
+
+  @override
+  State<_NavButton> createState() => _NavButtonState();
+}
+
+class _NavButtonState extends State<_NavButton> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedScale(
+          scale: _isHovered ? 1.03 : 1.0,
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOutCubic,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 140),
+            width: double.infinity,
+            height: 72,
+            decoration: BoxDecoration(
+              color: _isHovered
+                  ? const Color(0xFF282838)
+                  : const Color(0xFF1D1D28),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: _isHovered
+                    ? const Color(0xFFE50914)
+                    : const Color(0xFF2E2E40),
+                width: _isHovered ? 1.5 : 1.0,
+              ),
+              boxShadow: _isHovered
+                  ? [
+                      BoxShadow(
+                        color: const Color(0xFFE50914).withAlpha(35),
+                        blurRadius: 10,
+                        offset: const Offset(0, 3),
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  widget.icon,
+                  size: 24,
+                  color: _isHovered
+                      ? const Color(0xFFE50914)
+                      : const Color(0xFFD0D0E0),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  widget.title,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: _isHovered ? Colors.white : const Color(0xFFD0D0DC),
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 筛选胶囊按钮 [ xxx ] / [ xxx 3 ]
+///
+/// 站源分类栏与搜索结果站点栏共用；[count] 非空时在名称右侧显示数量徽标。
+/// 搜索进行中的尾部进度胶囊（不可点，完成后自动消失）
+class _SearchProgressPill extends StatelessWidget {
+  const _SearchProgressPill({required this.completed, required this.total});
+
+  final int completed;
+  final int total;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = total > 0 ? '搜索中 $completed/$total' : '搜索中…';
+    return Container(
+      key: const ValueKey('search-progress-pill'),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1B1B24),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFF2A2A38), width: 1),
+      ),
+      alignment: Alignment.center,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(
+            width: 12,
+            height: 12,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: Color(0xFF888898),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: Color(0xFFB0B0C0),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FilterPill extends StatefulWidget {
+  final String label;
+  final int? count;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _FilterPill({
+    super.key,
+    required this.label,
+    this.count,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  State<_FilterPill> createState() => _FilterPillState();
+}
+
+class _FilterPillState extends State<_FilterPill> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final isSelected = widget.isSelected;
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? const Color(0xFFE50914)
+                : _isHovered
+                    ? const Color(0xFF282836)
+                    : const Color(0xFF1B1B24),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isSelected
+                  ? const Color(0xFFE50914)
+                  : _isHovered
+                      ? const Color(0xFF48485C)
+                      : const Color(0xFF2A2A38),
+              width: 1,
+            ),
+          ),
+          alignment: Alignment.center,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 220),
+                child: Text(
+                  widget.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                    color: isSelected
+                        ? Colors.white
+                        : _isHovered
+                            ? Colors.white
+                            : const Color(0xFFB0B0C0),
+                  ),
+                ),
+              ),
+              if (widget.count != null) ...[
+                const SizedBox(width: 6),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? Colors.white.withAlpha(46)
+                        : const Color(0xFF2A2A38),
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                  child: Text(
+                    '${widget.count}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: isSelected
+                          ? Colors.white
+                          : const Color(0xFFA0A0B4),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

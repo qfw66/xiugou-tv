@@ -1,0 +1,206 @@
+{
+  "note": "构建期依赖（javac classpath / 打包输入 / 运行时子进程）；各自保留上游许可。",
+  "count": 40,
+  "files": [
+    {
+      "path": "companion/lib/android-json-0.0.20131108.vaadin1.jar",
+      "bytes": 18279,
+      "sha256": "dfb7bae2f404cfe0b72b4d23944698cb716b7665171812a0a4d0f5926c0fac79"
+    },
+    {
+      "path": "companion/lib/asm-9.8.jar",
+      "bytes": 126113,
+      "sha256": "876eab6a83daecad5ca67eb9fcabb063c97b5aeb8cf1fca7a989ecde17522051"
+    },
+    {
+      "path": "companion/lib/asm-analysis-9.8.jar",
+      "bytes": 35151,
+      "sha256": "e640732fbcd3c6271925a504f125e38384688f4dfbbf92c8622dfcee0d09edb9"
+    },
+    {
+      "path": "companion/lib/asm-commons-9.8.jar",
+      "bytes": 73498,
+      "sha256": "3301a1c1cb4c59fcc5292648dac1d7c5aed4c0f067dfbe88873b8cdfe77404f4"
+    },
+    {
+      "path": "companion/lib/asm-tree-9.8.jar",
+      "bytes": 51934,
+      "sha256": "14b7880cb7c85eed101e2710432fc3ffb83275532a6a894dc4c4095d49ad59f1"
+    },
+    {
+      "path": "companion/lib/asm-util-9.8.jar",
+      "bytes": 94559,
+      "sha256": "8ba0460ecb28fd0e2980e5f3ef3433a513a457bc077f81a53bdc75b587a08d15"
+    },
+    {
+      "path": "companion/lib/collections-24.1.2.jar",
+      "bytes": 121973,
+      "sha256": "cb4046c0ca469961b93d6159f87ae17ff449847a3677ffdde59ba09091bf1d84"
+    },
+    {
+      "path": "companion/lib/dex-ir-2.4.31.jar",
+      "bytes": 231373,
+      "sha256": "bdfdf9edec3e3331771adbcfa44dcc92ec2b8f92f700d11c8519c0178d38ba5d"
+    },
+    {
+      "path": "companion/lib/dex-reader-2.4.31.jar",
+      "bytes": 68640,
+      "sha256": "0048b3823fc8472097e57620d62e77f2a1c792dda40aeb43f2af4804dea63da9"
+    },
+    {
+      "path": "companion/lib/dex-reader-api-2.4.31.jar",
+      "bytes": 74254,
+      "sha256": "5f91b005f401a58252a449dec1a805ad72fe7577c749f5cedc698ef153cd0554"
+    },
+    {
+      "path": "companion/lib/dex-translator-2.4.31.jar",
+      "bytes": 124255,
+      "sha256": "12aa34046cd1960f6466c96477a01f4a6aef031ba6f6f37eafa0a83f4c45d20a"
+    },
+    {
+      "path": "companion/lib/dex-writer-2.4.31.jar",
+      "bytes": 105480,
+      "sha256": "cd4344a16aab7e98d4415fd91ef0ff10c438398e9fa35a93f2957915eb41c7af"
+    },
+    {
+      "path": "companion/lib/gson-2.10.1.jar",
+      "bytes": 283367,
+      "sha256": "4241c14a7727c34feea6507ec801318a3d4a90f070e4525681079fb94ee4c593"
+    },
+    {
+      "path": "companion/lib/icu4j-24.1.2.jar",
+      "bytes": 17696710,
+      "sha256": "94edfff5952b411837699810afa1efb3b5254ffecb752df8e12646d24e557970"
+    },
+    {
+      "path": "companion/lib/js-language-24.1.2.jar",
+      "bytes": 26174568,
+      "sha256": "c5c8bc278119f818587ab07416717f10f855c43a6885ecf1e9c7cab70eb76b3c"
+    },
+    {
+      "path": "companion/lib/json-20231013.jar",
+      "bytes": 74702,
+      "sha256": "0f18192df289114e17aa1a0d0a7f8372cc9f5c7e4f7e39adcf8906fe714fa7d3"
+    },
+    {
+      "path": "companion/lib/jsoup-1.18.3.jar",
+      "bytes": 459202,
+      "sha256": "5be1ccd3228ae5fd6eed1bd6d827bac2bc65b91c20e9957d16ea65f739f15302"
+    },
+    {
+      "path": "companion/lib/nanohttpd-2.3.1.jar",
+      "bytes": 51211,
+      "sha256": "de864c47818157141a24c9acb36df0c47d7bf15b7ff48c90610f3eb4e5df0e58"
+    },
+    {
+      "path": "companion/lib/nativeimage-24.1.2.jar",
+      "bytes": 226628,
+      "sha256": "3ceb688a0f75009d14c2f4b2f624420347acd3df824550144ba8f02dd247fcdd"
+    },
+    {
+      "path": "companion/lib/okhttp-3.12.1.jar",
+      "bytes": 422787,
+      "sha256": "07c3d82ca7eaf4722f00b2da807dc7860f6169ae60cfedcf5d40218f90880a46"
+    },
+    {
+      "path": "companion/lib/okio-1.17.5.jar",
+      "bytes": 92326,
+      "sha256": "19a7ff48d86d3cf4497f7f250fbf295f430c13a528dd5b7b203f821802b886ad"
+    },
+    {
+      "path": "companion/lib/polyglot-24.1.2.jar",
+      "bytes": 479963,
+      "sha256": "6da3fe42a16a6d670c3458462df9a8b1f2198783e22819ffcb6f575ba19d5f6e"
+    },
+    {
+      "path": "companion/lib/regex-24.1.2.jar",
+      "bytes": 3565453,
+      "sha256": "f54d2e8c04e457e14ea7ecabacef355af14f9dfd25259326b64aa5cbc53afcbb"
+    },
+    {
+      "path": "companion/lib/truffle-api-24.1.2.jar",
+      "bytes": 12855659,
+      "sha256": "fd884a7c6b2f8a09bc1bace45d8af42dab02dca38e11c92f43e408b490bd60a3"
+    },
+    {
+      "path": "companion/libs/bcprov-jdk18on-1.78.1.jar",
+      "bytes": 8324412,
+      "sha256": "add5915e6acfc6ab5836e1fd8a5e21c6488536a8c1f21f386eeb3bf280b702d7"
+    },
+    {
+      "path": "companion/lib-unidbg/apk-parser-2.6.10.jar",
+      "bytes": 213647,
+      "sha256": "4e07ef65005c0d7e7149f6e903828fdaa031f542ad3956f0d827197a5ccac640"
+    },
+    {
+      "path": "companion/lib-unidbg/capstone-3.1.8.jar",
+      "bytes": 3159591,
+      "sha256": "920e5fd1d514f146891a82cfbbfb33ef20cfca746ddcd1a6e2b54fff2a2e53dc"
+    },
+    {
+      "path": "companion/lib-unidbg/commons-codec-1.21.0.jar",
+      "bytes": 402494,
+      "sha256": "4da851cb6abfb98bfe9eb77c5e5fc47f5414fa28b94e21b7fd9a646705dc167f"
+    },
+    {
+      "path": "companion/lib-unidbg/commons-collections4-4.5.0.jar",
+      "bytes": 898652,
+      "sha256": "00f93263c267be201b8ae521b44a7137271b16688435340bf629db1bac0a5845"
+    },
+    {
+      "path": "companion/lib-unidbg/commons-io-2.21.0.jar",
+      "bytes": 585274,
+      "sha256": "7d643a2afea8b058b762aa6fb90e5b256f6c729739f8b3784c3370ddc609e88d"
+    },
+    {
+      "path": "companion/lib-unidbg/demumble-1.0.4.jar",
+      "bytes": 968653,
+      "sha256": "2351bff06a0a494734924f4fa2e7084c0699d7e959a0be6e85e7d9ee17ae6eb6"
+    },
+    {
+      "path": "companion/lib-unidbg/fastjson-1.2.83.jar",
+      "bytes": 671701,
+      "sha256": "641a4d65ab32fbfdccd9c718e3f83ebc4caabdb5e4fe5b3d51527c5fe692631d"
+    },
+    {
+      "path": "companion/lib-unidbg/jna-5.14.0.jar",
+      "bytes": 1878533,
+      "sha256": "34ed1e1f27fa896bca50dbc4e99cf3732967cec387a7a0d5e3486c09673fe8c6"
+    },
+    {
+      "path": "companion/lib-unidbg/jna-platform-5.14.0.jar",
+      "bytes": 1369287,
+      "sha256": "ae4caceb3840730c2537f9b7fb55a01baba580286b4122951488bcee558c2449"
+    },
+    {
+      "path": "companion/lib-unidbg/keystone-0.9.7.jar",
+      "bytes": 4731494,
+      "sha256": "3db2ee22fa5b3a70800bc5dfb515acf6bcb62888be0da43c311ff8304411558b"
+    },
+    {
+      "path": "companion/lib-unidbg/slf4j-api-2.0.16.jar",
+      "bytes": 69435,
+      "sha256": "a12578dde1ba00bd9b816d388a0b879928d00bab3c83c240f7013bf4196c579a"
+    },
+    {
+      "path": "companion/lib-unidbg/slf4j-simple-2.0.16.jar",
+      "bytes": 15704,
+      "sha256": "effc32018658bea09d1e08c7d1060ccad46c086960f583d07dd7ffe9c1172a47"
+    },
+    {
+      "path": "companion/lib-unidbg/unicorn-1.0.15.jar",
+      "bytes": 6193524,
+      "sha256": "7fbce2a0decf475b75b355cf33301349bf7c88f31cd93c7922e9dbbed3debf23"
+    },
+    {
+      "path": "companion/lib-unidbg/unidbg-android-0.9.9.jar",
+      "bytes": 6128061,
+      "sha256": "ce52ddda7772ac79adb4606dbaf0a65c53c41af96e73299a98eadec608f270fc"
+    },
+    {
+      "path": "companion/lib-unidbg/unidbg-api-0.9.9.jar",
+      "bytes": 418830,
+      "sha256": "422a2d93c4f22de8436867415fc34bdacbdc62de351b828a0672651344c46efe"
+    }
+  ]
+}
