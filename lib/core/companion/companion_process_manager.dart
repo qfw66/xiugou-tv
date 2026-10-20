@@ -87,6 +87,58 @@ class CompanionProcessManager {
   String? get resolvedJavaPath => _resolvedJavaPath;
   String get baseUrl => isRunning ? 'http://127.0.0.1:$_port' : '';
 
+  /// companion-service.jar 由 companion/build.ps1 用构建机 JDK 直接编译（未加 --release），
+  /// 当前基线 JDK 21 → class 文件主版本 65；低于该版本的 JRE 启动即抛
+  /// UnsupportedClassVersionError。回退链路必须过版本闸门，否则会选中本机 JDK 8。
+  static const int minimumJavaMajorVersion = 21;
+
+  /// 候选 Java 可执行文件路径（按优先级）。
+  /// 绝对路径来源（%APPDATA%、JAVA_HOME）显式独立成项：不把"p.join 遇到绝对路径会重置"
+  /// 这种库实现细节当成契约，也便于单测直接断言候选顺序。
+  static List<String> javaCandidates({
+    required String applicationDirectory,
+    required String workingDirectory,
+    required String javaExe,
+    String? appData,
+    String? javaHome,
+  }) {
+    return [
+      p.join(applicationDirectory, 'runtime/jre/bin/$javaExe'),
+      p.join(applicationDirectory, 'jre/bin/$javaExe'),
+      p.join(applicationDirectory, 'data/jre/bin/$javaExe'),
+      p.join(workingDirectory, 'runtime/jre/bin/$javaExe'),
+      p.join(workingDirectory, 'jre/bin/$javaExe'),
+      p.join(workingDirectory, 'companion/runtime/jre/bin/$javaExe'),
+      if (appData != null && appData.isNotEmpty)
+        p.join(appData, 'XiugouTV/runtime/jre/bin/$javaExe'),
+      if (javaHome != null && javaHome.isNotEmpty)
+        p.join(javaHome, 'bin/$javaExe'),
+    ];
+  }
+
+  /// 解析 `java -version` 输出里的主版本号，识别不出返回 null。
+  /// 兼容旧命名 `java version "1.8.0_281"`（主版本在第二段）与现代 `"21.0.6"`。
+  static int? parseJavaMajorVersion(String output) {
+    final match = RegExp(r'version\s+"(\d+)(?:\.(\d+))?').firstMatch(output);
+    if (match == null) return null;
+    final first = int.tryParse(match.group(1) ?? '');
+    if (first == null) return null;
+    if (first != 1) return first;
+    return int.tryParse(match.group(2) ?? '') ?? first;
+  }
+
+  /// 探测 Java 可执行文件的主版本；不可执行或输出无法识别时返回 null。
+  Future<int?> _probeJavaMajorVersion(String executable) async {
+    try {
+      final result = await Process.run(executable, ['-version']);
+      // `java -version` 把版本信息写到 stderr（stdout 为空），两路都看。
+      final output = '${result.stdout}\n${result.stderr}';
+      return parseJavaMajorVersion(output);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 多级探测可用的 Java 可执行文件路径
   /// 优先级:
   /// 1. 可执行文件目录: runtime/jre、jre、data/jre
@@ -94,41 +146,35 @@ class CompanionProcessManager {
   /// 3. AppData 持久化目录: %APPDATA%/XiugouTV/runtime/jre/bin/java.exe
   /// 4. 环境变量: JAVA_HOME/bin/java.exe
   /// 5. 系统 PATH: java
+  /// 所有候选都要过 [minimumJavaMajorVersion] 版本闸门。
   Future<String?> resolveJavaExecutable() async {
     if (_javaResolver != null) return _javaResolver();
     final isWindows = Platform.isWindows;
     final javaExe = isWindows ? 'java.exe' : 'java';
 
-    final workingDirectory = Directory.current.path;
-    final appData = isWindows ? Platform.environment['APPDATA'] : null;
-    final javaHome = Platform.environment['JAVA_HOME'];
-    final candidates = [
-      p.join(_applicationDirectory, 'runtime/jre/bin/$javaExe'),
-      p.join(_applicationDirectory, 'jre/bin/$javaExe'),
-      p.join(_applicationDirectory, 'data/jre/bin/$javaExe'),
-      p.join(workingDirectory, 'runtime/jre/bin/$javaExe'),
-      p.join(workingDirectory, 'jre/bin/$javaExe'),
-      p.join(workingDirectory, 'companion/runtime/jre/bin/$javaExe'),
-      if (appData != null && appData.isNotEmpty)
-        p.join(workingDirectory, appData, 'XiugouTV/runtime/jre/bin/$javaExe'),
-      if (javaHome != null && javaHome.isNotEmpty)
-        p.join(workingDirectory, javaHome, 'bin/$javaExe'),
-    ];
+    final candidates = javaCandidates(
+      applicationDirectory: _applicationDirectory,
+      workingDirectory: Directory.current.path,
+      javaExe: javaExe,
+      appData: isWindows ? Platform.environment['APPDATA'] : null,
+      javaHome: Platform.environment['JAVA_HOME'],
+    );
+    final probed = <String>{};
     for (final candidate in candidates) {
       final absolutePath = p.normalize(candidate);
-      if (File(absolutePath).existsSync()) {
-        _resolvedJavaPath = absolutePath;
-        return _resolvedJavaPath;
-      }
+      if (!probed.add(absolutePath)) continue;
+      if (!File(absolutePath).existsSync()) continue;
+      final major = await _probeJavaMajorVersion(absolutePath);
+      if (major == null || major < minimumJavaMajorVersion) continue;
+      _resolvedJavaPath = absolutePath;
+      return _resolvedJavaPath;
     }
 
-    try {
-      final res = await Process.run('java', ['-version']);
-      if (res.exitCode == 0) {
-        _resolvedJavaPath = 'java';
-        return 'java';
-      }
-    } catch (_) {}
+    final pathMajor = await _probeJavaMajorVersion('java');
+    if (pathMajor != null && pathMajor >= minimumJavaMajorVersion) {
+      _resolvedJavaPath = 'java';
+      return 'java';
+    }
 
     _resolvedJavaPath = null;
     return null;
@@ -178,7 +224,8 @@ class CompanionProcessManager {
       if (javaCmd == null) {
         _status = CompanionStatus.unsupported;
         _lastError =
-            'Java Runtime Environment (JRE) not found in runtime/jre, APPDATA, JAVA_HOME or PATH.';
+            'Java Runtime Environment (JRE) >= $minimumJavaMajorVersion '
+            'not found in runtime/jre, APPDATA, JAVA_HOME or PATH.';
         return false;
       }
       if (!File(resolvedJar).existsSync()) {

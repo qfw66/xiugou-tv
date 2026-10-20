@@ -32,8 +32,9 @@ SetupIconFile=..\windows\runner\resources\app_icon.ico
 UninstallDisplayIcon={app}\xiugou_tv.exe
 
 [Languages]
-Name: "chinesesimp"; MessagesFile: "compiler:Default.isl"
-Name: "english"; MessagesFile: "compiler:Languages\English.isl"
+; Inno Setup 6 自带英文消息文件为安装根目录的 Default.isl；Languages\ 目录只放第三方语言包，
+; 没有 English.isl。若日后需要中文向导，把 ChineseSimplified.isl 放进仓库再追加一项。
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

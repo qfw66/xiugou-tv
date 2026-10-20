@@ -19,6 +19,15 @@ if (!(Test-Path $distDir)) {
 }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
+# invariant: dist 里只允许存在一份正式产物 companion-service.jar。
+# jar 先写成 companion-service-<guid>.jar 再改名，构建被中断就会留下 ~36 MB 的孤儿文件；
+# 这些残渣随后会被打包步骤整目录带进发布包（曾把便携包撑到 684 MB），所以每次构建先清场。
+Get-ChildItem -LiteralPath $distDir -Filter 'companion-service-*.jar' -File -ErrorAction SilentlyContinue |
+    ForEach-Object {
+        Remove-Item -LiteralPath $_.FullName -Force
+        Write-Host "Removed stale pending jar: $($_.Name)"
+    }
+
 $compileJars = @()
 $compileJars += Get-ChildItem -Path $libDir -Filter "*.jar" -ErrorAction SilentlyContinue
 if (Test-Path $unidbgDir) {
@@ -108,19 +117,26 @@ $manifestFile = Join-Path $outDir "MANIFEST.MF"
 [System.IO.File]::WriteAllText($manifestFile, $manifestContent, [System.Text.Encoding]::ASCII)
 
 # invariant: 只发布本次 jar 命令的新文件，失败时保留上一份可用 JAR。
+# pending jar 放在同一磁盘的 dist 下，Move-Item 才是原子改名；try/finally 保证异常路径也不留残渣。
 $pendingJarPath = Join-Path $distDir ("companion-service-" + [Guid]::NewGuid().ToString('N') + ".jar")
-& jar cfm $pendingJarPath $manifestFile -C $outDir .
-if ($LASTEXITCODE -ne 0) {
-    throw "jar failed with exit code $LASTEXITCODE"
-}
+try {
+    & jar cfm $pendingJarPath $manifestFile -C $outDir .
+    if ($LASTEXITCODE -ne 0) {
+        throw "jar failed with exit code $LASTEXITCODE"
+    }
 
-if (-not (Test-Path -LiteralPath $pendingJarPath -PathType Leaf)) {
-    throw "Failed to produce $pendingJarPath"
+    if (-not (Test-Path -LiteralPath $pendingJarPath -PathType Leaf)) {
+        throw "Failed to produce $pendingJarPath"
+    }
+    if ((Get-Item -LiteralPath $pendingJarPath).Length -eq 0) {
+        throw "Produced an empty JAR: $pendingJarPath"
+    }
+    Move-Item -LiteralPath $pendingJarPath -Destination $jarPath -Force
+} finally {
+    if (Test-Path -LiteralPath $pendingJarPath) {
+        Remove-Item -LiteralPath $pendingJarPath -Force -ErrorAction SilentlyContinue
+    }
 }
-if ((Get-Item -LiteralPath $pendingJarPath).Length -eq 0) {
-    throw "Produced an empty JAR: $pendingJarPath"
-}
-Move-Item -LiteralPath $pendingJarPath -Destination $jarPath -Force
 
 # 复制运行时依赖（如 BouncyCastle）：需保持独立 jar（签名保留），与主 jar 并列
 $libsDir = Join-Path $scriptDir "libs"

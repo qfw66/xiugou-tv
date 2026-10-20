@@ -190,10 +190,44 @@ if (-not (Test-Path -LiteralPath $CompanionDist -PathType Leaf)) {
 if ((Get-Item -LiteralPath $CompanionDist).Length -eq 0) {
     throw "Companion JAR is empty: $CompanionDist"
 }
-$TargetCompanionDir = Join-Path $BuildOutputDir "companion/dist"
+$TargetCompanionRoot = Join-Path $BuildOutputDir "companion"
+$TargetCompanionDir = Join-Path $TargetCompanionRoot "dist"
+# invariant: 每次构建都从源目录重建 companion/dist，发布包里不允许出现上一轮的残留文件。
+# 只覆盖单个 jar 会把旧的 companion-service-<guid>.jar（每个 ~36 MB）、旧依赖一并留在原地，
+# 随后被 Compress-Archive 整包带走——684 MB 的便携包就是这么来的。
+$BuildOutputFull = [System.IO.Path]::GetFullPath($BuildOutputDir) + [System.IO.Path]::DirectorySeparatorChar
+$TargetCompanionRootFull = [System.IO.Path]::GetFullPath($TargetCompanionRoot)
+if (-not $TargetCompanionRootFull.StartsWith($BuildOutputFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Companion cleanup target is outside the release directory: $TargetCompanionRootFull"
+}
+if (Test-Path -LiteralPath $TargetCompanionRoot) {
+    Remove-Item -LiteralPath $TargetCompanionRoot -Recurse -Force
+}
 New-Item -ItemType Directory -Path $TargetCompanionDir -Force | Out-Null
 Copy-Item -LiteralPath $CompanionDist -Destination $TargetCompanionDir -Force
-Write-Host "  [+] Bundled companion-service.jar to release directory." -ForegroundColor Green
+
+# 运行时依赖必须与 companion-service.jar 同级：AndroidBridge 按 jar 同目录找 BouncyCastle，
+# GuardPayloadProvisioner 按 dist/lib-unidbg 找解密依赖。缺任何一个都会让发布包在下游静默降级。
+$CompanionLibsDir = Join-Path $ProjectRoot "companion/libs"
+$CompanionLibJars = @(Get-ChildItem -LiteralPath $CompanionLibsDir -Filter "*.jar" -File -ErrorAction SilentlyContinue)
+if ($CompanionLibJars.Count -eq 0) {
+    throw "No runtime library JARs found: $CompanionLibsDir (AndroidBridge requires BouncyCastle beside the service JAR)."
+}
+$CompanionUnidbgDir = Join-Path $ProjectRoot "companion/lib-unidbg"
+$CompanionUnidbgJars = @(Get-ChildItem -LiteralPath $CompanionUnidbgDir -Filter "*.jar" -File -ErrorAction SilentlyContinue)
+if ($CompanionUnidbgJars.Count -eq 0) {
+    throw "No guard-decrypt JARs found: $CompanionUnidbgDir (guard sites would silently fall back to SpiderNull)."
+}
+foreach ($lib in $CompanionLibJars) {
+    Copy-Item -LiteralPath $lib.FullName -Destination $TargetCompanionDir -Force
+}
+$TargetUnidbgDir = Join-Path $TargetCompanionDir "lib-unidbg"
+New-Item -ItemType Directory -Path $TargetUnidbgDir -Force | Out-Null
+foreach ($lib in $CompanionUnidbgJars) {
+    Copy-Item -LiteralPath $lib.FullName -Destination $TargetUnidbgDir -Force
+}
+$BundledCompanionFiles = @(Get-ChildItem -LiteralPath $TargetCompanionDir -Recurse -File)
+Write-Host "  [+] Bundled companion-service.jar + $($CompanionLibJars.Count) runtime lib(s) + $($CompanionUnidbgJars.Count) guard-decrypt lib(s) ($($BundledCompanionFiles.Count) files total)." -ForegroundColor Green
 
 Write-Host "  [*] Bundling embedded minimal JRE..." -ForegroundColor Cyan
 $TargetRuntimeDir = [System.IO.Path]::GetFullPath((Join-Path $BuildOutputDir "runtime"))
@@ -287,7 +321,10 @@ if ($Artifacts.Count -gt 0) {
         $hash = (Get-FileHash -LiteralPath $published -Algorithm SHA256).Hash.ToLowerInvariant()
         "$hash  $name"
     }
-    Set-Content -LiteralPath $SumsPath -Value $Sums -Encoding ascii
+    # invariant: 清单必须是 LF 换行，标准 `sha256sum -c` 才能直接消费；
+    # Set-Content 在 Windows PowerShell 下写 CRLF，会把 \r 混进文件名。
+    $SumsText = (($Sums -join "`n") + "`n")
+    [System.IO.File]::WriteAllText($SumsPath, $SumsText, [System.Text.Encoding]::ASCII)
     Write-Host "  [+] Published checksums: $SumsPath" -ForegroundColor Green
 }
 if ($Artifacts.Count -eq 0) {
