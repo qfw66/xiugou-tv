@@ -97,7 +97,16 @@
 
 <p align="center">主题与壁纸、播放器、数据目录、站点自检与备份恢复集中在这里。</p>
 
-## 上游来源与致谢
+## 特别鸣谢
+
+<p align="center">
+  <img src="assets/icons/linuxdo.png" width="256" alt="LINUXDO社区">
+</p>
+<p align="center">
+  <strong>感谢 LinuxDo 社区的支持！祝社区越来越好！</strong>
+</p>
+
+## 上游来源
 
 本项目的产品形态与交互参考了 FongMi 系列（[FongMi/TV](https://github.com/FongMi/TV)）以及 TVBox / CatVod 生态的既有实现，解析层遵循 CatVod spider 契约，以便直接运行既有插件。感谢这些项目及其贡献者长期的开源工作。
 
