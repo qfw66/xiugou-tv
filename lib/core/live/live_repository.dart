@@ -20,6 +20,7 @@ class LiveRepository {
   Future<void>? _initializing;
   Future<void> _writeQueue = Future.value();
   String? _storageWarning;
+  String? _lastChannelKey;
   var _sequence = 0;
   var _disposed = false;
 
@@ -34,7 +35,46 @@ class LiveRepository {
 
   List<LiveSource> get sources => List.unmodifiable(_sources);
 
-  Future<void> _initialize() => _initializing ??= _readSources();
+  /// 「上次直播频道」的 key（需先走 [loadLastChannelKey] 或任一初始化路径）。
+  String? get lastChannelKey => _lastChannelKey;
+
+  /// 读取上次直播频道 key（确保初始化完成；无记录时为 null）。
+  Future<String?> loadLastChannelKey() async {
+    await _initialize();
+    return _lastChannelKey;
+  }
+
+  /// 记录上次直播频道 key（null / 空串 = 清除）；写入与直播源共用同一队列，
+  /// 原子替换、失败不破坏旧文件。数据恢复后的锁定期间静默跳过（纯体验信息）。
+  Future<void> saveLastChannelKey(String? key) {
+    final value = _nonEmpty(key);
+    final future = _writeQueue.catchError((_) {}).then((_) async {
+      if (_disposed) throw StateError('直播源仓库已关闭');
+      await _initialize();
+      if (dataRestorePendingRestart) return;
+      final directory = await _storage.getStorageDirectory();
+      final file = File(p.join(directory.path, 'live_last.json'));
+      final temp = File('${file.path}.tmp-${++_sequence}');
+      try {
+        await temp.writeAsString(jsonEncode({'lastChannelKey': value}),
+            flush: true);
+        await temp.rename(file.path);
+      } finally {
+        if (await temp.exists()) await temp.delete();
+      }
+      _lastChannelKey = value;
+    });
+    _writeQueue = future;
+    return future;
+  }
+
+  Future<void> _initialize() => _initializing ??= _readStorage();
+
+  /// 读取落盘状态：直播源 + 上次频道（两者互相独立，互不因对方损坏而失败）。
+  Future<void> _readStorage() async {
+    await _readSources();
+    await _readLastChannelKey();
+  }
 
   Future<void> _readSources() async {
     try {
@@ -49,6 +89,20 @@ class LiveRepository {
           .where((source) => source.id.isNotEmpty));
     } catch (_) {
       _storageWarning = '自定义直播源缓存无法读取，可重新导入；点播数据未受影响';
+    }
+  }
+
+  /// 读取「上次直播频道」（live_last.json）；纯体验信息，损坏时静默回退。
+  Future<void> _readLastChannelKey() async {
+    try {
+      final directory = await _storage.getStorageDirectory();
+      final file = File(p.join(directory.path, 'live_last.json'));
+      if (!await file.exists()) return;
+      final raw = jsonDecode(await file.readAsString());
+      if (raw is! Map) return;
+      _lastChannelKey = _nonEmpty(raw['lastChannelKey']?.toString());
+    } catch (_) {
+      // 读失败按「没有上次频道」处理，不影响其他直播功能。
     }
   }
 

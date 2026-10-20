@@ -277,6 +277,19 @@ foreach ($artifact in $Artifacts) {
     Move-Item -LiteralPath $artifact -Destination $destination -Force
     Write-Host "  [+] Published artifact: $destination" -ForegroundColor Green
 }
+# 客户端强制校验：Release 必须带 SHA256SUMS（或资产自带 digest），
+# 否则「检测更新」会拒绝安装。格式与 sha256sum 一致：<hex>  <filename>。
+if ($Artifacts.Count -gt 0) {
+    $SumsPath = Join-Path $DistDir "SHA256SUMS"
+    $Sums = foreach ($artifact in $Artifacts) {
+        $name = [System.IO.Path]::GetFileName($artifact)
+        $published = Join-Path $DistDir $name
+        $hash = (Get-FileHash -LiteralPath $published -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$hash  $name"
+    }
+    Set-Content -LiteralPath $SumsPath -Value $Sums -Encoding ascii
+    Write-Host "  [+] Published checksums: $SumsPath" -ForegroundColor Green
+}
 if ($Artifacts.Count -eq 0) {
     Write-Host "  [*] Release bundled only; no distribution artifacts requested." -ForegroundColor Yellow
 }

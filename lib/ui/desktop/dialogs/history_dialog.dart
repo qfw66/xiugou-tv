@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import '../../../core/config/models/history_record.dart';
+import '../../theme/app_palette.dart';
+import '../../theme/app_tokens.dart';
+import '../widgets/focus_ring.dart';
 import 'history_sections.dart';
 
 /// 播放历史记录弹窗
@@ -38,11 +41,12 @@ class HistoryDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     return Dialog(
-      backgroundColor: const Color(0xFF181820),
+      backgroundColor: palette.panel,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: Color(0xFF2E2E3C), width: 1),
+        borderRadius: BorderRadius.circular(AppRadii.lg),
+        side: BorderSide(color: palette.borderStrong, width: 1),
       ),
       child: Container(
         width: 760,
@@ -57,64 +61,96 @@ class HistoryDialog extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF282834),
-                    borderRadius: BorderRadius.circular(10),
+                    color: palette.raised,
+                    borderRadius: BorderRadius.circular(AppRadii.md),
                   ),
-                  child: const Icon(Icons.history_rounded, color: Color(0xFFE50914), size: 20),
+                  child: Icon(Icons.history_rounded,
+                      color: palette.accentInk, size: 20),
                 ),
                 const SizedBox(width: 12),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
+                    Text(
                       '播放历史',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+                      style: TextStyle(
+                          fontSize: AppType.h2,
+                          fontWeight: FontWeight.bold,
+                          color: palette.textTitle),
                     ),
                     Text(
                       '共 ${records.length} 条观看记录',
-                      style: const TextStyle(fontSize: 12, color: Color(0xFF888898)),
+                      style: TextStyle(
+                          fontSize: AppType.body, color: palette.textSub),
                     ),
                   ],
                 ),
                 const Spacer(),
                 if (records.isNotEmpty)
-                  TextButton.icon(
-                    style: TextButton.styleFrom(
-                      foregroundColor: const Color(0xFFFF6B6B),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  FocusOutline(
+                    radius: AppRadii.pill,
+                    child: TextButton.icon(
+                      style: TextButton.styleFrom(
+                        foregroundColor: palette.danger,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                      ),
+                      icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                      label: const Text('清空历史',
+                          style: TextStyle(fontSize: AppType.label)),
+                      onPressed: () {
+                        showDialog(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            backgroundColor: palette.card,
+                            title: Text('清空播放历史',
+                                style: TextStyle(
+                                    color: palette.textTitle,
+                                    fontSize: AppType.heading)),
+                            content: Text('确定要清空所有播放历史记录吗？',
+                                style: TextStyle(
+                                    color: palette.textBody,
+                                    fontSize: AppType.label)),
+                            actions: [
+                              FocusOutline(
+                                radius: AppRadii.pill,
+                                child: TextButton(
+                                  onPressed: () => Navigator.of(ctx).pop(),
+                                  child: Text('取消',
+                                      style: TextStyle(color: palette.textSub)),
+                                ),
+                              ),
+                              FocusOutline(
+                                radius: AppRadii.pill,
+                                child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: palette.accent,
+                                    // 品牌底上必须显式前景 onPrimary：M3 默认前景是 primary=品牌色，会同色不可见
+                                    foregroundColor:
+                                        Theme.of(context).colorScheme.onPrimary,
+                                  ),
+                                  onPressed: () {
+                                    Navigator.of(ctx).pop();
+                                    onClearAll();
+                                  },
+                                  child: const Text('确定清空'),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
                     ),
-                    icon: const Icon(Icons.delete_sweep_outlined, size: 18),
-                    label: const Text('清空历史', style: TextStyle(fontSize: 13)),
-                    onPressed: () {
-                      showDialog(
-                        context: context,
-                        builder: (ctx) => AlertDialog(
-                          backgroundColor: const Color(0xFF22222C),
-                          title: const Text('清空播放历史', style: TextStyle(color: Colors.white, fontSize: 16)),
-                          content: const Text('确定要清空所有播放历史记录吗？', style: TextStyle(color: Color(0xFFB0B0C0), fontSize: 13)),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.of(ctx).pop(),
-                              child: const Text('取消', style: TextStyle(color: Color(0xFF888898))),
-                            ),
-                            ElevatedButton(
-                              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFE50914)),
-                              onPressed: () {
-                                Navigator.of(ctx).pop();
-                                onClearAll();
-                              },
-                              child: const Text('确定清空', style: TextStyle(color: Colors.white)),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
                   ),
                 const SizedBox(width: 8),
-                IconButton(
-                  icon: const Icon(Icons.close_rounded, color: Color(0xFFA0A0B0), size: 22),
-                  onPressed: () => Navigator.of(context).pop(),
-                  tooltip: '关闭',
+                FocusOutline(
+                  radius: AppRadii.pill,
+                  child: IconButton(
+                    icon: Icon(Icons.close_rounded,
+                        color: palette.textBody, size: 22),
+                    onPressed: () => Navigator.of(context).pop(),
+                    tooltip: '关闭',
+                  ),
                 ),
               ],
             ),
@@ -131,13 +167,18 @@ class HistoryDialog extends StatelessWidget {
                             width: 64,
                             height: 64,
                             decoration: BoxDecoration(
-                              color: const Color(0xFF22222E),
-                              borderRadius: BorderRadius.circular(32),
+                              color: palette.card,
+                              borderRadius:
+                                  BorderRadius.circular(AppRadii.pill),
                             ),
-                            child: const Icon(Icons.history_toggle_off_rounded, size: 36, color: Color(0xFF5A5A6E)),
+                            child: Icon(Icons.history_toggle_off_rounded,
+                                size: 36, color: palette.textDim),
                           ),
                           const SizedBox(height: 12),
-                          const Text('暂无播放历史记录', style: TextStyle(color: Color(0xFF888898), fontSize: 14)),
+                          Text('暂无播放历史记录',
+                              style: TextStyle(
+                                  color: palette.textSub,
+                                  fontSize: AppType.title)),
                         ],
                       ),
                     )
@@ -154,7 +195,8 @@ class HistoryDialog extends StatelessWidget {
     final sections = groupHistoryRecords(records, now: now);
     final rows = <Widget>[];
     for (final section in sections) {
-      rows.add(_SectionHeader(title: section.title, count: section.records.length));
+      rows.add(
+          _SectionHeader(title: section.title, count: section.records.length));
       for (final record in section.records) {
         rows.add(
           Padding(
@@ -186,6 +228,7 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     return Padding(
       padding: const EdgeInsets.only(top: 4, bottom: 8),
       child: Row(
@@ -194,19 +237,22 @@ class _SectionHeader extends StatelessWidget {
             width: 3,
             height: 14,
             decoration: BoxDecoration(
-              color: const Color(0xFFE50914),
-              borderRadius: BorderRadius.circular(2),
+              color: palette.accentInk,
+              borderRadius: BorderRadius.circular(AppRadii.hairline),
             ),
           ),
           const SizedBox(width: 8),
           Text(
             title,
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Color(0xFFD0D0DC)),
+            style: TextStyle(
+                fontSize: AppType.label,
+                fontWeight: FontWeight.bold,
+                color: palette.textMain),
           ),
           const SizedBox(width: 6),
           Text(
             '$count',
-            style: const TextStyle(fontSize: 11, color: Color(0xFF6E6E80)),
+            style: TextStyle(fontSize: AppType.caption, color: palette.textDim),
           ),
         ],
       ),
@@ -236,18 +282,21 @@ class _HistoryCardState extends State<_HistoryCard> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     final record = widget.record;
 
     return MouseRegion(
       onEnter: (_) => setState(() => _isHovered = true),
       onExit: (_) => setState(() => _isHovered = false),
-      child: Container(
+      child: AnimatedContainer(
+        // 进 200 / 出 140（B4 与全站统一）
+        duration: _isHovered ? AppMotion.enter : AppMotion.exit,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
-          color: _isHovered ? const Color(0xFF22222E) : const Color(0xFF1B1B24),
-          borderRadius: BorderRadius.circular(10),
+          color: _isHovered ? palette.hover : palette.card,
+          borderRadius: BorderRadius.circular(AppRadii.md),
           border: Border.all(
-            color: _isHovered ? const Color(0xFF3E3E52) : const Color(0xFF262634),
+            color: _isHovered ? palette.borderStrong : palette.border,
             width: 1,
           ),
         ),
@@ -255,17 +304,20 @@ class _HistoryCardState extends State<_HistoryCard> {
           children: [
             // 封面海报
             ClipRRect(
-              borderRadius: BorderRadius.circular(6),
+              borderRadius: BorderRadius.circular(AppRadii.sm),
               child: Image.network(
                 record.vodPic,
+                // ⑥ 内存批：44px 海报 ×2 DPR（与频道台标同口径 96）。
+                cacheWidth: 96,
                 width: 44,
                 height: 60,
                 fit: BoxFit.cover,
                 errorBuilder: (_, __, ___) => Container(
                   width: 44,
                   height: 60,
-                  color: const Color(0xFF2A2A38),
-                  child: const Icon(Icons.movie_outlined, color: Color(0xFF686878), size: 20),
+                  color: palette.raised,
+                  child: Icon(Icons.movie_outlined,
+                      color: palette.textDim, size: 20),
                 ),
               ),
             ),
@@ -278,10 +330,10 @@ class _HistoryCardState extends State<_HistoryCard> {
                 children: [
                   Text(
                     record.vodName,
-                    style: const TextStyle(
-                      fontSize: 14,
+                    style: TextStyle(
+                      fontSize: AppType.title,
                       fontWeight: FontWeight.bold,
-                      color: Colors.white,
+                      color: palette.textTitle,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -290,27 +342,35 @@ class _HistoryCardState extends State<_HistoryCard> {
                   Row(
                     children: [
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF2C2C3C),
-                          borderRadius: BorderRadius.circular(4),
+                          color: palette.raised,
+                          borderRadius: BorderRadius.circular(AppRadii.xs),
                         ),
                         child: Text(
                           record.episodeName,
-                          style: const TextStyle(fontSize: 11, color: Color(0xFFE50914), fontWeight: FontWeight.bold),
+                          style: TextStyle(
+                              fontSize: AppType.caption,
+                              color: palette.accentInk,
+                              fontWeight: FontWeight.bold),
                         ),
                       ),
                       const SizedBox(width: 8),
                       Text(
                         '线路: ${record.sourceName}',
-                        style: const TextStyle(fontSize: 11, color: Color(0xFF888898)),
+                        style: TextStyle(
+                            fontSize: AppType.caption, color: palette.textSub),
                       ),
-                      if (record.siteName != null && record.siteName!.isNotEmpty) ...[
+                      if (record.siteName != null &&
+                          record.siteName!.isNotEmpty) ...[
                         const SizedBox(width: 8),
                         Flexible(
                           child: Text(
                             record.siteName!,
-                            style: const TextStyle(fontSize: 11, color: Color(0xFF888898)),
+                            style: TextStyle(
+                                fontSize: AppType.caption,
+                                color: palette.textSub),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -319,7 +379,8 @@ class _HistoryCardState extends State<_HistoryCard> {
                       const SizedBox(width: 12),
                       Text(
                         widget.timeText,
-                        style: const TextStyle(fontSize: 11, color: Color(0xFF6E6E80)),
+                        style: TextStyle(
+                            fontSize: AppType.caption, color: palette.textDim),
                       ),
                     ],
                   ),
@@ -331,22 +392,34 @@ class _HistoryCardState extends State<_HistoryCard> {
             const SizedBox(width: 12),
 
             // 播放与删除操作
-            ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFE50914),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+            FocusOutline(
+              radius: AppRadii.sm,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: palette.accent,
+                  // 品牌底上必须显式前景 onPrimary：M3 默认前景是 primary=品牌色，会同色不可见
+                  foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(AppRadii.sm)),
+                ),
+                icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                label: const Text('继续观看',
+                    style: TextStyle(
+                        fontSize: AppType.body, fontWeight: FontWeight.w600)),
+                onPressed: widget.onPlay,
               ),
-              icon: const Icon(Icons.play_arrow_rounded, size: 18),
-              label: const Text('继续观看', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-              onPressed: widget.onPlay,
             ),
             const SizedBox(width: 8),
-            IconButton(
-              icon: const Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFF808092)),
-              tooltip: '删除此记录',
-              onPressed: widget.onDelete,
+            FocusOutline(
+              radius: AppRadii.pill,
+              child: IconButton(
+                icon: Icon(Icons.delete_outline_rounded,
+                    size: 18, color: palette.textSub),
+                tooltip: '删除此记录',
+                onPressed: widget.onDelete,
+              ),
             ),
           ],
         ),
@@ -363,10 +436,11 @@ class _ProgressIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     if (!record.hasResumePosition) {
-      return const Text(
+      return Text(
         '尚未记录进度 · 从头开始播放',
-        style: TextStyle(fontSize: 11, color: Color(0xFF6E6E80)),
+        style: TextStyle(fontSize: AppType.caption, color: palette.textDim),
       );
     }
 
@@ -385,19 +459,19 @@ class _ProgressIndicator extends StatelessWidget {
         // 时长未知时不渲染进度条（不能用不确定态动画：无法体现比例且会持续重绘）
         if (hasDuration) ...[
           ClipRRect(
-            borderRadius: BorderRadius.circular(2),
+            borderRadius: BorderRadius.circular(AppRadii.hairline),
             child: LinearProgressIndicator(
               value: record.progress,
               minHeight: 3,
-              backgroundColor: const Color(0xFF2C2C3C),
-              valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFE50914)),
+              backgroundColor: palette.raised,
+              valueColor: AlwaysStoppedAnimation<Color>(palette.accentInk),
             ),
           ),
           const SizedBox(height: 4),
         ],
         Text(
           label,
-          style: const TextStyle(fontSize: 11, color: Color(0xFF9A9AAE)),
+          style: TextStyle(fontSize: AppType.caption, color: palette.textSub),
         ),
       ],
     );

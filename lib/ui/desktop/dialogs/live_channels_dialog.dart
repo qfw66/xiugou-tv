@@ -6,6 +6,10 @@ import '../../../core/live/live_playlist_parser.dart';
 import '../../../core/live/live_repository.dart';
 import '../../../core/live/live_source.dart';
 import '../../../core/live/live_text_loader.dart';
+import '../../theme/app_palette.dart';
+import '../../theme/app_tokens.dart';
+import '../widgets/focus_ring.dart';
+import '../widgets/live_indicator.dart';
 import 'live_epg_dialog.dart';
 import 'live_import_dialog.dart';
 
@@ -173,6 +177,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     final groups = _groups;
     final keyword = _keyword.toLowerCase();
     final filtered = _channels
@@ -186,11 +191,11 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
     final sources = widget.repository?.sources ?? const <LiveSource>[];
 
     return Dialog(
-      backgroundColor: const Color(0xFF181820),
+      backgroundColor: palette.panel,
       insetPadding: const EdgeInsets.all(24),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: Color(0xFF2E2E3C)),
+        borderRadius: BorderRadius.circular(AppRadii.lg),
+        side: BorderSide(color: palette.borderStrong),
       ),
       child: SizedBox(
         width: 1060,
@@ -203,30 +208,32 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF321B23),
-                  borderRadius: BorderRadius.circular(10),
+                  color: palette.accentWash,
+                  borderRadius: BorderRadius.circular(AppRadii.md),
                 ),
-                child:
-                    const Icon(Icons.live_tv_rounded, color: Color(0xFFFF626B)),
+                child: Icon(Icons.live_tv_rounded, color: palette.accentInk),
               ),
               const SizedBox(width: 12),
               Expanded(
                   child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                    const Text('电视直播',
+                    Text('电视直播',
                         style: TextStyle(
-                            fontSize: 20,
+                            fontSize: AppType.h1,
                             fontWeight: FontWeight.bold,
-                            color: Colors.white)),
+                            color: palette.textTitle)),
                     Text('${_channels.length} 个频道 · ${groups.length} 个分组',
-                        style: const TextStyle(
-                            fontSize: 12, color: Color(0xFF888898))),
+                        style: TextStyle(
+                            fontSize: AppType.body, color: palette.textSub)),
                   ])),
-              IconButton(
-                tooltip: '关闭直播',
-                onPressed: () => Navigator.of(context).pop(),
-                icon: const Icon(Icons.close, color: Colors.white70),
+              FocusOutline(
+                radius: AppRadii.pill,
+                child: IconButton(
+                  tooltip: '关闭直播',
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: Icon(Icons.close, color: palette.textBody),
+                ),
               ),
             ]),
             const SizedBox(height: 14),
@@ -235,46 +242,58 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                 runSpacing: 6,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  FilledButton.icon(
-                    onPressed:
-                        _busy || widget.repository == null ? null : _import,
-                    style: FilledButton.styleFrom(
-                        backgroundColor: const Color(0xFFE50914),
-                        foregroundColor: Colors.white),
-                    icon: const Icon(Icons.playlist_add, size: 18),
-                    label: const Text('导入直播源'),
+                  FocusOutline(
+                    radius: AppRadii.pill,
+                    child: FilledButton.icon(
+                      onPressed:
+                          _busy || widget.repository == null ? null : _import,
+                      style: FilledButton.styleFrom(
+                          backgroundColor: palette.accent),
+                      icon: const Icon(Icons.playlist_add, size: 18),
+                      label: const Text('导入直播源'),
+                    ),
                   ),
-                  OutlinedButton.icon(
-                    onPressed: _direct,
-                    icon: const Icon(Icons.link, size: 18),
-                    label: const Text('播放直链'),
+                  FocusOutline(
+                    radius: AppRadii.pill,
+                    child: OutlinedButton.icon(
+                      onPressed: _direct,
+                      icon: const Icon(Icons.link, size: 18),
+                      label: const Text('播放直链'),
+                    ),
                   ),
                   IconButton(
                     tooltip: '刷新直播源',
                     onPressed: _busy || widget.repository == null
                         ? null
                         : () => _reload(refresh: true),
-                    icon: const Icon(Icons.refresh, color: Colors.white70),
+                    icon: Icon(Icons.refresh, color: palette.textBody),
                   ),
                   if (sources.isNotEmpty)
-                    PopupMenuButton<LiveSource>(
-                      tooltip: '管理自定义源',
-                      enabled: !_busy,
-                      onSelected: _removeSource,
-                      itemBuilder: (_) => [
-                        for (final source in sources)
-                          PopupMenuItem(
-                            value: source,
-                            child: Text(
-                                '移除：${source.name}（${source.channels.length} 个频道）'),
+                    FocusOutline(
+                      radius: AppRadii.sm,
+                      child: PopupMenuButton<LiveSource>(
+                        tooltip: '管理自定义源',
+                        enabled: !_busy,
+                        onSelected: _removeSource,
+                        itemBuilder: (_) => [
+                          for (final source in sources)
+                            PopupMenuItem(
+                              value: source,
+                              child: Text(
+                                  '移除：${source.name}（${source.channels.length} 个频道）'),
+                            ),
+                        ],
+                        child: _HoverHighlight(
+                          borderRadius: BorderRadius.circular(AppRadii.sm),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 10),
+                            child: Text('自定义源 ${sources.length} ▾',
+                                style: TextStyle(
+                                    color: palette.textBody,
+                                    fontSize: AppType.label)),
                           ),
-                      ],
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 10),
-                        child: Text('自定义源 ${sources.length} ▾',
-                            style: const TextStyle(
-                                color: Colors.white70, fontSize: 13)),
+                        ),
                       ),
                     ),
                 ]),
@@ -285,18 +304,19 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
             const SizedBox(height: 10),
             TextField(
               controller: _search,
-              style: const TextStyle(color: Colors.white, fontSize: 13),
+              style:
+                  TextStyle(color: palette.textMain, fontSize: AppType.label),
               onChanged: (value) => setState(() => _keyword = value.trim()),
               decoration: InputDecoration(
                 hintText: '搜索频道或分组...',
-                hintStyle: const TextStyle(color: Color(0xFF888898)),
-                prefixIcon: const Icon(Icons.search,
-                    color: Color(0xFF888898), size: 20),
+                hintStyle: TextStyle(color: palette.textSub),
+                prefixIcon:
+                    Icon(Icons.search, color: palette.textSub, size: 20),
                 suffixIcon: _keyword.isEmpty
                     ? null
                     : IconButton(
                         tooltip: '清除搜索',
-                        icon: const Icon(Icons.clear, color: Colors.white54),
+                        icon: Icon(Icons.clear, color: palette.textDim),
                         onPressed: () {
                           _search.clear();
                           setState(() => _keyword = '');
@@ -304,9 +324,9 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                       ),
                 isDense: true,
                 filled: true,
-                fillColor: const Color(0xFF20202A),
-                border:
-                    OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                fillColor: palette.raised,
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(AppRadii.md)),
               ),
             ),
             if (groups.isNotEmpty) ...[
@@ -321,10 +341,10 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                         padding: const EdgeInsets.only(right: 8),
                         child: ChoiceChip(
                           label: Text(group ?? '全部'),
-                          labelStyle: const TextStyle(
-                              color: Colors.white70, fontSize: 12),
-                          backgroundColor: const Color(0xFF24242E),
-                          selectedColor: const Color(0xFF5D2029),
+                          labelStyle: TextStyle(
+                              color: palette.textBody, fontSize: AppType.body),
+                          backgroundColor: palette.raised,
+                          selectedColor: palette.accent.withValues(alpha: 0.22),
                           selected: _group == group,
                           onSelected: (_) => setState(() => _group = group),
                         ),
@@ -340,8 +360,8 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                 child: Text(_warnings.take(2).join('\n'),
                     maxLines: 3,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: Colors.orangeAccent, fontSize: 12)),
+                    style: TextStyle(
+                        color: palette.warning, fontSize: AppType.body)),
               ),
             ],
             const SizedBox(height: 12),
@@ -349,16 +369,30 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
               child: filtered.isEmpty
                   ? Center(
                       child: Column(mainAxisSize: MainAxisSize.min, children: [
-                      const Icon(Icons.tv_off_outlined,
-                          size: 42, color: Color(0xFF626276)),
+                      Icon(Icons.tv_off_outlined,
+                          size: 42, color: palette.textDim),
                       const SizedBox(height: 12),
                       Text(_channels.isEmpty ? '暂无直播频道' : '未找到匹配的直播频道',
-                          style: const TextStyle(color: Colors.white70)),
+                          style: TextStyle(color: palette.textBody)),
                       const SizedBox(height: 6),
-                      const Text('可导入 M3U / TXT 清单，或直接播放直播流',
+                      Text('可导入 M3U / TXT 清单，或直接播放直播流',
                           textAlign: TextAlign.center,
                           style: TextStyle(
-                              color: Color(0xFF888898), fontSize: 12)),
+                              color: palette.textSub, fontSize: AppType.body)),
+                      if (_channels.isEmpty && widget.repository != null) ...[
+                        const SizedBox(height: 14),
+                        FocusOutline(
+                          radius: AppRadii.pill,
+                          child: FilledButton.icon(
+                            key: const ValueKey('live-empty-import'),
+                            onPressed: _busy ? null : _import,
+                            style: FilledButton.styleFrom(
+                                backgroundColor: palette.accent),
+                            icon: const Icon(Icons.playlist_add, size: 18),
+                            label: const Text('导入直播源'),
+                          ),
+                        ),
+                      ],
                     ]))
                   : GridView.builder(
                       gridDelegate:
@@ -390,7 +424,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
   }
 }
 
-class _LiveChannelCard extends StatelessWidget {
+class _LiveChannelCard extends StatefulWidget {
   final Live channel;
   final VoidCallback onPlay;
   final VoidCallback? onEpg;
@@ -402,10 +436,20 @@ class _LiveChannelCard extends StatelessWidget {
     this.onEpg,
   });
 
-  Widget _logo() {
-    const fallback =
-        Icon(Icons.live_tv_rounded, color: Color(0xFF9E9EB4), size: 24);
-    final logo = channel.logoUrl;
+  @override
+  State<_LiveChannelCard> createState() => _LiveChannelCardState();
+}
+
+class _LiveChannelCardState extends State<_LiveChannelCard> {
+  bool _isHovered = false;
+
+  /// hover 节奏（D2：进 200 / 出 140）。
+  Duration get _hoverMotion => _isHovered ? AppMotion.enter : AppMotion.exit;
+
+  Widget _logo(AppPalette palette) {
+    final fallback =
+        Icon(Icons.live_tv_rounded, color: palette.textSub, size: 24);
+    final logo = widget.channel.logoUrl;
     if (logo == null || logo.isEmpty) return fallback;
     final uri = Uri.tryParse(logo);
     if (uri?.scheme == 'file') {
@@ -434,71 +478,148 @@ class _LiveChannelCard extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => Material(
-        color: const Color(0xFF22222E),
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-            side: const BorderSide(color: Color(0xFF323240))),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onPlay,
-          hoverColor: const Color(0xFF35232D),
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                SizedBox(width: 42, height: 42, child: _logo()),
-                const SizedBox(width: 12),
-                Expanded(
+  Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
+    final channel = widget.channel;
+    return FocusRing(
+        onTap: widget.onPlay,
+        semanticLabel: channel.name,
+        borderRadius: const BorderRadius.all(Radius.circular(AppRadii.md)),
+        child: MouseRegion(
+          onEnter: (_) => setState(() => _isHovered = true),
+          onExit: (_) => setState(() => _isHovered = false),
+          cursor: SystemMouseCursors.click,
+          child: AnimatedScale(
+            // 与海报卡同一「轻放大」范式；频道卡更宽（340 + 10 格距），
+            // 取 1.02（1.035 时相邻卡会侵出约 1.9px 造成重叠）。
+            scale: _isHovered ? 1.02 : 1.0,
+            duration: _hoverMotion,
+            curve: AppMotion.ease,
+            child: AnimatedContainer(
+              duration: _hoverMotion,
+              curve: AppMotion.ease,
+              decoration: BoxDecoration(
+                color: palette.card,
+                borderRadius: BorderRadius.circular(AppRadii.md),
+                border: Border.all(
+                  color: _isHovered ? palette.accentInk : palette.border,
+                  width: _isHovered ? 1.5 : 1.0,
+                ),
+                boxShadow: _isHovered
+                    ? [
+                        BoxShadow(
+                          color: palette.accentInk.withValues(alpha: 0.16),
+                          blurRadius: 12,
+                          offset: const Offset(0, 4),
+                        ),
+                      ]
+                    : null,
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: widget.onPlay,
+                  // hover 视觉由外层（缩放 / 描边 / 柔光）承担，避免叠加过重；
+                  // 保留按压 splash 反馈。
+                  hoverColor: Colors.transparent,
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
                     child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                      Text(channel.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600)),
-                      const SizedBox(height: 3),
-                      Text(channel.groupName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              color: Color(0xFF888898), fontSize: 12)),
-                    ])),
-              ]),
-              const Spacer(),
-              Row(children: [
-                const Icon(Icons.circle, size: 6, color: Color(0xFFFF626B)),
-                const SizedBox(width: 5),
-                const Text('LIVE',
-                    style: TextStyle(
-                        color: Color(0xFFFF626B),
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold)),
-                const Spacer(),
-                if (onEpg != null)
-                  TextButton.icon(
-                    onPressed: onEpg,
-                    icon: const Icon(Icons.event_note, size: 16),
-                    label: const Text('节目单', style: TextStyle(fontSize: 12)),
-                    style: TextButton.styleFrom(
-                        foregroundColor: const Color(0xFFC2C4DA),
-                        minimumSize: Size.zero,
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 6)),
-                  )
-                else
-                  const Text('暂无 EPG',
-                      style: TextStyle(fontSize: 11, color: Colors.white38)),
-                const SizedBox(width: 8),
-                const Icon(Icons.play_circle_outline,
-                    size: 20, color: Color(0xFFFF626B)),
-              ]),
-            ]),
+                          Row(children: [
+                            SizedBox(
+                                width: 42, height: 42, child: _logo(palette)),
+                            const SizedBox(width: 12),
+                            Expanded(
+                                child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                  Text(channel.name,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          color: palette.textTitle,
+                                          fontSize: AppType.title,
+                                          fontWeight: FontWeight.w600)),
+                                  const SizedBox(height: 3),
+                                  Text(channel.groupName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          color: palette.textSub,
+                                          fontSize: AppType.body)),
+                                ])),
+                          ]),
+                          const Spacer(),
+                          Row(children: [
+                            // 热标与 EPG「正在播出」共用同一组件（B6）。
+                            const LiveIndicator(label: 'LIVE'),
+                            const Spacer(),
+                            if (widget.onEpg != null)
+                              TextButton.icon(
+                                onPressed: widget.onEpg,
+                                icon: const Icon(Icons.event_note, size: 16),
+                                label: const Text('节目单',
+                                    style: TextStyle(fontSize: AppType.body)),
+                                style: TextButton.styleFrom(
+                                    foregroundColor: palette.textBody,
+                                    minimumSize: Size.zero,
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 6, vertical: 6)),
+                              )
+                            else
+                              Text('暂无 EPG',
+                                  style: TextStyle(
+                                      fontSize: AppType.caption,
+                                      color: palette.textSub)),
+                            const SizedBox(width: 8),
+                            Icon(Icons.play_circle_outline,
+                                size: 20, color: palette.accentInk),
+                          ]),
+                        ]),
+                  ),
+                ),
+              ),
+            ),
           ),
+        ));
+  }
+}
+
+/// hover 高亮容器（B6）：`PopupMenuButton` 的 child 模式没有内置底色反馈，
+/// 补一层 `palette.hover` 底（skill `hover-states`；进 200 / 出 140）。
+class _HoverHighlight extends StatefulWidget {
+  const _HoverHighlight({required this.borderRadius, required this.child});
+
+  final BorderRadius borderRadius;
+  final Widget child;
+
+  @override
+  State<_HoverHighlight> createState() => _HoverHighlightState();
+}
+
+class _HoverHighlightState extends State<_HoverHighlight> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      cursor: SystemMouseCursors.click,
+      child: AnimatedContainer(
+        duration: _hovered ? AppMotion.enter : AppMotion.exit,
+        curve: AppMotion.ease,
+        decoration: BoxDecoration(
+          color: _hovered ? palette.hover : null,
+          borderRadius: widget.borderRadius,
         ),
-      );
+        child: widget.child,
+      ),
+    );
+  }
 }

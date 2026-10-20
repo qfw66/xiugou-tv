@@ -29,21 +29,31 @@ PlaybackFailure classifyPlaybackFailure(String? raw) {
       text.contains('name or service not known') ||
       text.contains('nodename nor servname')) {
     return const PlaybackFailure(
-        '无法解析播放地址的域名，请检查网络或换一条线路',
-        PlaybackFailureKind.permanent);
+        '无法解析播放地址的域名，请检查网络或换一条线路', PlaybackFailureKind.permanent);
   }
   if (text.contains('http error') ||
       RegExp(r'\b(?:403|404|410|500|502|503|504)\b').hasMatch(text)) {
     return const PlaybackFailure(
-        '播放地址不可用（服务器返回错误），请换一条线路',
-        PlaybackFailureKind.permanent);
+        '播放地址不可用（服务器返回错误），请换一条线路', PlaybackFailureKind.permanent);
   }
   if (text.contains('format not supported') ||
       text.contains('unsupported format') ||
       text.contains('could not open codec')) {
     return const PlaybackFailure(
-        '播放地址不可用（格式不受支持），请换一条线路',
-        PlaybackFailureKind.permanent);
+        '播放地址不可用（格式不受支持），请换一条线路', PlaybackFailureKind.permanent);
+  }
+  // ④ 直播报错诊断：流已打开但没有任何音视频数据（直播源失效 / 维护中高发）。
+  if (text.contains('no audio or video data') ||
+      text.contains('no video or audio data') ||
+      text.contains('did not contain any playable streams') ||
+      text.contains('no video or audio streams')) {
+    return const PlaybackFailure(
+        '播放源没有返回可播放的音视频数据（源可能已失效或在维护），请换线或稍后重试', PlaybackFailureKind.transient);
+  }
+  // 地址级打不开（通用兜底；格式 / 编码类已在前面分支处理）。
+  if (text.contains('failed to open') || text.contains('could not open')) {
+    return const PlaybackFailure(
+        '播放地址无法打开，请换一条线路或稍后重试', PlaybackFailureKind.permanent);
   }
   if (text.contains('connection refused') ||
       text.contains('connection timed out') ||
@@ -53,8 +63,7 @@ PlaybackFailure classifyPlaybackFailure(String? raw) {
     return const PlaybackFailure(
         '连接播放服务器失败，请稍后重试或换线', PlaybackFailureKind.transient);
   }
-  return const PlaybackFailure(
-      '播放遇到错误，请稍后重试或换线', PlaybackFailureKind.unknown);
+  return const PlaybackFailure('播放遇到错误，请稍后重试或换线', PlaybackFailureKind.unknown);
 }
 
 /// 只要文案（兼容既有调用点 / 既有用例）。

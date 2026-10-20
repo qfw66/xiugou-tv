@@ -4,6 +4,10 @@ import '../../../core/config/models/vod_config.dart';
 import '../../../core/live/epg_program.dart';
 import '../../../core/live/epg_repository.dart';
 import '../../../core/live/live_text_loader.dart';
+import '../../theme/app_palette.dart';
+import '../../theme/app_tokens.dart';
+import '../widgets/focus_ring.dart';
+import '../widgets/live_indicator.dart';
 
 /// 节目单独立加载，失败或无数据时仍可直接播放频道。
 class LiveEpgDialog extends StatefulWidget {
@@ -95,29 +99,49 @@ class _LiveEpgDialogState extends State<LiveEpgDialog> {
     return '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
   }
 
-  Widget _summary(String label, EpgProgram program, Color color) => Container(
+  /// 「正在播出 / 接下来」摘要块。
+  ///
+  /// `live` 为真时使用与频道卡 LIVE 相同的 `LiveIndicator` 热标（B6 统一）。
+  Widget _summary(String label, EpgProgram program, Color color,
+          {bool live = false}) =>
+      Container(
         width: double.infinity,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         margin: const EdgeInsets.only(bottom: 8),
         decoration: BoxDecoration(
           color: color.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(AppRadii.md),
           border: Border.all(color: color.withValues(alpha: 0.35)),
         ),
-        child: Text('$label · ${_time(program.start)}  ${program.title}',
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: color, fontSize: 13)),
+        child: Row(children: [
+          if (live)
+            // 与频道卡 LIVE 共用同一组件/规格（B6 判别用例）。
+            LiveIndicator(label: label, fontSize: AppType.label)
+          else
+            Text(label,
+                style: TextStyle(color: color, fontSize: AppType.label)),
+          const SizedBox(width: 8),
+          Expanded(
+              child: Text('${_time(program.start)}  ${program.title}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: color, fontSize: AppType.label))),
+        ]),
       );
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     final now = _now;
     final current = _schedule?.currentAt(now);
     final next = _schedule?.nextAt(now);
     final programs = _schedule?.programs ?? const <EpgProgram>[];
     return Dialog(
-      backgroundColor: const Color(0xFF181820),
+      backgroundColor: palette.panel,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadii.lg),
+        side: BorderSide(color: palette.borderStrong),
+      ),
       insetPadding: const EdgeInsets.all(24),
       child: SizedBox(
         width: 680,
@@ -127,19 +151,39 @@ class _LiveEpgDialogState extends State<LiveEpgDialog> {
           child:
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: palette.accentWash,
+                  borderRadius: BorderRadius.circular(AppRadii.md),
+                ),
+                child: Icon(Icons.event_note_rounded, color: palette.accentInk),
+              ),
+              const SizedBox(width: 12),
               Expanded(
-                  child: Text('${widget.channel.name} · 节目单',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold))),
-              IconButton(
-                  tooltip: '关闭节目单',
-                  onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.close, color: Colors.white70)),
+                  child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                    Text(widget.channel.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: palette.textTitle,
+                            fontSize: AppType.h2,
+                            fontWeight: FontWeight.bold)),
+                    Text('节目单 · 北京时间 UTC+8',
+                        style: TextStyle(
+                            color: palette.textSub, fontSize: AppType.body)),
+                  ])),
+              FocusOutline(
+                radius: AppRadii.pill,
+                child: IconButton(
+                    tooltip: '关闭节目单',
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: Icon(Icons.close, color: palette.textSub)),
+              ),
             ]),
+            const SizedBox(height: 6),
             Row(children: [
               for (var day = 0; day < 2; day++) ...[
                 ChoiceChip(
@@ -153,22 +197,22 @@ class _LiveEpgDialogState extends State<LiveEpgDialog> {
                 ),
                 const SizedBox(width: 8),
               ],
-              const Expanded(
-                  child: Text('北京时间 UTC+8',
-                      textAlign: TextAlign.end,
-                      style:
-                          TextStyle(color: Color(0xFF888898), fontSize: 12))),
-              IconButton(
-                tooltip: '刷新节目单',
-                onPressed: _busy ? null : () => _load(forceRefresh: true),
-                icon: const Icon(Icons.refresh, color: Colors.white70),
+              const Spacer(),
+              FocusOutline(
+                radius: AppRadii.pill,
+                child: IconButton(
+                  tooltip: '刷新节目单',
+                  onPressed: _busy ? null : () => _load(forceRefresh: true),
+                  icon: Icon(Icons.refresh, color: palette.textSub),
+                ),
               ),
             ]),
             const SizedBox(height: 12),
             if (!_busy && current != null)
-              _summary('正在播出', current, const Color(0xFFFF626B)),
-            if (!_busy && next != null)
-              _summary('接下来', next, const Color(0xFFB1B9D4)),
+              // 「正在播出」复用 danger 红（直播的「热」信号），
+              // 热标与频道卡 LIVE 共用同一组件（B6）。
+              _summary('正在播出', current, palette.danger, live: true),
+            if (!_busy && next != null) _summary('接下来', next, palette.textBody),
             Expanded(
               child: _busy
                   ? const Center(child: CircularProgressIndicator())
@@ -178,57 +222,76 @@ class _LiveEpgDialogState extends State<LiveEpgDialog> {
                               Column(mainAxisSize: MainAxisSize.min, children: [
                           Text(_error!,
                               textAlign: TextAlign.center,
-                              style:
-                                  const TextStyle(color: Colors.orangeAccent)),
+                              style: TextStyle(color: palette.danger)),
                           const SizedBox(height: 8),
-                          const Text('节目单不可用不影响频道播放',
+                          Text('节目单不可用不影响频道播放',
                               style: TextStyle(
-                                  color: Colors.white60, fontSize: 12)),
+                                  color: palette.textSub,
+                                  fontSize: AppType.body)),
                           TextButton(
                               onPressed: () => _load(forceRefresh: true),
                               child: const Text('重试')),
                         ]))
                       : programs.isEmpty
-                          ? const Center(
+                          ? Center(
                               child: Text('暂无节目单，频道仍可正常播放',
-                                  style: TextStyle(color: Colors.white60)))
+                                  style: TextStyle(color: palette.textSub)))
                           : ListView.separated(
                               itemCount: programs.length,
-                              separatorBuilder: (_, __) => const Divider(
-                                  height: 1, color: Color(0xFF30303C)),
+                              separatorBuilder: (_, __) =>
+                                  Divider(height: 1, color: palette.divider),
                               itemBuilder: (_, index) {
                                 final program = programs[index];
                                 final playing = program.isCurrent(now);
                                 final future = program.start.isAfter(now);
-                                return ListTile(
-                                  contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 4),
-                                  title: Text(program.title,
-                                      style: TextStyle(
+                                return Container(
+                                  // 「正在播出」行强调：danger 左条 + 6% 底。
+                                  // 同时保留文字标签「正在播出」，颜色仅作辅助
+                                  // （skill `state-clarity` / `color-not-only`）。
+                                  decoration: BoxDecoration(
+                                    color: playing
+                                        ? palette.danger.withValues(alpha: 0.06)
+                                        : null,
+                                    border: Border(
+                                      left: BorderSide(
                                         color: playing
-                                            ? const Color(0xFFFF626B)
-                                            : Colors.white,
-                                        fontSize: 14,
-                                      )),
-                                  subtitle: Text(
-                                    '${_time(program.start)} – ${_time(program.end)}'
-                                    '${program.description == null ? '' : '\n${program.description}'}',
-                                    maxLines: 3,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        color: Colors.white54, fontSize: 12),
+                                            ? palette.danger
+                                            : Colors.transparent,
+                                        width: 3,
+                                      ),
+                                    ),
                                   ),
-                                  trailing: Text(
-                                      playing
-                                          ? '正在播出'
-                                          : future
-                                              ? '预告'
-                                              : '已结束',
-                                      style: TextStyle(
+                                  child: ListTile(
+                                    contentPadding: const EdgeInsets.symmetric(
+                                        horizontal: 10, vertical: 4),
+                                    title: Text(program.title,
+                                        style: TextStyle(
                                           color: playing
-                                              ? const Color(0xFFFF626B)
-                                              : Colors.white38,
-                                          fontSize: 12)),
+                                              ? palette.danger
+                                              : palette.textMain,
+                                          fontSize: AppType.title,
+                                        )),
+                                    subtitle: Text(
+                                      '${_time(program.start)} – ${_time(program.end)}'
+                                      '${program.description == null ? '' : '\n${program.description}'}',
+                                      maxLines: 3,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          color: palette.textSub,
+                                          fontSize: AppType.body),
+                                    ),
+                                    trailing: Text(
+                                        playing
+                                            ? '正在播出'
+                                            : future
+                                                ? '预告'
+                                                : '已结束',
+                                        style: TextStyle(
+                                            color: playing
+                                                ? palette.danger
+                                                : palette.textSub,
+                                            fontSize: AppType.body)),
+                                  ),
                                 );
                               },
                             ),
@@ -237,13 +300,16 @@ class _LiveEpgDialogState extends State<LiveEpgDialog> {
               const SizedBox(height: 12),
               Align(
                 alignment: Alignment.centerRight,
-                child: FilledButton.icon(
-                  icon: const Icon(Icons.play_arrow),
-                  label: const Text('播放频道'),
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                    widget.onPlay!();
-                  },
+                child: FocusOutline(
+                  radius: AppRadii.pill,
+                  child: FilledButton.icon(
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('播放频道'),
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      widget.onPlay!();
+                    },
+                  ),
                 ),
               ),
             ],

@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import '../../../core/api/models/vod_models.dart';
+import '../../theme/app_palette.dart';
+import '../../theme/app_tokens.dart';
+import '../widgets/focus_ring.dart';
 
 /// 详情页选集的完整选择上下文（SET-12：把同站全部线路带进播放会话）。
 class EpisodeSelection {
@@ -45,6 +48,7 @@ class VodDetailDialog extends StatefulWidget {
 class _VodDetailDialogState extends State<VodDetailDialog> {
   int _selectedSourceIndex = 0;
   late bool _favorited;
+  bool _favoriteBusy = false;
   String? _error;
 
   @override
@@ -55,15 +59,21 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     final item = widget.detail.item;
     final sources = widget.detail.sources;
-    final currentEpisodes = (sources.isNotEmpty && _selectedSourceIndex < sources.length)
-        ? sources[_selectedSourceIndex].episodes
-        : <VodEpisode>[];
+    final currentEpisodes =
+        (sources.isNotEmpty && _selectedSourceIndex < sources.length)
+            ? sources[_selectedSourceIndex].episodes
+            : <VodEpisode>[];
 
     return Dialog(
-      backgroundColor: const Color(0xFF1C1C24),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      backgroundColor: palette.panel,
+      // 与收藏 / 历史弹窗统一：lg 圆角 + borderStrong 描边（B4）
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadii.lg),
+        side: BorderSide(color: palette.borderStrong, width: 1),
+      ),
       child: Container(
         width: 820,
         height: 520,
@@ -81,17 +91,20 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: BorderRadius.circular(AppRadii.sm),
                         child: Image.network(
                           item.pic,
+                          // ⑥ 内存批：100px 海报 ×2 DPR，避免原图全尺寸解码。
+                          cacheWidth: 200,
                           width: 100,
                           height: 140,
                           fit: BoxFit.cover,
                           errorBuilder: (_, __, ___) => Container(
                             width: 100,
                             height: 140,
-                            color: const Color(0xFF282834),
-                            child: const Icon(Icons.movie_outlined, color: Colors.grey),
+                            color: palette.raised,
+                            child: Icon(Icons.movie_outlined,
+                                color: palette.textDim),
                           ),
                         ),
                       ),
@@ -102,10 +115,10 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                           children: [
                             Text(
                               item.name,
-                              style: const TextStyle(
-                                fontSize: 16,
+                              style: TextStyle(
+                                fontSize: AppType.heading,
                                 fontWeight: FontWeight.bold,
-                                color: Colors.white,
+                                color: palette.textTitle,
                               ),
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
@@ -114,13 +127,17 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                             if (item.year != null || item.area != null)
                               Text(
                                 '${item.year ?? ''}  ${item.area ?? ''}',
-                                style: const TextStyle(fontSize: 12, color: Color(0xFFA0A0B0)),
+                                style: TextStyle(
+                                    fontSize: AppType.body,
+                                    color: palette.textSub),
                               ),
                             if (item.typeName != null) ...[
                               const SizedBox(height: 4),
                               Text(
                                 item.typeName!,
-                                style: const TextStyle(fontSize: 12, color: Color(0xFFE50914)),
+                                style: TextStyle(
+                                    fontSize: AppType.body,
+                                    color: palette.accentInk),
                               ),
                             ],
                           ],
@@ -132,18 +149,28 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                   if (item.actor != null && item.actor!.isNotEmpty)
                     Text(
                       '主演: ${item.actor}',
-                      style: const TextStyle(fontSize: 11, color: Color(0xFF9090A0)),
+                      style: TextStyle(
+                          fontSize: AppType.caption, color: palette.textSub),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
                   const SizedBox(height: 8),
-                  const Text('剧情简介:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white)),
+                  Text('剧情简介:',
+                      style: TextStyle(
+                          fontSize: AppType.body,
+                          fontWeight: FontWeight.bold,
+                          color: palette.textTitle)),
                   const SizedBox(height: 4),
                   Expanded(
                     child: SingleChildScrollView(
                       child: Text(
-                        (item.content?.isNotEmpty ?? false) ? item.content! : '暂无详细简介。',
-                        style: const TextStyle(fontSize: 11, color: Color(0xFFB0B0C0), height: 1.4),
+                        (item.content?.isNotEmpty ?? false)
+                            ? item.content!
+                            : '暂无详细简介。',
+                        style: TextStyle(
+                            fontSize: AppType.caption,
+                            color: palette.textBody,
+                            height: 1.4),
                       ),
                     ),
                   ),
@@ -152,7 +179,7 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
             ),
 
             const SizedBox(width: 20),
-            const VerticalDivider(color: Color(0xFF2E2E3C), width: 1),
+            VerticalDivider(color: palette.divider, width: 1),
             const SizedBox(width: 20),
 
             // 右侧：播放源切换与选集网格
@@ -160,47 +187,72 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // 顶部关闭按钮与标题
+                  // 顶部：图标块 + 标题 +（收藏 / 关闭）（与收藏 / 历史同一头部语言；B4）
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text(
-                        '选集播放',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: palette.raised,
+                          borderRadius: BorderRadius.circular(AppRadii.md),
+                        ),
+                        child: Icon(Icons.play_circle_outline_rounded,
+                            color: palette.accentInk, size: 20),
                       ),
-                      Row(
-                        children: [
-                          if (widget.onToggleFavorite != null)
-                            IconButton(
-                              icon: Icon(
-                                _favorited ? Icons.star_rounded : Icons.star_outline_rounded,
-                                color: _favorited ? const Color(0xFFFFB300) : const Color(0xFFA0A0B0),
-                                size: 22,
-                              ),
-                              tooltip: _favorited ? '已收藏 (点击取消)' : '收藏影片',
-                              onPressed: () async {
-                                final previous = _favorited;
-                                setState(() {
-                                  _favorited = !previous;
-                                  _error = null;
-                                });
-                                final message =
-                                    await widget.onToggleFavorite!();
-                                if (!mounted) return;
-                                if (message != null) {
-                                  // 保存失败：星标回退并在弹窗内提示，避免被遮挡。
-                                  setState(() {
-                                    _favorited = previous;
-                                    _error = message;
-                                  });
-                                }
-                              },
+                      const SizedBox(width: 10),
+                      Text(
+                        '选集播放',
+                        style: TextStyle(
+                            fontSize: AppType.heading,
+                            fontWeight: FontWeight.bold,
+                            color: palette.textTitle),
+                      ),
+                      const Spacer(),
+                      if (widget.onToggleFavorite != null)
+                        FocusOutline(
+                          radius: AppRadii.pill,
+                          child: IconButton(
+                            icon: Icon(
+                              _favorited
+                                  ? Icons.star_rounded
+                                  : Icons.star_outline_rounded,
+                              color: _favorited
+                                  ? palette.warning
+                                  : palette.textSub,
+                              size: 22,
                             ),
-                          IconButton(
-                            icon: const Icon(Icons.close_rounded, color: Color(0xFFA0A0B0), size: 20),
-                            onPressed: () => Navigator.of(context).pop(),
+                            tooltip: _favorited ? '已收藏 (点击取消)' : '收藏影片',
+                            // 异步期间禁用防连点（skill: loading-buttons；B4）
+                            onPressed: _favoriteBusy
+                                ? null
+                                : () async {
+                                    final previous = _favorited;
+                                    setState(() {
+                                      _favoriteBusy = true;
+                                      _favorited = !previous;
+                                      _error = null;
+                                    });
+                                    final message =
+                                        await widget.onToggleFavorite!();
+                                    if (!mounted) return;
+                                    setState(() {
+                                      _favoriteBusy = false;
+                                      if (message != null) {
+                                        // 保存失败：星标回退并在弹窗内提示，避免被遮挡。
+                                        _favorited = previous;
+                                        _error = message;
+                                      }
+                                    });
+                                  },
                           ),
-                        ],
+                        ),
+                      FocusOutline(
+                        radius: AppRadii.pill,
+                        child: IconButton(
+                          icon: Icon(Icons.close_rounded,
+                              color: palette.textSub, size: 20),
+                          onPressed: () => Navigator.of(context).pop(),
+                        ),
                       ),
                     ],
                   ),
@@ -212,19 +264,20 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF3A1F22),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: const Color(0xFF7A2E34)),
+                        color: palette.danger.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(AppRadii.sm),
+                        border: Border.all(
+                            color: palette.danger.withValues(alpha: 0.4)),
                       ),
                       child: Text(
                         _error!,
-                        style: const TextStyle(
-                            color: Colors.orangeAccent, fontSize: 12.5),
+                        style: TextStyle(
+                            color: palette.danger, fontSize: AppType.label),
                       ),
                     ),
                   const SizedBox(height: 8),
 
-                  // 播放源切换标签
+                  // 播放源切换标签（自绘胶囊：与左侧导航 / 搜索站点胶囊同一语言；B4）
                   if (sources.length > 1)
                     SizedBox(
                       height: 34,
@@ -233,17 +286,11 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                         itemCount: sources.length,
                         separatorBuilder: (_, __) => const SizedBox(width: 8),
                         itemBuilder: (context, index) {
-                          final isSelected = index == _selectedSourceIndex;
-                          return ChoiceChip(
-                            label: Text(sources[index].name, style: const TextStyle(fontSize: 12)),
-                            selected: isSelected,
-                            selectedColor: const Color(0xFFE50914),
-                            backgroundColor: const Color(0xFF282834),
-                            labelStyle: TextStyle(
-                              color: isSelected ? Colors.white : const Color(0xFFA0A0B0),
-                              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                            ),
-                            onSelected: (_) => setState(() => _selectedSourceIndex = index),
+                          return _SourcePill(
+                            label: sources[index].name,
+                            isSelected: index == _selectedSourceIndex,
+                            onTap: () =>
+                                setState(() => _selectedSourceIndex = index),
                           );
                         },
                       ),
@@ -253,11 +300,13 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                   // 选集按钮网格
                   Expanded(
                     child: currentEpisodes.isEmpty
-                        ? const Center(
-                            child: Text('该播放源暂无选集', style: TextStyle(color: Color(0xFF707080))),
+                        ? Center(
+                            child: Text('该播放源暂无选集',
+                                style: TextStyle(color: palette.textDim)),
                           )
                         : GridView.builder(
-                            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
                               crossAxisCount: 5,
                               childAspectRatio: 2.2,
                               crossAxisSpacing: 8,
@@ -268,15 +317,33 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                               final ep = currentEpisodes[epIdx];
                               return OutlinedButton(
                                 style: OutlinedButton.styleFrom(
-                                  backgroundColor: const Color(0xFF252530),
-                                  foregroundColor: Colors.white,
-                                  side: const BorderSide(color: Color(0xFF383848)),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                                  backgroundColor: palette.raised,
+                                  foregroundColor: palette.textTitle,
+                                  side: BorderSide(color: palette.borderStrong),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius:
+                                          BorderRadius.circular(AppRadii.sm)),
                                   padding: EdgeInsets.zero,
+                                ).copyWith(
+                                  // 悬停 / 聚焦描边 accentInk（与网格卡同一语言；B4）
+                                  side:
+                                      WidgetStateProperty.resolveWith((states) {
+                                    final active = states
+                                            .contains(WidgetState.hovered) ||
+                                        states.contains(WidgetState.focused);
+                                    return BorderSide(
+                                      color: active
+                                          ? palette.accentInk
+                                          : palette.borderStrong,
+                                      width: active ? 1.5 : 1,
+                                    );
+                                  }),
                                 ),
                                 onPressed: () {
                                   Navigator.of(context).pop();
-                                  final sourceName = sources.isNotEmpty ? sources[_selectedSourceIndex].name : '';
+                                  final sourceName = sources.isNotEmpty
+                                      ? sources[_selectedSourceIndex].name
+                                      : '';
                                   // 携带当前源剧集列表与索引：播放内切集与选集共用同一链路
                                   widget.onPlayEpisode(
                                     EpisodeSelection(
@@ -291,7 +358,8 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                                 },
                                 child: Text(
                                   ep.name,
-                                  style: const TextStyle(fontSize: 12),
+                                  style:
+                                      const TextStyle(fontSize: AppType.body),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
@@ -303,6 +371,88 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 播放源切换胶囊：视觉与左侧导航 / 搜索站点胶囊同一语言（B4）。
+///
+/// 选中态用品牌底 + onPrimary 保证对比与可辨（判据：选集选中态可辨）；
+/// 悬停 / 聚焦时描 accentInk 边框，进 200 / 出 140。
+class _SourcePill extends StatefulWidget {
+  final String label;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _SourcePill({
+    required this.label,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  State<_SourcePill> createState() => _SourcePillState();
+}
+
+class _SourcePillState extends State<_SourcePill> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
+    final isSelected = widget.isSelected;
+    final onAccent = Theme.of(context).colorScheme.onPrimary;
+
+    return FocusRing(
+      onTap: widget.onTap,
+      semanticLabel: widget.label,
+      borderRadius: const BorderRadius.all(Radius.circular(AppRadii.md)),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _isHovered = true),
+        onExit: (_) => setState(() => _isHovered = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: _isHovered ? AppMotion.enter : AppMotion.exit,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            decoration: BoxDecoration(
+              color: isSelected
+                  ? palette.accent
+                  : _isHovered
+                      ? palette.borderStrong
+                      : palette.raised,
+              borderRadius: BorderRadius.circular(AppRadii.md),
+              border: Border.all(
+                color: isSelected
+                    ? palette.accent
+                    : _isHovered
+                        ? palette.accentInk
+                        : palette.border,
+                width: 1,
+              ),
+            ),
+            alignment: Alignment.center,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 160),
+              child: Text(
+                widget.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: AppType.body,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                  color: isSelected
+                      ? onAccent
+                      : _isHovered
+                          ? palette.textTitle
+                          : palette.textSub,
+                ),
+              ),
+            ),
+          ),
         ),
       ),
     );

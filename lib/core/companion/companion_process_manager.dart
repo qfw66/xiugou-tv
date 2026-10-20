@@ -21,6 +21,15 @@ class CompanionProcessManager {
       CompanionProcessManager.scoped();
   factory CompanionProcessManager() => _instance;
 
+  /// companion 进程的 JVM 调优参数（⑥ 内存批定案，对照数据见
+  /// .do-it/tmp-mem/jvm-matrix.txt：空闲 PrivateBytes 628.9MB → 66.5MB）。
+  static const List<String> companionJvmTuningArgs = [
+    '-Xms16m',
+    '-Xmx256m',
+    '-XX:MaxMetaspaceSize=128m',
+    '-XX:+UseSerialGC',
+  ];
+
   /// 独立生命周期的实例；默认构造仍共享应用级实例。
   /// applicationDirectory 默认取应用可执行文件目录，测试可注入隔离安装布局。
   CompanionProcessManager.scoped({
@@ -28,7 +37,13 @@ class CompanionProcessManager {
     String? applicationDirectory,
     Future<String?> Function()? javaResolver,
     Future<Process> Function(String, List<String>)? processStarter,
-    this.exitTimeout = const Duration(seconds: 2),
+    // 关闭过慢优化：实测 JVM 正常关机 ≈1.05s；该值同时封顶 HTTP 通知、
+    // 优雅等待与 kill 后确认三段等待，收紧默认值以缩短最坏关闭路径。
+    this.exitTimeout = const Duration(milliseconds: 1500),
+    // ⑥ 空闲停用：运行中的 companion 连续 idleTimeout 没有真实使用（spider RPC）
+    // 就自动停用，下次使用经懒启动链路重新拉起；检测粒度 idleCheckInterval。
+    this.idleTimeout = const Duration(minutes: 30),
+    this.idleCheckInterval = const Duration(minutes: 1),
   })  : _dio = dio ??
             Dio(BaseOptions(
                 connectTimeout: const Duration(seconds: 3),
@@ -44,6 +59,8 @@ class CompanionProcessManager {
   final Future<String?> Function()? _javaResolver;
   final Future<Process> Function(String, List<String>) _processStarter;
   final Duration exitTimeout;
+  final Duration idleTimeout;
+  final Duration idleCheckInterval;
 
   final Dio _dio;
 
@@ -54,6 +71,8 @@ class CompanionProcessManager {
   StreamSubscription<String>? _stdoutSubscription;
   StreamSubscription<String>? _stderrSubscription;
   bool _closed = false;
+  Timer? _idleWatch;
+  DateTime _lastActivity = DateTime.now();
 
   bool get _stopRequested => _closed || _stopping != null;
   int? _port;
@@ -122,12 +141,23 @@ class CompanionProcessManager {
   }
 
   /// 同一生命周期内的预热与按需请求共享一次启动。
-  Future<bool> start({String? jarPath, int targetPort = 0}) {
-    if (_stopRequested) return Future.value(false);
-    if (isRunning) return Future.value(true);
+  Future<bool> start({String? jarPath, int targetPort = 0}) async {
+    if (_closed) return false;
+    // 空闲停用（或普通 stop）进行中：等待停止收尾后按需重启，避免恰逢停用
+    // 窗口的请求直接失败；应用退出已被上面的 _closed 拦截。
+    final stopping = _stopping;
+    if (stopping != null) {
+      try {
+        await stopping;
+      } catch (_) {
+        // 停止失败会保留进程所有权，下面按既有规则返回 false。
+      }
+    }
+    if (_closed) return false;
+    if (isRunning) return true;
     if (_starting != null) return _starting!;
     // 清理失败仍保留进程所有权，不允许新进程覆盖旧引用。
-    if (_process != null) return Future.value(false);
+    if (_process != null) return false;
     _cancelStartup = Completer<void>();
     return _starting = _start(jarPath, targetPort).whenComplete(() {
       _starting = null;
@@ -155,8 +185,17 @@ class CompanionProcessManager {
         throw StateError('Companion service jar not found at $resolvedJar');
       }
       final ready = Completer<int?>();
-      final process = await _processStarter(
-          javaCmd, ['-noverify', '-jar', resolvedJar, '--port=$targetPort']);
+      // ⑥ 内存收紧与孤儿回收：收紧 JVM 参数（对照实验见静态常量注释）；
+      // --stdin-watch=on 让 Java 侧在主进程异常退出（stdin 管道关闭）时自杀，
+      // 避免留下无人回收的孤儿进程（见 companion/src/.../Main.java）。
+      final process = await _processStarter(javaCmd, [
+        '-noverify',
+        ...companionJvmTuningArgs,
+        '-jar',
+        resolvedJar,
+        '--port=$targetPort',
+        '--stdin-watch=on',
+      ]);
       _process = process;
       _stdoutSubscription = process.stdout
           .transform(const Utf8Decoder(allowMalformed: true))
@@ -182,6 +221,7 @@ class CompanionProcessManager {
       unawaited(process.exitCode.then((_) {
         if (!ready.isCompleted) ready.complete(null);
         if (identical(_process, process)) {
+          _disarmIdleWatch();
           _process = null;
           _port = null;
           if (!_stopRequested) _status = CompanionStatus.stopped;
@@ -206,6 +246,8 @@ class CompanionProcessManager {
         throw StateError('Health check failed after start');
       }
       _status = CompanionStatus.running;
+      _lastActivity = DateTime.now();
+      _armIdleWatch();
       return true;
     } catch (error) {
       _lastError = '$error';
@@ -239,6 +281,11 @@ class CompanionProcessManager {
     }
   }
 
+  /// 真实使用上报：每次 spider RPC（加载/调用/自检）调用，推迟空闲停用。
+  void notifyActivity() {
+    _lastActivity = DateTime.now();
+  }
+
   /// 停止完成后可重新启动；完成意味着已确认子进程退出。
   Future<void> stop() {
     if (_stopping != null) return _stopping!;
@@ -269,6 +316,7 @@ class CompanionProcessManager {
   }
 
   Future<void> _terminateProcess() async {
+    _disarmIdleWatch();
     final process = _process;
     if (process == null) return;
     final port = _port;
@@ -296,6 +344,24 @@ class CompanionProcessManager {
     _stderrSubscription = null;
     if (identical(_process, process)) _process = null;
     _port = null;
+  }
+
+  /// 进入 running 后启动空闲监视；重挂时取消旧计时器，避免重复。
+  void _armIdleWatch() {
+    _idleWatch?.cancel();
+    _idleWatch = Timer.periodic(idleCheckInterval, (_) => _onIdleTick());
+  }
+
+  void _disarmIdleWatch() {
+    _idleWatch?.cancel();
+    _idleWatch = null;
+  }
+
+  void _onIdleTick() {
+    if (!isRunning || _stopping != null || _starting != null) return;
+    if (DateTime.now().difference(_lastActivity) < idleTimeout) return;
+    // 空闲停用走普通 stop 链路（HTTP /shutdown → 兜底 kill）；失败静默，留待下轮。
+    unawaited(stop().catchError((Object _) {}));
   }
 
   String _findDefaultJarPath(String workingDirectory) {

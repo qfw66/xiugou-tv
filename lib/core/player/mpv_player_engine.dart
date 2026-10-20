@@ -4,13 +4,15 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'models/player_settings.dart';
 import 'models/player_state.dart';
 import 'models/track_info.dart';
+import 'playback_diagnostics.dart';
 import 'player_engine.dart';
 import 'player_track_capabilities.dart';
 import 'player_settings_application.dart';
 import 'mpv_settings_target.dart';
 
 /// 基于 media_kit (libmpv) 的 Windows 平台硬件加速播放引擎实现
-class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackCapable {
+class MpvPlayerEngine
+    implements PlayerEngine, VideoTrackCapable, SubtitleTrackCapable {
   late final Player _player;
   late final VideoController _videoController;
 
@@ -27,6 +29,9 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
   List<TrackInfo> _subtitleTracks = [];
   List<TrackInfo> _videoTracks = [];
 
+  /// ④ 诊断闭环：mpv 最近日志环形缓冲（40 条），供错误面板展示与「复制诊断」。
+  final RecentLogBuffer _recentLogs = RecentLogBuffer();
+
   final _statusController = StreamController<PlaybackStatus>.broadcast();
   final _positionController = StreamController<Duration>.broadcast();
   final _durationController = StreamController<Duration>.broadcast();
@@ -36,7 +41,8 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
   final _dimensionsController = StreamController<VideoDimensions>.broadcast();
   final _errorController = StreamController<String?>.broadcast();
   final _audioTracksController = StreamController<List<TrackInfo>>.broadcast();
-  final _subtitleTracksController = StreamController<List<TrackInfo>>.broadcast();
+  final _subtitleTracksController =
+      StreamController<List<TrackInfo>>.broadcast();
   final _videoTracksController = StreamController<List<TrackInfo>>.broadcast();
 
   final List<StreamSubscription> _subscriptions = [];
@@ -87,7 +93,9 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
       _player = Player(
         configuration: const PlayerConfiguration(
           pitch: true,
-          bufferSize: 32 * 1024 * 1024,
+          // ⑥ 内存批：播放缓冲 32MB -> 16MB（1080p 约 6~10 秒余量，视码率），
+          // 换取播放期峰值内存下降；起播/流畅度在 V2 采样与实机验收中复核。
+          bufferSize: 16 * 1024 * 1024,
           logLevel: MPVLogLevel.warn,
         ),
       );
@@ -95,6 +103,16 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
       _videoController = VideoController(_player);
       _bindNativeStreams();
       await settingsApplication.attach(MpvSettingsTarget(_player));
+      // ④：显式钉住网络连接超时（mpv 默认即 60s）——直播源失联时保证约 60s
+      // 内进入错误态并可诊断，而不是无限等待；个别发行版 / 配置可能覆写该值。
+      try {
+        final platform = _player.platform;
+        if (platform is NativePlayer) {
+          await platform.setProperty('network-timeout', '60');
+        }
+      } catch (_) {
+        // 属性不可用时不影响播放主链路。
+      }
     } catch (_) {
       settingsApplication.initializationFailed();
       rethrow;
@@ -102,13 +120,15 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
   }
 
   @override
-  Future<void> applyPlaybackSettings(PlayerSettings settings) => settingsApplication.update(settings);
+  Future<void> applyPlaybackSettings(PlayerSettings settings) =>
+      settingsApplication.update(settings);
 
   void _bindNativeStreams() {
     _subscriptions.add(
       _player.stream.playing.listen((playing) {
         if (_status != PlaybackStatus.error) {
-          _updateStatus(playing ? PlaybackStatus.playing : PlaybackStatus.paused);
+          _updateStatus(
+              playing ? PlaybackStatus.playing : PlaybackStatus.paused);
         }
       }),
     );
@@ -118,7 +138,9 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
         if (buffering && _status != PlaybackStatus.error) {
           _updateStatus(PlaybackStatus.buffering);
         } else if (!buffering && _status == PlaybackStatus.buffering) {
-          _updateStatus(_player.state.playing ? PlaybackStatus.playing : PlaybackStatus.paused);
+          _updateStatus(_player.state.playing
+              ? PlaybackStatus.playing
+              : PlaybackStatus.paused);
         }
       }),
     );
@@ -168,14 +190,16 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
 
     _subscriptions.add(
       _player.stream.width.listen((w) {
-        _dimensions = VideoDimensions(width: w ?? 0, height: _player.state.height ?? 0);
+        _dimensions =
+            VideoDimensions(width: w ?? 0, height: _player.state.height ?? 0);
         _dimensionsController.add(_dimensions);
       }),
     );
 
     _subscriptions.add(
       _player.stream.height.listen((h) {
-        _dimensions = VideoDimensions(width: _player.state.width ?? 0, height: h ?? 0);
+        _dimensions =
+            VideoDimensions(width: _player.state.width ?? 0, height: h ?? 0);
         _dimensionsController.add(_dimensions);
       }),
     );
@@ -219,6 +243,12 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
     );
 
     _subscriptions.add(
+      _player.stream.log.listen((log) {
+        _recentLogs.add('[${log.level}] ${log.text}');
+      }),
+    );
+
+    _subscriptions.add(
       _player.stream.error.listen((err) {
         if (err.isNotEmpty) {
           _currentError = err;
@@ -234,6 +264,8 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
     _currentSpec = spec;
     _currentError = null;
     _errorController.add(null);
+    // 每次新播放会话重置诊断日志，避免上一部片的日志混进本次错误诊断。
+    _recentLogs.clear();
     _updateStatus(PlaybackStatus.buffering);
 
     final media = Media(
@@ -281,7 +313,8 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
 
   @override
   Future<void> setHardwareDecoding(String mode) async {
-    await applyPlaybackSettings(playbackSettings.copyWith(hwdec: PlayerSettings.normalizeHwdec(mode)));
+    await applyPlaybackSettings(
+        playbackSettings.copyWith(hwdec: PlayerSettings.normalizeHwdec(mode)));
   }
 
   @override
@@ -371,6 +404,9 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
   String? get currentError => _currentError;
   @override
   MediaPlaySpec? get currentSpec => _currentSpec;
+
+  /// 最近 40 条引擎日志（④ 诊断闭环；只读快照，供错误面板展示与复制）。
+  List<String> get recentPlayerLogs => _recentLogs.entries;
   @override
   List<TrackInfo> get audioTracks => _audioTracks;
   @override
@@ -396,9 +432,12 @@ class MpvPlayerEngine implements PlayerEngine, VideoTrackCapable, SubtitleTrackC
   @override
   Stream<String?> get errorStream => _errorController.stream;
   @override
-  Stream<List<TrackInfo>> get audioTracksStream => _audioTracksController.stream;
+  Stream<List<TrackInfo>> get audioTracksStream =>
+      _audioTracksController.stream;
   @override
-  Stream<List<TrackInfo>> get subtitleTracksStream => _subtitleTracksController.stream;
+  Stream<List<TrackInfo>> get subtitleTracksStream =>
+      _subtitleTracksController.stream;
   @override
-  Stream<List<TrackInfo>> get videoTracksStream => _videoTracksController.stream;
+  Stream<List<TrackInfo>> get videoTracksStream =>
+      _videoTracksController.stream;
 }

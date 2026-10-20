@@ -12,6 +12,11 @@ import '../../../core/config/windows_config_storage.dart';
 import '../../../core/live/epg_repository.dart';
 import '../../../core/player/models/player_settings.dart';
 import '../../../core/settings/models/appearance_preferences.dart';
+import '../../theme/app_icon_assets.dart';
+import '../../theme/app_palette.dart';
+import '../widgets/app_message.dart';
+import '../widgets/focus_ring.dart';
+import '../../theme/app_tokens.dart';
 import '../../../core/settings/models/play_skip_preferences.dart';
 import '../../../core/settings/wallpaper_store.dart';
 import '../../../core/storage/cache_maintenance.dart';
@@ -34,14 +39,6 @@ import 'site_self_check_dialog.dart';
 
 /// 设置中心分区
 enum SettingsSection { configSources, general, appearance, player, about }
-
-const _kAccent = Color(0xFFE50914);
-const _kPanel = Color(0xFF15151E);
-const _kCard = Color(0xFF1B1B25);
-const _kBorder = Color(0xFF262634);
-const _kTextMain = Color(0xFFE6E6F0);
-const _kTextSub = Color(0xFF8C8CA0);
-const _kTextDim = Color(0xFF66667A);
 
 /// 独立全屏设置中心：左侧分区导航 + 右侧内容面板
 class SettingsPage extends StatefulWidget {
@@ -88,6 +85,9 @@ class SettingsPage extends StatefulWidget {
   /// 壁纸选择器（可注入以便测试；缺省弹出系统文件选择框）
   final Future<String?> Function()? pickWallpaperPath;
 
+  /// 关于页的更新区块（由宿主注入，缺省不显示，避免设置页依赖更新控制器）
+  final Widget? updateSection;
+
   const SettingsPage({
     super.key,
     required this.configRepository,
@@ -107,6 +107,7 @@ class SettingsPage extends StatefulWidget {
     this.pickBackupOpenPath,
     this.wallpaperStore,
     this.pickWallpaperPath,
+    this.updateSection,
   });
 
   @override
@@ -135,12 +136,14 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     return CallbackShortcuts(
-      bindings: {const SingleActivator(LogicalKeyboardKey.escape): widget.onClose},
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.escape): widget.onClose
+      },
       child: Focus(
         focusNode: _focusNode,
         autofocus: true,
         child: ColoredBox(
-          color: const Color(0xFF101014),
+          color: context.palette.background,
           child: Padding(
             padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
             child: Row(
@@ -151,16 +154,18 @@ class _SettingsPageState extends State<SettingsPage> {
                 Expanded(
                   child: Container(
                     decoration: BoxDecoration(
-                      color: const Color(0xFF121218),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: const Color(0xFF242430)),
+                      color: context.palette.panel,
+                      borderRadius: BorderRadius.circular(AppRadii.lg),
+                      border: Border.all(color: context.palette.divider),
                     ),
                     clipBehavior: Clip.antiAlias,
                     child: Column(
                       children: [
-                        _SettingsSaveBanner(key: ObjectKey(widget.settingsRepository),
+                        _SettingsSaveBanner(
+                            key: ObjectKey(widget.settingsRepository),
                             repository: widget.settingsRepository),
-                        _HomeSiteStatusBanner(repository: widget.configRepository),
+                        _HomeSiteStatusBanner(
+                            repository: widget.configRepository),
                         Expanded(
                           child: switch (_section) {
                             SettingsSection.configSources => ConfigSourcesPanel(
@@ -190,13 +195,15 @@ class _SettingsPageState extends State<SettingsPage> {
                                         probeSize: probeWallpaperImageSize),
                                 pickWallpaperPath: widget.pickWallpaperPath,
                               ),
-                            SettingsSection.player => PlayerSettingsPanel(                                key: const ValueKey('settings-player'),
+                            SettingsSection.player => PlayerSettingsPanel(
+                                key: const ValueKey('settings-player'),
                                 settingsRepository: widget.settingsRepository,
                                 application: widget.playerSettingsApplication,
                               ),
                             SettingsSection.about => AboutPanel(
                                 key: const ValueKey('settings-about'),
                                 playerEngine: widget.playerEngine,
+                                updateSection: widget.updateSection,
                               ),
                           },
                         ),
@@ -217,9 +224,9 @@ class _SettingsPageState extends State<SettingsPage> {
       width: 180,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
       decoration: BoxDecoration(
-        color: _kPanel,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _kBorder, width: 1.2),
+        color: context.palette.panel,
+        borderRadius: BorderRadius.circular(AppRadii.lg),
+        border: Border.all(color: context.palette.border, width: 1.2),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -229,43 +236,48 @@ class _SettingsPageState extends State<SettingsPage> {
             icon: const Icon(Icons.arrow_back_rounded, size: 18),
             label: const Text('返回'),
             style: TextButton.styleFrom(
-              foregroundColor: _kTextSub,
+              foregroundColor: context.palette.textSub,
               alignment: Alignment.centerLeft,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
             ),
           ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(12, 6, 12, 14),
-            child: Text('设置中心', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: Colors.white)),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+            child: Text('设置中心',
+                style: TextStyle(
+                    fontSize: AppType.h2,
+                    fontWeight: FontWeight.bold,
+                    color: context.palette.textTitle)),
           ),
           _SectionTab(
             icon: Icons.cloud_sync_outlined,
             label: '配置源管理',
             selected: _section == SettingsSection.configSources,
-            onTap: () => setState(() => _section = SettingsSection.configSources),
+            onTap: () =>
+                setState(() => _section = SettingsSection.configSources),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           _SectionTab(
             icon: Icons.rocket_launch_outlined,
             label: '通用',
             selected: _section == SettingsSection.general,
             onTap: () => setState(() => _section = SettingsSection.general),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           _SectionTab(
             icon: Icons.image_outlined,
             label: '外观',
             selected: _section == SettingsSection.appearance,
             onTap: () => setState(() => _section = SettingsSection.appearance),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           _SectionTab(
             icon: Icons.tune_rounded,
             label: '播放器与解码',
             selected: _section == SettingsSection.player,
             onTap: () => setState(() => _section = SettingsSection.player),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           _SectionTab(
             icon: Icons.info_outline,
             label: '关于',
@@ -284,39 +296,58 @@ class _SectionTab extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
 
-  const _SectionTab({required this.icon, required this.label, required this.selected, required this.onTap});
+  const _SectionTab(
+      {required this.icon,
+      required this.label,
+      required this.selected,
+      required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: selected ? const Color(0xFF2A1418) : Colors.transparent,
-      borderRadius: BorderRadius.circular(10),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(10),
+    return FocusRing(
         onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: selected ? _kAccent : Colors.transparent),
-          ),
-          child: Row(
-            children: [
-              Icon(icon, size: 18, color: selected ? _kAccent : _kTextSub),
-              const SizedBox(width: 10),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: selected ? FontWeight.bold : FontWeight.w500,
-                  color: selected ? Colors.white : const Color(0xFFC0C0D0),
-                ),
+        semanticLabel: label,
+        borderRadius: const BorderRadius.all(Radius.circular(AppRadii.md)),
+        child: Material(
+          color: selected ? context.palette.accentWash : Colors.transparent,
+          borderRadius: BorderRadius.circular(AppRadii.md),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(AppRadii.md),
+            // hover 底用语义色板（B6：与主题同源，深浅两端都可辨）
+            hoverColor: context.palette.hover,
+            onTap: onTap,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(AppRadii.md),
+                border: Border.all(
+                    color: selected
+                        ? context.palette.accentInk
+                        : Colors.transparent),
               ),
-            ],
+              child: Row(
+                children: [
+                  Icon(icon,
+                      size: 18,
+                      color: selected
+                          ? context.palette.accentInk
+                          : context.palette.textSub),
+                  const SizedBox(width: 12),
+                  Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: AppType.label,
+                      fontWeight: selected ? FontWeight.bold : FontWeight.w500,
+                      color: selected
+                          ? context.palette.textTitle
+                          : context.palette.textBody,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
-        ),
-      ),
-    );
+        ));
   }
 }
 
@@ -327,12 +358,16 @@ class _PanelScaffold extends StatelessWidget {
   final List<Widget> actions;
   final List<Widget> children;
 
-  const _PanelScaffold({required this.title, required this.subtitle, this.actions = const [], required this.children});
+  const _PanelScaffold(
+      {required this.title,
+      required this.subtitle,
+      this.actions = const [],
+      required this.children});
 
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 20, 24, 28),
+      padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -342,16 +377,23 @@ class _PanelScaffold extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+                    Text(title,
+                        style: TextStyle(
+                            fontSize: AppType.h2,
+                            fontWeight: FontWeight.bold,
+                            color: context.palette.textTitle)),
                     const SizedBox(height: 4),
-                    Text(subtitle, style: const TextStyle(fontSize: 12, color: _kTextSub)),
+                    Text(subtitle,
+                        style: TextStyle(
+                            fontSize: AppType.body,
+                            color: context.palette.textSub)),
                   ],
                 ),
               ),
               ...actions,
             ],
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 24),
           ...children,
         ],
       ),
@@ -359,25 +401,60 @@ class _PanelScaffold extends StatelessWidget {
   }
 }
 
-Widget _card({required Widget child, EdgeInsetsGeometry padding = const EdgeInsets.all(16)}) {
+Widget _card(BuildContext context,
+    {required Widget child,
+    EdgeInsetsGeometry padding = const EdgeInsets.all(16)}) {
   return Container(
     padding: padding,
     decoration: BoxDecoration(
-      color: _kCard,
-      borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: _kBorder),
+      color: context.palette.card,
+      borderRadius: BorderRadius.circular(AppRadii.md),
+      border: Border.all(color: context.palette.border),
     ),
     child: child,
   );
 }
 
-ButtonStyle _outlinedStyle() => OutlinedButton.styleFrom(
-      foregroundColor: const Color(0xFFD0D0DE),
-      side: const BorderSide(color: Color(0xFF383844)),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      textStyle: const TextStyle(fontSize: 12.5),
+ButtonStyle _outlinedStyle(BuildContext context) => OutlinedButton.styleFrom(
+      foregroundColor: context.palette.textBody,
+      side: BorderSide(color: context.palette.borderStrong),
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadii.sm)),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      textStyle: const TextStyle(fontSize: AppType.label),
     );
+
+/// 主按钮（品牌底）统一样式：弹窗确认、添加配置源、选择壁纸共用。
+///
+/// `foregroundColor` 必须显式给 `onPrimary`：M3 下 `ElevatedButton` 的默认
+/// 前景是 `colorScheme.primary`（品牌色本身），只换背景会得到「同色字压同色底」
+/// 的不可见按钮（2026-10-19 实机复现后修复）。
+ButtonStyle _primaryStyle(BuildContext context) => ElevatedButton.styleFrom(
+      backgroundColor: context.palette.accent,
+      foregroundColor: Theme.of(context).colorScheme.onPrimary,
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadii.sm)),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      textStyle: const TextStyle(fontSize: AppType.label),
+    );
+
+/// 设置项行内下拉的统一外观：深底 + 描边 + 定宽。
+///
+/// 外壳只是绘制层：内部的 `DropdownButton`（含 key 与 onChanged）保持原样，
+/// 测试与无障碍对控件类型的依赖不受影响。
+Widget _boxedDropdown(BuildContext context,
+    {double width = _kSelectWidth, required Widget child}) {
+  return Container(
+    width: width,
+    padding: const EdgeInsets.symmetric(horizontal: 12),
+    decoration: BoxDecoration(
+      color: context.palette.raised,
+      borderRadius: BorderRadius.circular(AppRadii.sm),
+      border: Border.all(color: context.palette.borderStrong),
+    ),
+    child: DropdownButtonHideUnderline(child: child),
+  );
+}
 
 String _formatTime(int millis) {
   if (millis <= 0) return '—';
@@ -391,6 +468,10 @@ String _errorText(Object error) {
   if (error is StateError) return error.message;
   return error.toString().replaceFirst('Exception: ', '');
 }
+
+/// 设置项行内控件定宽（下拉 / 滑块右置时的统一宽度）。
+const double _kSelectWidth = 240;
+const double _kSliderWidth = 300;
 
 // =====================================================================
 // 配置源管理
@@ -430,14 +511,16 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
 
   // 流只创建一次：每次 build 重新取 getter 会让 StreamBuilder 反复退订 / 重订
   late final Stream<VodConfig> _configStream = _repo.vodConfigStream;
-  late final Stream<List<ConfigSourceEntry>> _sourcesStream = _settings.configSourcesStream;
-  late final Stream<SelfCheckPreferences> _selfCheckStream = _settings.selfCheckPreferencesStream;
+  late final Stream<List<ConfigSourceEntry>> _sourcesStream =
+      _settings.configSourcesStream;
+  late final Stream<SelfCheckPreferences> _selfCheckStream =
+      _settings.selfCheckPreferencesStream;
 
-  void _toast(String message) {
+  void _toast(String message, {AppMessageType type = AppMessageType.info}) {
     if (!mounted) return;
-    ScaffoldMessenger.maybeOf(context)
-      ?..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 3)));
+    // 同文案消息由 AppMessageHost 合并并重置倒计时，替代 hideCurrentSnackBar 的
+    // 「替换上一条」语义。
+    showAppMessage(message, type: type);
   }
 
   Future<int?> _defaultSelectDepot(List<DepotEntry> entries) async {
@@ -450,16 +533,19 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
     );
   }
 
-  Future<void> _runLoad(String key, Future<VodConfig> Function() task, String successLabel) async {
+  Future<void> _runLoad(String key, Future<VodConfig> Function() task,
+      String successLabel) async {
     if (_loadingKey != null) return;
     setState(() => _loadingKey = key);
     try {
       final config = await task();
-      _toast('$successLabel：${config.sites.length} 个站点 · ${config.lives.length} 个直播');
+      _toast(
+          '$successLabel：${config.sites.length} 个站点 · ${config.lives.length} 个直播',
+          type: AppMessageType.success);
     } on DepotSelectionCancelled {
       // 用户取消选仓：保持当前配置
     } catch (error) {
-      _toast('加载失败：${_errorText(error)}');
+      _toast('加载失败：${_errorText(error)}', type: AppMessageType.error);
     } finally {
       if (mounted) setState(() => _loadingKey = null);
     }
@@ -482,7 +568,9 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
     try {
       await _repo.setDefaultHomeSite(site, configIdentity: identity);
     } catch (error) {
-      if (_repo.homeSiteSaveError == null) _toast(_errorText(error));
+      if (_repo.homeSiteSaveError == null) {
+        _toast(_errorText(error), type: AppMessageType.error);
+      }
     }
   }
 
@@ -498,59 +586,78 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
               _repo.homeSiteReadError == null &&
               (sites.isNotEmpty || _repo.homeSitePreference != null);
           return _card(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('首页默认站源',
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextMain)),
-                const SizedBox(height: 8),
-                Semantics(
+            context,
+            child: _SettingRow(
+              title: '首页默认站源',
+              description: _repo.currentVodConfig.sites.isEmpty
+                  ? '请先导入包含站点的配置'
+                  : '下次启动或切回此配置时生效；标题栏临时切站不会修改此偏好。自动选择沿用原有规则。',
+              trailing: _boxedDropdown(
+                context,
+                child: Semantics(
                   label: '首页默认站源',
                   child: DropdownButton<int>(
                     key: const ValueKey('default-home-site'),
                     value: fallback == null ? selected : -2,
                     isExpanded: true,
-                    dropdownColor: const Color(0xFF202026),
-                    style: const TextStyle(fontSize: 12.5, color: _kTextMain),
+                    dropdownColor: context.palette.raised,
+                    style: TextStyle(
+                        fontSize: AppType.label,
+                        color: context.palette.textMain),
                     items: [
                       const DropdownMenuItem(value: -1, child: Text('自动选择')),
                       if (fallback != null)
                         DropdownMenuItem(
                           value: -2,
                           enabled: false,
-                          child: Text('已失效：${_repo.homeSitePreference!.name}', overflow: TextOverflow.ellipsis),
+                          child: Text('已失效：${_repo.homeSitePreference!.name}',
+                              overflow: TextOverflow.ellipsis),
                         ),
                       for (var i = 0; i < sites.length; i++)
                         DropdownMenuItem(
                           value: i,
                           child: Text(
-                            sites.where((site) => site.name == sites[i].name).length > 1
+                            sites
+                                        .where((site) =>
+                                            site.name == sites[i].name)
+                                        .length >
+                                    1
                                 ? '${sites[i].name}（${sites[i].key}）'
                                 : sites[i].name,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                     ],
-                    onChanged: !enabled ? null : (index) {
-                      if (index == null || index == -2) return;
-                      unawaited(_setHomeSite(index == -1 ? null : sites[index], identity));
-                    },
+                    onChanged: !enabled
+                        ? null
+                        : (index) {
+                            if (index == null || index == -2) return;
+                            unawaited(_setHomeSite(
+                                index == -1 ? null : sites[index], identity));
+                          },
                   ),
                 ),
-                Text(
-                  _repo.currentVodConfig.sites.isEmpty
-                      ? '请先导入包含站点的配置'
-                      : '下次启动或切回此配置时生效；标题栏临时切站不会修改此偏好。自动选择沿用原有规则。',
-                  style: const TextStyle(fontSize: 11.5, color: _kTextSub),
-                ),
-                if (sites.length < _repo.currentVodConfig.sites.length)
-                  const Text('无有效请求路径或标识重复的站源不可设为默认；可选择不代表远端可用。',
-                      style: TextStyle(fontSize: 11.5, color: _kTextSub)),
-                if (fallback != null) ...[
-                  const SizedBox(height: 8),
-                  Text(fallback, style: const TextStyle(fontSize: 12, color: Colors.orangeAccent)),
-                ],
-              ],
+              ),
+              footer: (sites.length < _repo.currentVodConfig.sites.length ||
+                      fallback != null)
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (sites.length < _repo.currentVodConfig.sites.length)
+                          Text('无有效请求路径或标识重复的站源不可设为默认；可选择不代表远端可用。',
+                              style: TextStyle(
+                                  fontSize: AppType.caption,
+                                  color: context.palette.textSub)),
+                        if (fallback != null) ...[
+                          const SizedBox(height: 8),
+                          Text(fallback,
+                              style: TextStyle(
+                                  fontSize: AppType.body,
+                                  color: context.palette.warning)),
+                        ],
+                      ],
+                    )
+                  : null,
             ),
           );
         },
@@ -570,7 +677,7 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
       _toast('正在启动本地站点服务…');
       final started = await manager.start();
       if (!started || !manager.isRunning) {
-        _toast('本地站点服务未启动，无法体检');
+        _toast('本地站点服务未启动，无法体检', type: AppMessageType.warning);
         return;
       }
     }
@@ -614,17 +721,25 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        backgroundColor: const Color(0xFF202026),
-        title: const Text('移除配置源', style: TextStyle(fontSize: 15, color: Colors.white)),
+        backgroundColor: context.palette.raised,
+        title: Text('移除配置源',
+            style: TextStyle(
+                fontSize: AppType.heading, color: context.palette.textTitle)),
         content: Text(
           '从历史中移除「${entry.displayName}」？\n不影响当前已加载的配置，也不会删除本地文件。',
-          style: const TextStyle(fontSize: 13, height: 1.5, color: Color(0xFFC0C0D0)),
+          style: TextStyle(
+              fontSize: AppType.label,
+              height: 1.5,
+              color: context.palette.textBody),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('取消')),
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('移除', style: TextStyle(color: _kAccent)),
+            // 「移除配置源」是破坏性操作，按 destructive-emphasis 用危险色
+            child: Text('移除', style: TextStyle(color: context.palette.danger)),
           ),
         ],
       ),
@@ -637,7 +752,9 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
   Future<String?> _defaultPickExportPath(String suggestedName) async {
     final location = await getSaveLocation(
       suggestedName: suggestedName,
-      acceptedTypeGroups: const [XTypeGroup(label: 'JSON 配置', extensions: ['json'])],
+      acceptedTypeGroups: const [
+        XTypeGroup(label: 'JSON 配置', extensions: ['json'])
+      ],
     );
     return location?.path;
   }
@@ -651,9 +768,9 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
       if (path == null || path.trim().isEmpty) return;
       if (!path.toLowerCase().endsWith('.json')) path = '$path.json';
       await _repo.exportCurrentConfig(path);
-      _toast('已导出到 $path');
+      _toast('已导出到 $path', type: AppMessageType.success);
     } catch (error) {
-      _toast('导出失败：${_errorText(error)}');
+      _toast('导出失败：${_errorText(error)}', type: AppMessageType.error);
     } finally {
       if (mounted) setState(() => _exporting = false);
     }
@@ -691,8 +808,10 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
     bool selfCheckEnabled,
   ) {
     final hasConfig = config.sites.isNotEmpty || config.lives.isNotEmpty;
-    final canReload = hasConfig && currentKind != null && currentLocation != null;
-    final companionSites = config.sites.where((site) => site.usesCompanion).toList();
+    final canReload =
+        hasConfig && currentKind != null && currentLocation != null;
+    final companionSites =
+        config.sites.where((site) => site.usesCompanion).toList();
     final sourceText = !hasConfig
         ? '尚未加载配置'
         : currentLocation == null
@@ -704,31 +823,35 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
       subtitle: '管理订阅地址与本地配置，测试连通性，一键切换、重新加载或导出',
       actions: [
         ElevatedButton.icon(
-          onPressed: _loadingKey != null ? null : () => widget.onAddConfig(context),
+          onPressed:
+              _loadingKey != null ? null : () => widget.onAddConfig(context),
           icon: const Icon(Icons.add_rounded, size: 18),
           label: const Text('添加配置源'),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: _kAccent,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          ),
+          style: _primaryStyle(context),
         ),
       ],
       children: [
         if (_repo.sourceRecoveryError case final error?) ...[
-          _card(child: Text(error, style: const TextStyle(color: Colors.orangeAccent))),
+          _card(context,
+              child: Text(error,
+                  style: TextStyle(color: context.palette.warning))),
           const SizedBox(height: 16),
         ],
         _card(
+          context,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('当前配置', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextMain)),
+              Text('当前配置',
+                  style: TextStyle(
+                      fontSize: AppType.label,
+                      fontWeight: FontWeight.bold,
+                      color: context.palette.textMain)),
               const SizedBox(height: 8),
               SelectableText(
                 sourceText,
-                style: const TextStyle(fontSize: 12.5, color: _kTextSub),
+                style: TextStyle(
+                    fontSize: AppType.label, color: context.palette.textSub),
               ),
               const SizedBox(height: 10),
               Wrap(
@@ -740,49 +863,56 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
                   _StatChip(label: '解析', value: config.parses.length),
                 ],
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 16),
               Wrap(
-                spacing: 10,
-                runSpacing: 10,
+                spacing: 12,
+                runSpacing: 12,
                 children: [
                   OutlinedButton.icon(
-                    onPressed: canReload && _loadingKey == null ? _reload : null,
+                    onPressed:
+                        canReload && _loadingKey == null ? _reload : null,
                     icon: _loadingKey == 'reload'
-                        ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2))
                         : const Icon(Icons.refresh_rounded, size: 16),
                     label: const Text('重新加载'),
-                    style: _outlinedStyle(),
+                    style: _outlinedStyle(context),
                   ),
                   OutlinedButton.icon(
                     onPressed: hasConfig && !_exporting ? _export : null,
                     icon: const Icon(Icons.file_download_outlined, size: 16),
                     label: const Text('导出当前配置'),
-                    style: _outlinedStyle(),
+                    style: _outlinedStyle(context),
                   ),
                   OutlinedButton.icon(
                     onPressed: selfCheckEnabled && companionSites.isNotEmpty
                         ? () => unawaited(_openSelfCheck(config))
                         : null,
-                    icon: const Icon(Icons.health_and_safety_outlined, size: 16),
+                    icon:
+                        const Icon(Icons.health_and_safety_outlined, size: 16),
                     label: const Text('站点体检'),
-                    style: _outlinedStyle(),
+                    style: _outlinedStyle(context),
                   ),
                 ],
               ),
               if (!selfCheckEnabled)
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
                   child: Text(
                     '「站点体检」需先在「通用」中开启「站点自检」开关；关闭时不打印体检日志，也不发起探测。',
-                    style: TextStyle(fontSize: 11.5, color: _kTextSub),
+                    style: TextStyle(
+                        fontSize: AppType.body, color: context.palette.textSub),
                   ),
                 )
               else if (companionSites.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
                   child: Text(
                     '当前配置没有需要本地站点服务的站源（csp_ / .js 等），无需体检。',
-                    style: TextStyle(fontSize: 11.5, color: _kTextSub),
+                    style: TextStyle(
+                        fontSize: AppType.body, color: context.palette.textSub),
                   ),
                 ),
             ],
@@ -790,11 +920,14 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
         ),
         const SizedBox(height: 16),
         _buildHomeSiteCard(),
-        const SizedBox(height: 22),
+        const SizedBox(height: 24),
         Row(
           children: [
             Text('配置源历史（${sources.length}）',
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: _kTextMain)),
+                style: TextStyle(
+                    fontSize: AppType.title,
+                    fontWeight: FontWeight.bold,
+                    color: context.palette.textMain)),
             const Spacer(),
             TextButton.icon(
               onPressed: sources.isEmpty ? null : () => _probeAll(sources),
@@ -803,19 +936,22 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
             ),
           ],
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 12),
         if (sources.isEmpty)
           _card(
-            child: const Text(
+            context,
+            child: Text(
               '暂无记录。通过「添加配置源」成功加载的地址或本地文件会自动出现在这里。',
-              style: TextStyle(fontSize: 12.5, color: _kTextSub),
+              style: TextStyle(
+                  fontSize: AppType.label, color: context.palette.textSub),
             ),
           )
         else
           for (final entry in sources) ...[
             _SourceRow(
               entry: entry,
-              isCurrent: entry.kind == currentKind && entry.location == currentLocation,
+              isCurrent: entry.kind == currentKind &&
+                  entry.location == currentLocation,
               probe: _probeResults[entry.location],
               probing: _probing.contains(entry.location),
               loading: _loadingKey == entry.location,
@@ -843,7 +979,8 @@ class _RenameDialog extends StatefulWidget {
 }
 
 class _RenameDialogState extends State<_RenameDialog> {
-  late final TextEditingController _controller = TextEditingController(text: widget.initialName);
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.initialName);
 
   @override
   void dispose() {
@@ -854,21 +991,28 @@ class _RenameDialogState extends State<_RenameDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      backgroundColor: const Color(0xFF202026),
-      title: const Text('重命名配置源', style: TextStyle(fontSize: 15, color: Colors.white)),
+      backgroundColor: context.palette.raised,
+      title: Text('重命名配置源',
+          style: TextStyle(
+              fontSize: AppType.heading, color: context.palette.textTitle)),
       content: SizedBox(
         width: 420,
         child: TextField(
           controller: _controller,
           autofocus: true,
-          style: const TextStyle(fontSize: 13, color: Colors.white),
+          style: TextStyle(
+              fontSize: AppType.label, color: context.palette.textMain),
           decoration: const InputDecoration(hintText: '留空则显示地址'),
           onSubmitted: (value) => Navigator.of(context).pop(value),
         ),
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('取消')),
-        TextButton(onPressed: () => Navigator.of(context).pop(_controller.text), child: const Text('保存')),
+        TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消')),
+        TextButton(
+            onPressed: () => Navigator.of(context).pop(_controller.text),
+            child: const Text('保存')),
       ],
     );
   }
@@ -884,8 +1028,12 @@ class _StatChip extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(color: const Color(0xFF23232F), borderRadius: BorderRadius.circular(6)),
-      child: Text('$label $value', style: const TextStyle(fontSize: 12, color: Color(0xFFC8C8D8))),
+      decoration: BoxDecoration(
+          color: context.palette.raised,
+          borderRadius: BorderRadius.circular(AppRadii.sm)),
+      child: Text('$label $value',
+          style: TextStyle(
+              fontSize: AppType.body, color: context.palette.textBody)),
     );
   }
 }
@@ -919,10 +1067,12 @@ class _SourceRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final isFile = entry.kind == ConfigSourceKind.file;
     return _card(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      context,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         children: [
-          Icon(isFile ? Icons.insert_drive_file_outlined : Icons.link_rounded, size: 20, color: _kTextSub),
+          Icon(isFile ? Icons.insert_drive_file_outlined : Icons.link_rounded,
+              size: 18, color: context.palette.textSub),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -935,15 +1085,26 @@ class _SourceRow extends StatelessWidget {
                         entry.displayName,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kTextMain),
+                        style: TextStyle(
+                            fontSize: AppType.label,
+                            fontWeight: FontWeight.w600,
+                            color: context.palette.textMain),
                       ),
                     ),
                     if (isCurrent) ...[
                       const SizedBox(width: 8),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(color: _kAccent, borderRadius: BorderRadius.circular(4)),
-                        child: const Text('当前', style: TextStyle(fontSize: 10.5, color: Colors.white)),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                            color: context.palette.accent,
+                            borderRadius: BorderRadius.circular(AppRadii.xs)),
+                        // 角标压在品牌色上，文字跟随 onPrimary（近黑）
+                        child: Text('当前',
+                            style: TextStyle(
+                                fontSize: AppType.caption,
+                                color:
+                                    Theme.of(context).colorScheme.onPrimary)),
                       ),
                     ],
                   ],
@@ -953,12 +1114,15 @@ class _SourceRow extends StatelessWidget {
                   Text(entry.location,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11.5, color: _kTextDim)),
+                      style: TextStyle(
+                          fontSize: AppType.body,
+                          color: context.palette.textSub)),
                 ],
                 const SizedBox(height: 4),
                 Text(
                   '${isFile ? '本地文件' : '远程订阅'} · 上次使用 ${_formatTime(entry.lastUsedAt)} · ${entry.siteCount} 个站点',
-                  style: const TextStyle(fontSize: 11.5, color: _kTextDim),
+                  style: TextStyle(
+                      fontSize: AppType.body, color: context.palette.textSub),
                 ),
                 if (probing || probe != null) ...[
                   const SizedBox(height: 4),
@@ -971,7 +1135,10 @@ class _SourceRow extends StatelessWidget {
           TextButton(
             onPressed: loadDisabled ? null : onUse,
             child: loading
-                ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2))
                 : Text(isCurrent ? '重新使用' : '使用'),
           ),
           IconButton(
@@ -979,8 +1146,14 @@ class _SourceRow extends StatelessWidget {
             onPressed: probing ? null : onProbe,
             icon: const Icon(Icons.network_check_rounded, size: 18),
           ),
-          IconButton(tooltip: '重命名', onPressed: onRename, icon: const Icon(Icons.edit_outlined, size: 18)),
-          IconButton(tooltip: '移除', onPressed: onRemove, icon: const Icon(Icons.delete_outline_rounded, size: 18)),
+          IconButton(
+              tooltip: '重命名',
+              onPressed: onRename,
+              icon: const Icon(Icons.edit_outlined, size: 18)),
+          IconButton(
+              tooltip: '移除',
+              onPressed: onRemove,
+              icon: const Icon(Icons.delete_outline_rounded, size: 18)),
         ],
       ),
     );
@@ -996,20 +1169,23 @@ class _ProbeLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (probing) {
-      return const Text('测试中…', style: TextStyle(fontSize: 11.5, color: _kTextSub));
+      return Text('测试中…',
+          style: TextStyle(
+              fontSize: AppType.body, color: context.palette.textSub));
     }
     final result = probe!;
-    final color = result.ok ? const Color(0xFF4CC38A) : const Color(0xFFFF7A7A);
+    final color = result.ok ? context.palette.success : context.palette.danger;
     return Row(
       children: [
-        Icon(result.ok ? Icons.check_circle_rounded : Icons.error_rounded, size: 13, color: color),
+        Icon(result.ok ? Icons.check_circle_rounded : Icons.error_rounded,
+            size: 14, color: color),
         const SizedBox(width: 4),
         Flexible(
           child: Text(
             '${result.message} · ${result.latency.inMilliseconds} ms',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 11.5, color: color),
+            style: TextStyle(fontSize: AppType.body, color: color),
           ),
         ),
       ],
@@ -1027,7 +1203,8 @@ class PlayerSettingsPanel extends StatefulWidget {
 
   final PlayerSettingsApplication? application;
 
-  const PlayerSettingsPanel({super.key, required this.settingsRepository, this.application});
+  const PlayerSettingsPanel(
+      {super.key, required this.settingsRepository, this.application});
 
   static const List<double> rateOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
 
@@ -1039,7 +1216,8 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
   static const List<double> rateOptions = PlayerSettingsPanel.rateOptions;
 
   SettingsRepository get settingsRepository => widget.settingsRepository;
-  late final Stream<PlayerSettings> _stream = settingsRepository.playerSettingsStream;
+  late final Stream<PlayerSettings> _stream =
+      settingsRepository.playerSettingsStream;
 
   /// 片头片尾偏好：本面板持有一条订阅（避免 StreamBuilder 在懒加载列表中重复监听同一流）
   PlaySkipPreferences _playSkip = const PlaySkipPreferences();
@@ -1051,7 +1229,8 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
     super.initState();
     _playSkip = settingsRepository.playSkipPreferences;
     _playSkipReadFailed = settingsRepository.playSkipReadFailed;
-    _playSkipSubscription = settingsRepository.playSkipPreferencesStream.listen((next) {
+    _playSkipSubscription =
+        settingsRepository.playSkipPreferencesStream.listen((next) {
       if (!mounted) return;
       setState(() {
         _playSkip = next;
@@ -1090,17 +1269,20 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
           subtitle: '修改后自动保存；即时参数的播放器确认结果见下方，保存与应用相互独立',
           actions: [
             OutlinedButton.icon(
-              onPressed: s == PlayerSettings.defaults ? null : () => unawaited(_saveWithStatus(settingsRepository.resetPlayerSettings())),
+              onPressed: s == PlayerSettings.defaults
+                  ? null
+                  : () => unawaited(_saveWithStatus(
+                      settingsRepository.resetPlayerSettings())),
               icon: const Icon(Icons.restart_alt_rounded, size: 16),
               label: const Text('恢复默认'),
-              style: _outlinedStyle(),
+              style: _outlinedStyle(context),
             ),
           ],
           children: [
             _PlayerApplicationStatus(application: widget.application),
-            const SizedBox(height: 16),
             const _GroupTitle('解码'),
             _card(
+              context,
               child: Column(
                 children: [
                   _SettingRow(
@@ -1122,17 +1304,20 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                       value: s.cacheSecs.toDouble(),
                       min: PlayerSettings.minCacheSecs.toDouble(),
                       max: PlayerSettings.maxCacheSecs.toDouble(),
-                      divisions: (PlayerSettings.maxCacheSecs - PlayerSettings.minCacheSecs) ~/ 5,
+                      divisions: (PlayerSettings.maxCacheSecs -
+                              PlayerSettings.minCacheSecs) ~/
+                          5,
                       format: (v) => '${v.round()} 秒',
-                      onCommit: (v) => _update(s.copyWith(cacheSecs: v.round())),
+                      onCommit: (v) =>
+                          _update(s.copyWith(cacheSecs: v.round())),
                     ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 18),
             const _GroupTitle('音频'),
             _card(
+              context,
               child: Column(
                 children: [
                   _SettingRow(
@@ -1154,9 +1339,13 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                       value: s.audioDelayMs.toDouble(),
                       min: PlayerSettings.minAudioDelayMs.toDouble(),
                       max: PlayerSettings.maxAudioDelayMs.toDouble(),
-                      divisions: (PlayerSettings.maxAudioDelayMs - PlayerSettings.minAudioDelayMs) ~/ 100,
-                      format: (v) => '${v >= 0 ? '+' : ''}${(v / 1000).toStringAsFixed(1)} 秒',
-                      onCommit: (v) => _update(s.copyWith(audioDelayMs: v.round())),
+                      divisions: (PlayerSettings.maxAudioDelayMs -
+                              PlayerSettings.minAudioDelayMs) ~/
+                          100,
+                      format: (v) =>
+                          '${v >= 0 ? '+' : ''}${(v / 1000).toStringAsFixed(1)} 秒',
+                      onCommit: (v) =>
+                          _update(s.copyWith(audioDelayMs: v.round())),
                     ),
                   ),
                   const _RowDivider(),
@@ -1170,7 +1359,8 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                       max: 100,
                       divisions: 20,
                       format: (v) => '${v.round()}%',
-                      onCommit: (v) => _update(s.copyWith(defaultVolume: v.roundToDouble())),
+                      onCommit: (v) =>
+                          _update(s.copyWith(defaultVolume: v.roundToDouble())),
                     ),
                   ),
                   const _RowDivider(),
@@ -1179,17 +1369,21 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                     description: '下次启动时的初始播放倍速',
                     trailing: _OptionDropdown(
                       key: const ValueKey('setting-rate'),
-                      options: [for (final r in rateOptions) PlayerOption('$r', '${r}x')],
-                      value: '${rateOptions.contains(s.defaultRate) ? s.defaultRate : 1.0}',
-                      onChanged: (v) => _update(s.copyWith(defaultRate: double.parse(v))),
+                      options: [
+                        for (final r in rateOptions) PlayerOption('$r', '${r}x')
+                      ],
+                      value:
+                          '${rateOptions.contains(s.defaultRate) ? s.defaultRate : 1.0}',
+                      onChanged: (v) =>
+                          _update(s.copyWith(defaultRate: double.parse(v))),
                     ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 18),
             const _GroupTitle('片头片尾'),
             _card(
+              context,
               child: _SettingRow(
                 title: '片头片尾跳过',
                 description: _playSkipReadFailed
@@ -1214,9 +1408,9 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                     : null,
               ),
             ),
-            const SizedBox(height: 18),
             const _GroupTitle('画面'),
             _card(
+              context,
               child: Column(
                 children: [
                   _SettingRow(
@@ -1264,10 +1458,11 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                 ],
               ),
             ),
-            const SizedBox(height: 14),
-            const Text(
+            const SizedBox(height: 16),
+            Text(
               '说明：渲染由 media_kit 纹理管线（Direct3D 11）负责，本版本不提供渲染后端与播放内核切换。',
-              style: TextStyle(fontSize: 11.5, color: _kTextDim),
+              style: TextStyle(
+                  fontSize: AppType.body, color: context.palette.textSub),
             ),
           ],
         );
@@ -1284,8 +1479,12 @@ class _GroupTitle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(left: 2, bottom: 8),
-      child: Text(text, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextSub)),
+      padding: const EdgeInsets.fromLTRB(2, 24, 2, 8),
+      child: Text(text,
+          style: TextStyle(
+              fontSize: AppType.label,
+              fontWeight: FontWeight.bold,
+              color: context.palette.textSub)),
     );
   }
 }
@@ -1294,18 +1493,28 @@ class _RowDivider extends StatelessWidget {
   const _RowDivider();
 
   @override
-  Widget build(BuildContext context) => const Divider(height: 22, color: Color(0xFF2A2A38));
+  Widget build(BuildContext context) =>
+      Divider(height: 26, color: context.palette.divider);
 }
 
 class _SettingRow extends StatelessWidget {
   final String title;
   final String description;
+
+  /// 覆盖描述颜色（读取失败等警示场景用 `warning`）。
+  final Color? descriptionColor;
+
   final Widget trailing;
 
   /// 可选脚注（如读取失败后的「重新读取」入口），占满整行宽度。
   final Widget? footer;
 
-  const _SettingRow({required this.title, required this.description, required this.trailing, this.footer});
+  const _SettingRow(
+      {required this.title,
+      required this.description,
+      this.descriptionColor,
+      required this.trailing,
+      this.footer});
 
   @override
   Widget build(BuildContext context) {
@@ -1315,14 +1524,22 @@ class _SettingRow extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _kTextMain)),
-              const SizedBox(height: 3),
-              Text(description, style: const TextStyle(fontSize: 11.5, color: _kTextDim)),
+              Text(title,
+                  style: TextStyle(
+                      fontSize: AppType.label,
+                      fontWeight: FontWeight.w600,
+                      color: context.palette.textMain)),
+              const SizedBox(height: 4),
+              Text(description,
+                  style: TextStyle(
+                      fontSize: AppType.body,
+                      height: 1.4,
+                      color: descriptionColor ?? context.palette.textSub)),
             ],
           ),
         ),
         const SizedBox(width: 16),
-        SizedBox(width: 300, child: Align(alignment: Alignment.centerRight, child: trailing)),
+        trailing,
       ],
     );
     if (footer == null) return row;
@@ -1338,31 +1555,34 @@ class _OptionDropdown extends StatelessWidget {
   final String value;
   final ValueChanged<String> onChanged;
 
-  const _OptionDropdown({super.key, required this.options, required this.value, required this.onChanged});
+  const _OptionDropdown(
+      {super.key,
+      required this.options,
+      required this.value,
+      required this.onChanged});
 
   @override
   Widget build(BuildContext context) {
-    final selected = options.any((o) => o.value == value) ? value : options.first.value;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF16161A),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFF383844)),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          value: selected,
-          isExpanded: true,
-          dropdownColor: const Color(0xFF202026),
-          style: const TextStyle(fontSize: 12.5, color: _kTextMain),
-          items: [
-            for (final o in options) DropdownMenuItem(value: o.value, child: Text(o.label)),
-          ],
-          onChanged: (v) {
-            if (v != null && v != selected) onChanged(v);
-          },
-        ),
+    final selected =
+        options.any((o) => o.value == value) ? value : options.first.value;
+    return _boxedDropdown(
+      context,
+      child: DropdownButton<String>(
+        value: selected,
+        isExpanded: true,
+        dropdownColor: context.palette.raised,
+        style:
+            TextStyle(fontSize: AppType.label, color: context.palette.textMain),
+        items: [
+          for (final o in options)
+            DropdownMenuItem(
+              value: o.value,
+              child: Text(o.label, overflow: TextOverflow.ellipsis),
+            ),
+        ],
+        onChanged: (v) {
+          if (v != null && v != selected) onChanged(v);
+        },
       ),
     );
   }
@@ -1403,48 +1623,58 @@ class _SliderControlState extends State<_SliderControl> {
 
   @override
   Widget build(BuildContext context) {
-    final value = (_dragValue ?? widget.value).clamp(widget.min, widget.max).toDouble();
-    return Row(
-      children: [
-        Expanded(
-          // 滚出视口时，滑块及其浮层必须一起移出语义树。
-          child: Overlay.wrap(
-            alwaysSizeToContent: true,
-            clipBehavior: Clip.none,
-            child: SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                activeTrackColor: _kAccent,
-                inactiveTrackColor: const Color(0xFF34343F),
-                thumbColor: Colors.white,
-                overlayShape: SliderComponentShape.noOverlay,
-                trackHeight: 3,
-              ),
-              child: Slider(
-                value: value,
-                min: widget.min,
-                max: widget.max,
-                divisions: widget.divisions,
-                onChanged: (v) => setState(() => _dragValue = v),
-                onChangeEnd: (v) {
-                  if (v == widget.value) {
-                    setState(() => _dragValue = null);
-                  } else {
-                    widget.onCommit(v);
-                  }
-                },
+    final value =
+        (_dragValue ?? widget.value).clamp(widget.min, widget.max).toDouble();
+    return SizedBox(
+      width: _kSliderWidth,
+      child: Row(
+        children: [
+          Expanded(
+            // 滚出视口时，滑块及其浮层必须一起移出语义树。
+            child: Overlay.wrap(
+              alwaysSizeToContent: true,
+              clipBehavior: Clip.none,
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  activeTrackColor: context.palette.accentInk,
+                  inactiveTrackColor: context.palette.borderStrong,
+                  // 滑块圆点压在品牌色轨道上，跟随 onPrimary（近黑）
+                  thumbColor: Theme.of(context).colorScheme.onPrimary,
+                  overlayShape: SliderComponentShape.noOverlay,
+                  trackHeight: 3,
+                ),
+                child: Slider(
+                  value: value,
+                  min: widget.min,
+                  max: widget.max,
+                  divisions: widget.divisions,
+                  onChanged: (v) => setState(() => _dragValue = v),
+                  onChangeEnd: (v) {
+                    if (v == widget.value) {
+                      setState(() => _dragValue = null);
+                    } else {
+                      widget.onCommit(v);
+                    }
+                  },
+                ),
               ),
             ),
           ),
-        ),
-        SizedBox(
-          width: 64,
-          child: Text(
-            widget.format(value),
-            textAlign: TextAlign.right,
-            style: const TextStyle(fontSize: 12, color: Color(0xFFC8C8D8)),
+          SizedBox(
+            width: 64,
+            child: Text(
+              widget.format(value),
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                fontSize: AppType.body,
+                color: context.palette.textBody,
+                // 等宽数字：拖动时读数不跳动（skill `number-tabular`，B6）
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -1533,23 +1763,27 @@ class GeneralSettingsPanel extends StatelessWidget {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          backgroundColor: const Color(0xFF22222C),
-          title: const Text('降低历史记录数量', style: TextStyle(color: Colors.white, fontSize: 16)),
+          backgroundColor: context.palette.card,
+          title: Text('降低历史记录数量',
+              style: TextStyle(
+                  color: context.palette.textTitle, fontSize: AppType.heading)),
           content: Text(
             deleteCount > 0
                 ? '将最多保留 $value 条播放历史，超出上限的最旧 $deleteCount 条记录将被立即删除且不可恢复。'
                 : '历史将最多保留 $value 条；当前 $count 条记录不受影响。',
-            style: const TextStyle(color: Color(0xFFB0B0C0), fontSize: 13),
+            style: TextStyle(
+                color: context.palette.textBody, fontSize: AppType.label),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消', style: TextStyle(color: Color(0xFF888898))),
+              child:
+                  Text('取消', style: TextStyle(color: context.palette.textSub)),
             ),
             ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFE50914)),
+              style: _primaryStyle(context),
               onPressed: () => Navigator.of(ctx).pop(true),
-              child: Text('保留 $value 条', style: const TextStyle(color: Colors.white)),
+              child: Text('保留 $value 条'),
             ),
           ],
         ),
@@ -1581,24 +1815,32 @@ class GeneralSettingsPanel extends StatelessWidget {
             final preferences = repository.startupPreferences;
             final readFailed = repository.startupReadFailed;
             return _card(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('下次进入页面',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextMain)),
-                  const SizedBox(height: 8),
-                  Semantics(
+              context,
+              child: _SettingRow(
+                title: '下次进入页面',
+                description: readFailed
+                    ? '启动偏好读取失败，原文件已保留；当前按默认（点播首页）运行。修复文件后可重新读取。'
+                    : '下次启动应用时生效；「直播」进入直播入口但不自动播放；「上次入口」恢复上次使用的主入口。',
+                descriptionColor: readFailed ? context.palette.warning : null,
+                trailing: _boxedDropdown(
+                  context,
+                  child: Semantics(
                     label: '下次进入页面',
                     child: DropdownButton<StartupEntry>(
                       key: const ValueKey('startup-entry'),
                       value: preferences.nextEntry,
                       isExpanded: true,
-                      dropdownColor: const Color(0xFF202026),
-                      style: const TextStyle(fontSize: 12.5, color: _kTextMain),
+                      dropdownColor: context.palette.raised,
+                      style: TextStyle(
+                          fontSize: AppType.label,
+                          color: context.palette.textMain),
                       items: const [
-                        DropdownMenuItem(value: StartupEntry.vod, child: Text('点播首页')),
-                        DropdownMenuItem(value: StartupEntry.live, child: Text('直播')),
-                        DropdownMenuItem(value: StartupEntry.last, child: Text('上次入口')),
+                        DropdownMenuItem(
+                            value: StartupEntry.vod, child: Text('点播首页')),
+                        DropdownMenuItem(
+                            value: StartupEntry.live, child: Text('直播')),
+                        DropdownMenuItem(
+                            value: StartupEntry.last, child: Text('上次入口')),
                       ],
                       onChanged: readFailed
                           ? null
@@ -1608,27 +1850,22 @@ class GeneralSettingsPanel extends StatelessWidget {
                             },
                     ),
                   ),
-                  Text(
-                    readFailed
-                        ? '启动偏好读取失败，原文件已保留；当前按默认（点播首页）运行。修复文件后可重新读取。'
-                        : '下次启动应用时生效；「直播」进入直播入口但不自动播放；「上次入口」恢复上次使用的主入口。',
-                    style: TextStyle(fontSize: 11.5, color: readFailed ? Colors.orangeAccent : _kTextSub),
-                  ),
-                  if (readFailed) ...[
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton(
-                        onPressed: () => unawaited(_saveWithStatus(repository.reloadStartupPreferences())),
-                        child: const Text('重新读取启动偏好'),
-                      ),
-                    ),
-                  ],
-                ],
+                ),
+                footer: readFailed
+                    ? Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: () => unawaited(_saveWithStatus(
+                              repository.reloadStartupPreferences())),
+                          child: const Text('重新读取启动偏好'),
+                        ),
+                      )
+                    : null,
               ),
             );
           },
         ),
+        const SizedBox(height: 16),
         StreamBuilder<SearchPreferences>(
           stream: settingsRepository.searchPreferencesStream,
           builder: (context, _) {
@@ -1636,23 +1873,30 @@ class GeneralSettingsPanel extends StatelessWidget {
             final preferences = repository.searchPreferences;
             final readFailed = repository.searchReadFailed;
             return _card(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('搜索显示',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextMain)),
-                  const SizedBox(height: 8),
-                  Semantics(
+              context,
+              child: _SettingRow(
+                title: '搜索显示',
+                description: readFailed
+                    ? '搜索偏好读取失败，原文件已保留；当前按默认（海报模式 / 聚合开）运行。修复文件后可重新读取。'
+                    : '仅作用于搜索结果展示；切换即时生效。',
+                descriptionColor: readFailed ? context.palette.warning : null,
+                trailing: _boxedDropdown(
+                  context,
+                  child: Semantics(
                     label: '搜索显示',
                     child: DropdownButton<SearchDisplay>(
                       key: const ValueKey('search-display'),
                       value: preferences.display,
                       isExpanded: true,
-                      dropdownColor: const Color(0xFF202026),
-                      style: const TextStyle(fontSize: 12.5, color: _kTextMain),
+                      dropdownColor: context.palette.raised,
+                      style: TextStyle(
+                          fontSize: AppType.label,
+                          color: context.palette.textMain),
                       items: const [
-                        DropdownMenuItem(value: SearchDisplay.poster, child: Text('海报模式')),
-                        DropdownMenuItem(value: SearchDisplay.list, child: Text('文字列表')),
+                        DropdownMenuItem(
+                            value: SearchDisplay.poster, child: Text('海报模式')),
+                        DropdownMenuItem(
+                            value: SearchDisplay.list, child: Text('文字列表')),
                       ],
                       onChanged: readFailed
                           ? null
@@ -1662,27 +1906,22 @@ class GeneralSettingsPanel extends StatelessWidget {
                             },
                     ),
                   ),
-                  Text(
-                    readFailed
-                        ? '搜索偏好读取失败，原文件已保留；当前按默认（海报模式 / 聚合开）运行。修复文件后可重新读取。'
-                        : '仅作用于搜索结果展示；切换即时生效。',
-                    style: TextStyle(fontSize: 11.5, color: readFailed ? Colors.orangeAccent : _kTextSub),
-                  ),
-                  if (readFailed) ...[
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton(
-                        onPressed: () => unawaited(_saveWithStatus(repository.reloadSearchPreferences())),
-                        child: const Text('重新读取搜索偏好'),
-                      ),
-                    ),
-                  ],
-                ],
+                ),
+                footer: readFailed
+                    ? Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: () => unawaited(_saveWithStatus(
+                              repository.reloadSearchPreferences())),
+                          child: const Text('重新读取搜索偏好'),
+                        ),
+                      )
+                    : null,
               ),
             );
           },
         ),
+        const SizedBox(height: 16),
         StreamBuilder<SearchPreferences>(
           stream: settingsRepository.searchPreferencesStream,
           builder: (context, _) {
@@ -1690,33 +1929,25 @@ class GeneralSettingsPanel extends StatelessWidget {
             final preferences = repository.searchPreferences;
             final readFailed = repository.searchReadFailed;
             return _card(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Expanded(
-                        child: Text('聚合搜索',
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextMain)),
-                      ),
-                      Switch(
-                        key: const ValueKey('search-aggregate'),
-                        value: preferences.aggregate,
-                        onChanged: readFailed ? null : (value) => unawaited(_setSearchAggregate(value)),
-                      ),
-                    ],
-                  ),
-                  Text(
-                    readFailed
-                        ? '聚合搜索暂不可用（搜索偏好读取失败），修复文件后可重新读取。'
-                        : '开启时并发检索所有可搜索的站源；关闭后仅检索当前站源。',
-                    style: TextStyle(fontSize: 11.5, color: readFailed ? Colors.orangeAccent : _kTextSub),
-                  ),
-                ],
+              context,
+              child: _SettingRow(
+                title: '聚合搜索',
+                description: readFailed
+                    ? '聚合搜索暂不可用（搜索偏好读取失败），修复文件后可重新读取。'
+                    : '开启时并发检索所有可搜索的站源；关闭后仅检索当前站源。',
+                descriptionColor: readFailed ? context.palette.warning : null,
+                trailing: Switch(
+                  key: const ValueKey('search-aggregate'),
+                  value: preferences.aggregate,
+                  onChanged: readFailed
+                      ? null
+                      : (value) => unawaited(_setSearchAggregate(value)),
+                ),
               ),
             );
           },
         ),
+        const SizedBox(height: 16),
         StreamBuilder<HistoryPreferences>(
           stream: settingsRepository.historyPreferencesStream,
           builder: (context, _) {
@@ -1725,30 +1956,37 @@ class GeneralSettingsPanel extends StatelessWidget {
             final readFailed = repository.historyReadFailed;
             final displayValues = [
               ...HistoryPreferences.limitOptions,
-              if (!HistoryPreferences.limitOptions.contains(preferences.limit)) preferences.limit,
+              if (!HistoryPreferences.limitOptions.contains(preferences.limit))
+                preferences.limit,
             ]..sort();
             return _card(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('历史记录数量',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextMain)),
-                  const SizedBox(height: 8),
-                  Semantics(
+              context,
+              child: _SettingRow(
+                title: '历史记录数量',
+                description: readFailed
+                    ? '历史偏好读取失败，原文件已保留；当前按默认（150 条）运行。修复文件后可重新读取。'
+                    : '播放历史最多保留的条数；超出上限时自动删除最早的记录，降低上限会立即删除超出部分（先确认）。',
+                descriptionColor: readFailed ? context.palette.warning : null,
+                trailing: _boxedDropdown(
+                  context,
+                  child: Semantics(
                     label: '历史记录数量',
                     child: DropdownButton<int>(
                       key: const ValueKey('history-limit'),
                       value: preferences.limit,
                       isExpanded: true,
-                      dropdownColor: const Color(0xFF202026),
-                      style: const TextStyle(fontSize: 12.5, color: _kTextMain),
+                      dropdownColor: context.palette.raised,
+                      style: TextStyle(
+                          fontSize: AppType.label,
+                          color: context.palette.textMain),
                       items: [
                         for (final option in displayValues)
                           DropdownMenuItem(
                             value: option,
-                            child: Text(option == HistoryPreferences.defaultLimit
-                                ? '$option 条（默认）'
-                                : '$option 条'),
+                            child: Text(
+                                option == HistoryPreferences.defaultLimit
+                                    ? '$option 条（默认）'
+                                    : '$option 条'),
                           ),
                       ],
                       onChanged: readFailed
@@ -1759,27 +1997,22 @@ class GeneralSettingsPanel extends StatelessWidget {
                             },
                     ),
                   ),
-                  Text(
-                    readFailed
-                        ? '历史偏好读取失败，原文件已保留；当前按默认（150 条）运行。修复文件后可重新读取。'
-                        : '播放历史最多保留的条数；超出上限时自动删除最早的记录，降低上限会立即删除超出部分（先确认）。',
-                    style: TextStyle(fontSize: 11.5, color: readFailed ? Colors.orangeAccent : _kTextSub),
-                  ),
-                  if (readFailed) ...[
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton(
-                        onPressed: () => unawaited(_saveWithStatus(repository.reloadHistoryPreferences())),
-                        child: const Text('重新读取历史偏好'),
-                      ),
-                    ),
-                  ],
-                ],
+                ),
+                footer: readFailed
+                    ? Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: () => unawaited(_saveWithStatus(
+                              repository.reloadHistoryPreferences())),
+                          child: const Text('重新读取历史偏好'),
+                        ),
+                      )
+                    : null,
               ),
             );
           },
         ),
+        const SizedBox(height: 16),
         StreamBuilder<SelfCheckPreferences>(
           stream: settingsRepository.selfCheckPreferencesStream,
           builder: (context, _) {
@@ -1787,51 +2020,44 @@ class GeneralSettingsPanel extends StatelessWidget {
             final preferences = repository.selfCheckPreferences;
             final readFailed = repository.selfCheckReadFailed;
             return _card(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Expanded(
-                        child: Text('站点自检',
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextMain)),
-                      ),
-                      Switch(
-                        key: const ValueKey('site-self-check'),
-                        value: preferences.enabled,
-                        onChanged: readFailed ? null : (value) => unawaited(_setSelfCheck(value)),
-                      ),
-                    ],
-                  ),
-                  Text(
-                    readFailed
-                        ? '自检偏好读取失败，原文件已保留；当前按默认（关闭）运行。修复文件后可重新读取。'
-                        : preferences.enabled
-                            ? '已开启：加载加固壳 / 载荷时会在日志打印体检结论（架构是否兼容、是否依赖 ARM-only 原生库）；'
-                                '可在「配置源管理」中对当前配置执行「站点体检」。'
-                            : '已关闭：不打印任何体检日志，也不允许发起体检。开启后立即同步给本地站点服务，无需重启应用。',
-                    style: TextStyle(fontSize: 11.5, color: readFailed ? Colors.orangeAccent : _kTextSub),
-                  ),
-                  if (readFailed) ...[
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton(
-                        onPressed: () => unawaited(_saveWithStatus(repository.reloadSelfCheckPreferences())),
-                        child: const Text('重新读取自检偏好'),
-                      ),
-                    ),
-                  ],
-                ],
+              context,
+              child: _SettingRow(
+                title: '站点自检',
+                description: readFailed
+                    ? '自检偏好读取失败，原文件已保留；当前按默认（关闭）运行。修复文件后可重新读取。'
+                    : preferences.enabled
+                        ? '已开启：加载加固壳 / 载荷时会在日志打印体检结论（架构是否兼容、是否依赖 ARM-only 原生库）；'
+                            '可在「配置源管理」中对当前配置执行「站点体检」。'
+                        : '已关闭：不打印任何体检日志，也不允许发起体检。开启后立即同步给本地站点服务，无需重启应用。',
+                descriptionColor: readFailed ? context.palette.warning : null,
+                trailing: Switch(
+                  key: const ValueKey('site-self-check'),
+                  value: preferences.enabled,
+                  onChanged: readFailed
+                      ? null
+                      : (value) => unawaited(_setSelfCheck(value)),
+                ),
+                footer: readFailed
+                    ? Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: () => unawaited(_saveWithStatus(
+                              repository.reloadSelfCheckPreferences())),
+                          child: const Text('重新读取自检偏好'),
+                        ),
+                      )
+                    : null,
               ),
             );
           },
         ),
+        const SizedBox(height: 16),
         if (cacheMaintenance != null)
           _StorageCacheCard(
             maintenance: cacheMaintenance!,
             epgRepository: epgRepository,
           ),
+        const SizedBox(height: 16),
         if (dataBackupService != null)
           _DataBackupCard(
             service: dataBackupService!,
@@ -1883,24 +2109,22 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
     });
   }
 
-  void _toast(String message) {
+  void _toast(String message, {AppMessageType type = AppMessageType.info}) {
     if (!mounted) return;
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(SnackBar(content: Text(message)));
+    showAppMessage(message, type: type);
   }
 
   void _clearImages() {
     PaintingBinding.instance.imageCache.clear();
     PaintingBinding.instance.imageCache.clearLiveImages();
-    _toast('已清理图片内存缓存');
+    _toast('已清理图片内存缓存', type: AppMessageType.success);
   }
 
   void _clearEpg() {
     final repository = widget.epgRepository;
     if (repository == null) return;
     repository.clearCache();
-    _toast('已清理节目单内存缓存');
+    _toast('已清理节目单内存缓存', type: AppMessageType.success);
   }
 
   Future<void> _changeDataDirectory() async {
@@ -1908,7 +2132,7 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
     try {
       path = await getDirectoryPath(confirmButtonText: '选择此目录');
     } catch (error) {
-      _toast('无法打开目录选择器：$error');
+      _toast('无法打开目录选择器：$error', type: AppMessageType.error);
       return;
     }
     if (path == null || path.trim().isEmpty) return;
@@ -1916,11 +2140,11 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
       final status = await DataDirectoryManager.requestDirectory(path);
       if (!mounted) return;
       setState(() => _dataStatus = status);
-      _toast('已安排迁移到 $path；重启应用后生效，旧目录会保留');
+      _toast('已安排迁移到 $path；重启应用后生效，旧目录会保留', type: AppMessageType.success);
     } on DataDirectoryException catch (error) {
-      _toast(error.message);
+      _toast(error.message, type: AppMessageType.error);
     } catch (error) {
-      _toast('无法切换数据目录：$error');
+      _toast('无法切换数据目录：$error', type: AppMessageType.error);
     }
   }
 
@@ -1937,11 +2161,11 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
           DataDirectoryManager.defaultDirectoryPath());
       if (!mounted) return;
       setState(() => _dataStatus = status);
-      _toast('已安排迁回默认目录；重启应用后生效');
+      _toast('已安排迁回默认目录；重启应用后生效', type: AppMessageType.success);
     } on DataDirectoryException catch (error) {
-      _toast(error.message);
+      _toast(error.message, type: AppMessageType.error);
     } catch (error) {
-      _toast('无法恢复默认目录：$error');
+      _toast('无法恢复默认目录：$error', type: AppMessageType.error);
     }
   }
 
@@ -1949,7 +2173,7 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
     final status = await DataDirectoryManager.forgetCustomDirectory();
     if (!mounted) return;
     setState(() => _dataStatus = status);
-    _toast('已停用自定义目录，继续使用默认目录');
+    _toast('已停用自定义目录，继续使用默认目录', type: AppMessageType.success);
   }
 
   Future<void> _cleanTemp(CacheInventory inventory) async {
@@ -1961,26 +2185,26 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF22222C),
-        title: const Text('清理临时文件',
-            style: TextStyle(color: Colors.white, fontSize: 16)),
+        backgroundColor: context.palette.card,
+        title: Text('清理临时文件',
+            style: TextStyle(
+                color: context.palette.textTitle, fontSize: AppType.heading)),
         content: Text(
           '将删除 ${inventory.tempFileCount} 个超过 24 小时的写入临时文件'
           '（${_formatBytes(inventory.tempBytes)}）。这些文件是保存过程中断留下的副本，'
           '删除不会影响历史、收藏、设置或配置。是否继续？',
-          style: const TextStyle(color: Color(0xFFB0B0C0), fontSize: 13),
+          style: TextStyle(
+              color: context.palette.textBody, fontSize: AppType.label),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('取消', style: TextStyle(color: Color(0xFF888898))),
+            child: Text('取消', style: TextStyle(color: context.palette.textSub)),
           ),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFE50914)),
+            style: _primaryStyle(context),
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text('删除 ${inventory.tempFileCount} 个文件',
-                style: const TextStyle(color: Colors.white)),
+            child: Text('删除 ${inventory.tempFileCount} 个文件'),
           ),
         ],
       ),
@@ -1994,30 +2218,31 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
     final suffix = result.failed > 0
         ? '；${result.failed} 个文件因占用或权限跳过'
         : (result.skipped > 0 ? '；${result.skipped} 个文件已跳过' : '');
-    _toast('已删除 ${result.deleted} 个临时文件$suffix');
+    _toast('已删除 ${result.deleted} 个临时文件$suffix', type: AppMessageType.success);
     _reload();
   }
 
   @override
   Widget build(BuildContext context) {
     return _card(
+      context,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Expanded(
+              Expanded(
                 child: Text('存储与缓存',
                     style: TextStyle(
-                        fontSize: 13,
+                        fontSize: AppType.label,
                         fontWeight: FontWeight.bold,
-                        color: _kTextMain)),
+                        color: context.palette.textMain)),
               ),
               IconButton(
                 key: const ValueKey('cache-refresh'),
                 tooltip: '重新盘点',
-                icon: const Icon(Icons.refresh_rounded,
-                    size: 18, color: _kTextSub),
+                icon: Icon(Icons.refresh_rounded,
+                    size: 18, color: context.palette.textSub),
                 onPressed: _busy ? null : _reload,
               ),
             ],
@@ -2026,12 +2251,14 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
           Text(
             '数据目录：${_dataStatus.activePath}',
             key: const ValueKey('data-dir-path'),
-            style: const TextStyle(fontSize: 11.5, color: _kTextSub),
+            style: TextStyle(
+                fontSize: AppType.body, color: context.palette.textSub),
           ),
           if (_dataStatus.usesCustom)
             Text(
               '默认目录：${_dataStatus.defaultPath}',
-              style: const TextStyle(fontSize: 11.5, color: _kTextSub),
+              style: TextStyle(
+                  fontSize: AppType.body, color: context.palette.textSub),
             ),
           if (_dataStatus.unavailableReason != null)
             Padding(
@@ -2042,8 +2269,9 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
                     child: Text(
                       '自定义数据目录不可用：${_dataStatus.unavailableReason}'
                       '（已临时使用默认目录，新改动会写入默认目录）',
-                      style: const TextStyle(
-                          fontSize: 11.5, color: Colors.orangeAccent),
+                      style: TextStyle(
+                          fontSize: AppType.body,
+                          color: context.palette.warning),
                     ),
                   ),
                   TextButton(
@@ -2061,8 +2289,9 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
                 Expanded(
                   child: Text(
                     '已安排迁移到 ${_dataStatus.pendingPath}；重启应用后生效',
-                    style: const TextStyle(
-                        fontSize: 11.5, color: Color(0xFFB0B0C0)),
+                    style: TextStyle(
+                        fontSize: AppType.body,
+                        color: context.palette.textBody),
                   ),
                 ),
                 TextButton(
@@ -2078,8 +2307,8 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
               padding: const EdgeInsets.only(top: 4),
               child: Text(
                 '上次迁移失败：${_dataStatus.pendingError}（已继续使用原目录）',
-                style: const TextStyle(
-                    fontSize: 11.5, color: Colors.orangeAccent),
+                style: TextStyle(
+                    fontSize: AppType.body, color: context.palette.warning),
               ),
             ),
           const SizedBox(height: 4),
@@ -2087,7 +2316,7 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
             children: [
               OutlinedButton(
                 key: const ValueKey('data-dir-change'),
-                style: _outlinedStyle(),
+                style: _outlinedStyle(context),
                 onPressed: _busy ? null : _changeDataDirectory,
                 child: const Text('更改目录…'),
               ),
@@ -2101,12 +2330,13 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
               ],
             ],
           ),
-          const SizedBox(height: 2),
-          const Text(
+          const SizedBox(height: 4),
+          Text(
             '只迁移用户数据（15 个 JSON + 壁纸 + 备份）；随包 JRE / 伴随运行时仍在默认目录。',
-            style: TextStyle(fontSize: 11, color: _kTextSub),
+            style: TextStyle(
+                fontSize: AppType.caption, color: context.palette.textSub),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 12),
           FutureBuilder<CacheInventory>(
             future: _future,
             builder: (context, snapshot) {
@@ -2120,10 +2350,11 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
               if (inventory == null || !inventory.directoryReadable) {
                 return Row(
                   children: [
-                    const Expanded(
+                    Expanded(
                       child: Text('无法读取数据目录；未执行任何清理。',
                           style: TextStyle(
-                              fontSize: 11.5, color: Colors.orangeAccent)),
+                              fontSize: AppType.body,
+                              color: context.palette.warning)),
                     ),
                     TextButton(
                       onPressed: _busy ? null : _reload,
@@ -2136,14 +2367,16 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   _cacheRow(
+                    context,
                     key: const ValueKey('cache-user-data'),
                     title: '用户数据',
                     subtitle:
                         '${inventory.userFileCount} 个文件 · ${_formatBytes(inventory.userDataBytes)}'
                         '\n历史、收藏、设置、配置源等；清理不涉及',
                   ),
-                  const Divider(height: 18, color: Color(0xFF262634)),
+                  Divider(height: 26, color: context.palette.divider),
                   _cacheRow(
+                    context,
                     key: const ValueKey('cache-temp-files'),
                     title: '临时文件',
                     subtitle:
@@ -2151,15 +2384,15 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
                         '\n保存过程中断留下的副本，超过 24 小时才可清理',
                     action: OutlinedButton(
                       key: const ValueKey('cache-clean-temp'),
-                      style: _outlinedStyle(),
-                      onPressed: _busy
-                          ? null
-                          : () => unawaited(_cleanTemp(inventory)),
+                      style: _outlinedStyle(context),
+                      onPressed:
+                          _busy ? null : () => unawaited(_cleanTemp(inventory)),
                       child: const Text('清理临时文件'),
                     ),
                   ),
-                  const Divider(height: 18, color: Color(0xFF262634)),
+                  Divider(height: 26, color: context.palette.divider),
                   _cacheRow(
+                    context,
                     key: const ValueKey('cache-image-memory'),
                     title: '图片内存缓存',
                     subtitle: '海报 / 剧照的本次运行缓存；清理后按需重新加载',
@@ -2169,22 +2402,26 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
                       child: const Text('清理'),
                     ),
                   ),
-                  const Divider(height: 18, color: Color(0xFF262634)),
+                  Divider(height: 26, color: context.palette.divider),
                   _cacheRow(
+                    context,
                     key: const ValueKey('cache-epg-memory'),
                     title: '节目单内存缓存',
                     subtitle: '节目单的本次运行缓存；清理后下次打开重新请求',
                     action: TextButton(
                       key: const ValueKey('cache-clear-epg'),
-                      onPressed:
-                          _busy || widget.epgRepository == null ? null : _clearEpg,
+                      onPressed: _busy || widget.epgRepository == null
+                          ? null
+                          : _clearEpg,
                       child: const Text('清理'),
                     ),
                   ),
                   const SizedBox(height: 8),
-                  const Text(
+                  Text(
                     '随包 JRE / companion JAR、配置快照、历史、收藏与设置均不属于缓存，绝不在这里删除。',
-                    style: TextStyle(fontSize: 11, color: _kTextDim),
+                    style: TextStyle(
+                        fontSize: AppType.caption,
+                        color: context.palette.textSub),
                   ),
                 ],
               );
@@ -2196,7 +2433,8 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
   }
 }
 
-Widget _cacheRow({
+Widget _cacheRow(
+  BuildContext context, {
   Key? key,
   required String title,
   required String subtitle,
@@ -2211,13 +2449,14 @@ Widget _cacheRow({
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(title,
-                style: const TextStyle(
-                    fontSize: 12.5,
+                style: TextStyle(
+                    fontSize: AppType.label,
                     fontWeight: FontWeight.w600,
-                    color: _kTextMain)),
-            const SizedBox(height: 2),
+                    color: context.palette.textMain)),
+            const SizedBox(height: 4),
             Text(subtitle,
-                style: const TextStyle(fontSize: 11, color: _kTextSub)),
+                style: TextStyle(
+                    fontSize: AppType.caption, color: context.palette.textSub)),
           ],
         ),
       ),
@@ -2318,8 +2557,7 @@ class _DataBackupCardState extends State<_DataBackupCard> {
       await widget.service.exportBackup(path);
       _setStatus('备份已保存：$path');
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('数据备份已保存')));
+        showAppMessage('数据备份已保存', type: AppMessageType.success);
       }
     } on DataBackupException catch (error) {
       _setStatus(error.message, error: true);
@@ -2357,9 +2595,10 @@ class _DataBackupCardState extends State<_DataBackupCard> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF22222C),
-        title: const Text('恢复数据备份？',
-            style: TextStyle(color: Colors.white, fontSize: 16)),
+        backgroundColor: context.palette.card,
+        title: Text('恢复数据备份？',
+            style: TextStyle(
+                color: context.palette.textTitle, fontSize: AppType.heading)),
         content: Text(
           '备份创建时间：${_formatTime(backup.createdAt.millisecondsSinceEpoch)}\n'
           '应用版本：${backup.appVersion ?? '未记录'}\n'
@@ -2369,20 +2608,20 @@ class _DataBackupCardState extends State<_DataBackupCard> {
           '仅覆盖备份中包含的文件；备份未包含的文件保持现状。\n'
           '备份中可能包含订阅地址、请求头或令牌，请妥善保管。\n'
           '恢复完成后需要关闭并重新打开应用。',
-          style: const TextStyle(
-              color: Color(0xFFB0B0C0), fontSize: 13, height: 1.5),
+          style: TextStyle(
+              color: context.palette.textBody,
+              fontSize: AppType.label,
+              height: 1.5),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('取消', style: TextStyle(color: Color(0xFF888898))),
+            child: Text('取消', style: TextStyle(color: context.palette.textSub)),
           ),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFE50914)),
+            style: _primaryStyle(context),
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('恢复并覆盖',
-                style: TextStyle(color: Colors.white)),
+            child: const Text('恢复并覆盖'),
           ),
         ],
       ),
@@ -2402,24 +2641,26 @@ class _DataBackupCardState extends State<_DataBackupCard> {
         context: context,
         barrierDismissible: false,
         builder: (ctx) => AlertDialog(
-          backgroundColor: const Color(0xFF22222C),
-          title: const Text('恢复完成',
-              style: TextStyle(color: Colors.white, fontSize: 16)),
+          backgroundColor: context.palette.card,
+          title: Text('恢复完成',
+              style: TextStyle(
+                  color: context.palette.textTitle, fontSize: AppType.heading)),
           content: Text(
             '已恢复 ${result.restoredFiles.length} 个文件。\n'
             '恢复前备份：${result.preRestorePath}\n'
             '${result.preRestoreSkipped.isEmpty ? '' : '注意：恢复前有 ${result.preRestoreSkipped.length} 个文件未能备份（过大或不可读），其原内容不可还原。\n'}'
             '\n'
             '请关闭并重新打开应用后生效；在此之前请勿播放或修改设置。',
-            style: const TextStyle(
-                color: Color(0xFFB0B0C0), fontSize: 13, height: 1.5),
+            style: TextStyle(
+                color: context.palette.textBody,
+                fontSize: AppType.label,
+                height: 1.5),
           ),
           actions: [
             ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFE50914)),
+              style: _primaryStyle(context),
               onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('知道了', style: TextStyle(color: Colors.white)),
+              child: const Text('知道了'),
             ),
           ],
         ),
@@ -2436,43 +2677,50 @@ class _DataBackupCardState extends State<_DataBackupCard> {
   @override
   Widget build(BuildContext context) {
     return _card(
+      context,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('数据备份与恢复',
+          Text('数据备份与恢复',
               style: TextStyle(
-                  fontSize: 13,
+                  fontSize: AppType.label,
                   fontWeight: FontWeight.bold,
-                  color: _kTextMain)),
-          const SizedBox(height: 6),
-          const Text(
+                  color: context.palette.textMain)),
+          const SizedBox(height: 4),
+          Text(
             '备份历史、收藏、设置、配置源与直播源等 13 个数据文件；'
             '不含窗口状态、JRE / JAR、缓存或日志。备份可能包含订阅地址与令牌，请妥善保管。',
-            style: TextStyle(fontSize: 11.5, color: _kTextSub, height: 1.4),
+            style: TextStyle(
+                fontSize: AppType.body,
+                color: context.palette.textSub,
+                height: 1.4),
           ),
           const SizedBox(height: 12),
           Wrap(
-            spacing: 10,
-            runSpacing: 8,
+            spacing: 12,
+            runSpacing: 12,
             children: [
               OutlinedButton(
                 key: const ValueKey('data-backup-export'),
-                style: _outlinedStyle(),
-                onPressed: _busy || _restored ? null : () => unawaited(_export()),
+                style: _outlinedStyle(context),
+                onPressed:
+                    _busy || _restored ? null : () => unawaited(_export()),
                 child: const Text('导出备份…'),
               ),
               OutlinedButton(
                 key: const ValueKey('data-backup-restore'),
-                style: _outlinedStyle(),
-                onPressed: _busy || _restored ? null : () => unawaited(_restore()),
+                style: _outlinedStyle(context),
+                onPressed:
+                    _busy || _restored ? null : () => unawaited(_restore()),
                 child: const Text('从备份恢复…'),
               ),
             ],
           ),
           if (_restored) ...[
             const SizedBox(height: 8),
-            const Text('本次会话已完成恢复；请重启应用后再操作。',
-                style: TextStyle(fontSize: 11.5, color: Colors.orangeAccent)),
+            Text('本次会话已完成恢复；请重启应用后再操作。',
+                style: TextStyle(
+                    fontSize: AppType.body, color: context.palette.warning)),
           ],
           if (_status != null) ...[
             const SizedBox(height: 8),
@@ -2480,8 +2728,10 @@ class _DataBackupCardState extends State<_DataBackupCard> {
               _status!,
               key: const ValueKey('data-backup-status'),
               style: TextStyle(
-                fontSize: 11.5,
-                color: _statusIsError ? Colors.orangeAccent : _kTextSub,
+                fontSize: AppType.body,
+                color: _statusIsError
+                    ? context.palette.warning
+                    : context.palette.textSub,
               ),
             ),
           ],
@@ -2497,7 +2747,7 @@ class _DataBackupCardState extends State<_DataBackupCard> {
 
 // 外观（SET-08）
 
-/// 外观：壁纸（本地图片，只影响主界面）。
+/// 外观：主题（深色 / 浅色 / 跟随系统）+ 壁纸（本地图片，只影响主界面）。
 class AppearancePanel extends StatefulWidget {
   final SettingsRepository settingsRepository;
   final WallpaperStore wallpaperStore;
@@ -2582,29 +2832,153 @@ class _AppearancePanelState extends State<AppearancePanel> {
     }
   }
 
+  Future<void> _chooseTheme(AppThemeMode mode) async {
+    final current = widget.settingsRepository.appearancePreferences;
+    if (current.themeMode == mode) return;
+    try {
+      await widget.settingsRepository
+          .updateAppearancePreferences(current.withThemeMode(mode));
+      _setMessage('已切换主题：${mode.label}');
+    } on DataRestorePendingRestartException catch (error) {
+      _setMessage(error.message, isError: true);
+    } catch (_) {
+      _setMessage('主题切换失败，请重试', isError: true);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return _PanelScaffold(
       title: '外观',
-      subtitle: '壁纸只影响主界面；播放器与设置页保持深色，保证任何图片下文字可读。',
+      subtitle: '主题可切换深色 / 浅色 / 跟随系统；壁纸只影响主界面，浅色主题使用浅色遮罩保证文字可读。',
       children: [
         StreamBuilder<AppearancePreferences>(
           stream: widget.settingsRepository.appearancePreferencesStream,
           initialData: widget.settingsRepository.appearancePreferences,
           builder: (context, snapshot) {
             final preferences = snapshot.data ?? AppearancePreferences.none;
-            return _WallpaperCard(
-              preferences: preferences,
-              store: widget.wallpaperStore,
-              busy: _busy,
-              message: _message,
-              messageIsError: _messageIsError,
-              onChoose: _choose,
-              onReset: _restoreDefault,
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _ThemeCard(
+                  value: preferences.themeMode,
+                  onChanged: _chooseTheme,
+                ),
+                const SizedBox(height: 16),
+                _WallpaperCard(
+                  preferences: preferences,
+                  store: widget.wallpaperStore,
+                  busy: _busy,
+                  message: _message,
+                  messageIsError: _messageIsError,
+                  onChoose: _choose,
+                  onReset: _restoreDefault,
+                ),
+              ],
             );
           },
         ),
       ],
+    );
+  }
+}
+
+/// 主题选择：三选一，选中态用品牌红描边。
+class _ThemeCard extends StatelessWidget {
+  final AppThemeMode value;
+  final ValueChanged<AppThemeMode> onChanged;
+
+  const _ThemeCard({required this.value, required this.onChanged});
+
+  static const _icons = {
+    AppThemeMode.dark: Icons.dark_mode_outlined,
+    AppThemeMode.light: Icons.light_mode_outlined,
+    AppThemeMode.system: Icons.brightness_auto_outlined,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: context.palette.card,
+        borderRadius: BorderRadius.circular(AppRadii.md),
+        border: Border.all(color: context.palette.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('主题',
+              style: TextStyle(
+                  fontSize: AppType.label,
+                  fontWeight: FontWeight.bold,
+                  color: context.palette.textMain)),
+          const SizedBox(height: 4),
+          Text('深色保持现有观感；跟随系统会随 Windows 的亮暗设置自动切换。',
+              style: TextStyle(
+                  fontSize: AppType.body, color: context.palette.textSub)),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              for (final mode in AppThemeMode.values) ...[
+                Expanded(
+                  child: FocusRing(
+                      onTap: () => onChanged(mode),
+                      semanticLabel: '主题：${mode.label}',
+                      borderRadius:
+                          const BorderRadius.all(Radius.circular(AppRadii.md)),
+                      child: InkWell(
+                        key: ValueKey('theme-mode-${mode.name}'),
+                        borderRadius: BorderRadius.circular(AppRadii.md),
+                        hoverColor: context.palette.hover,
+                        // 焦点由外层 FocusRing 承担，避免双重焦点节点
+                        canRequestFocus: false,
+                        onTap: () => onChanged(mode),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          decoration: BoxDecoration(
+                            color: value == mode
+                                ? context.palette.accent.withValues(alpha: 0.12)
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(AppRadii.md),
+                            border: Border.all(
+                              color: value == mode
+                                  ? context.palette.accentInk
+                                  : context.palette.border,
+                              // 选中描边取 1.5（与叠画焦点描边同宽，B6）
+                              width: value == mode ? 1.5 : 1,
+                            ),
+                          ),
+                          child: Column(
+                            children: [
+                              Icon(_icons[mode],
+                                  size: 20,
+                                  color: value == mode
+                                      ? context.palette.accentInk
+                                      : context.palette.textSub),
+                              const SizedBox(height: 6),
+                              Text(mode.label,
+                                  style: TextStyle(
+                                    fontSize: AppType.body,
+                                    fontWeight: value == mode
+                                        ? FontWeight.w600
+                                        : FontWeight.w400,
+                                    color: value == mode
+                                        ? context.palette.textMain
+                                        : context.palette.textSub,
+                                  )),
+                            ],
+                          ),
+                        ),
+                      )),
+                ),
+                if (mode != AppThemeMode.values.last) const SizedBox(width: 12),
+              ],
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -2631,19 +3005,21 @@ class _WallpaperCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return _card(
+      context,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('壁纸',
+          Text('壁纸',
               style: TextStyle(
-                  fontSize: 13,
+                  fontSize: AppType.label,
                   fontWeight: FontWeight.bold,
-                  color: _kTextMain)),
+                  color: context.palette.textMain)),
           const SizedBox(height: 4),
-          const Text(
+          Text(
             '支持 jpg / jpeg / png / webp / bmp；单张不超过 20 MB、8000×8000。'
             '选图后会复制一份到数据目录，移动或删除原图都不影响壁纸。',
-            style: TextStyle(fontSize: 11.5, color: _kTextSub),
+            style: TextStyle(
+                fontSize: AppType.body, color: context.palette.textSub),
           ),
           const SizedBox(height: 12),
           _WallpaperPreview(
@@ -2656,21 +3032,14 @@ class _WallpaperCard extends StatelessWidget {
               FilledButton(
                 key: const ValueKey('appearance-pick'),
                 onPressed: busy ? null : onChoose,
-                style: FilledButton.styleFrom(
-                  backgroundColor: _kAccent,
-                  foregroundColor: Colors.white,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  textStyle: const TextStyle(fontSize: 12.5),
-                ),
+                style: _primaryStyle(context),
                 child: const Text('选择壁纸…'),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 12),
               OutlinedButton(
                 key: const ValueKey('appearance-reset'),
-                onPressed:
-                    (busy || !preferences.hasWallpaper) ? null : onReset,
-                style: _outlinedStyle(),
+                onPressed: (busy || !preferences.hasWallpaper) ? null : onReset,
+                style: _outlinedStyle(context),
                 child: const Text('恢复默认'),
               ),
               if (busy) ...[
@@ -2684,21 +3053,22 @@ class _WallpaperCard extends StatelessWidget {
             ],
           ),
           if (message != null) ...[
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
             Text(
               message!,
               style: TextStyle(
-                  fontSize: 11.5,
+                  fontSize: AppType.body,
                   color: messageIsError
-                      ? Colors.orangeAccent
-                      : const Color(0xFF7BD88F)),
+                      ? context.palette.warning
+                      : context.palette.success),
             ),
           ],
-          const SizedBox(height: 10),
-          const Text(
+          const SizedBox(height: 12),
+          Text(
             '「恢复默认」只删除应用内的副本，不会删除你的原图；'
             '壁纸不计入数据备份（备份只含配置 / 收藏 / 历史等 13 个文件）。',
-            style: TextStyle(fontSize: 11, color: _kTextDim),
+            style: TextStyle(
+                fontSize: AppType.caption, color: context.palette.textSub),
           ),
         ],
       ),
@@ -2754,33 +3124,35 @@ class _WallpaperPreviewState extends State<_WallpaperPreview> {
               width: 216,
               height: 122,
               decoration: BoxDecoration(
-                color: const Color(0xFF101014),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: _kBorder),
+                color: context.palette.background,
+                borderRadius: BorderRadius.circular(AppRadii.sm),
+                border: Border.all(color: context.palette.border),
               ),
               clipBehavior: Clip.antiAlias,
               child: path == null
-                  ? const Center(
+                  ? Center(
                       child: Text('默认深色背景',
-                          style:
-                              TextStyle(fontSize: 11.5, color: _kTextDim)),
+                          style: TextStyle(
+                              fontSize: AppType.body,
+                              color: context.palette.textSub)),
                     )
                   : Image.file(
                       File(path),
                       fit: BoxFit.cover,
                       cacheWidth: 432,
-                      errorBuilder: (_, __, ___) => const Center(
+                      errorBuilder: (_, __, ___) => Center(
                         child: Text('默认深色背景',
-                            style:
-                                TextStyle(fontSize: 11.5, color: _kTextDim)),
+                            style: TextStyle(
+                                fontSize: AppType.body,
+                                color: context.palette.textSub)),
                       ),
                     ),
             ),
             if (missing) ...[
-              const SizedBox(height: 10),
-              const Text('壁纸文件已失效，请重新选择',
-                  style:
-                      TextStyle(fontSize: 11.5, color: Colors.orangeAccent)),
+              const SizedBox(height: 12),
+              Text('壁纸文件已失效，请重新选择',
+                  style: TextStyle(
+                      fontSize: AppType.body, color: context.palette.warning)),
             ],
           ],
         );
@@ -2794,7 +3166,10 @@ class AboutPanel extends StatefulWidget {
   /// 播放引擎（可为空：不可用时引擎信息显示「不可用」，其余内容不受影响）
   final PlayerEngine? playerEngine;
 
-  const AboutPanel({super.key, this.playerEngine});
+  /// 更新区块（宿主注入；为空时不显示，保持设置页与更新控制器解耦）
+  final Widget? updateSection;
+
+  const AboutPanel({super.key, this.playerEngine, this.updateSection});
 
   @override
   State<AboutPanel> createState() => _AboutPanelState();
@@ -2874,9 +3249,7 @@ class _AboutPanelState extends State<AboutPanel> {
   Future<void> _copyDiagnostics() async {
     await Clipboard.setData(ClipboardData(text: _diagnosticsText()));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('诊断信息已复制到剪贴板（不含订阅地址与凭据）')),
-    );
+    showAppMessage('诊断信息已复制到剪贴板（不含订阅地址与凭据）', type: AppMessageType.success);
   }
 
   void _openLicenses() {
@@ -2894,30 +3267,68 @@ class _AboutPanelState extends State<AboutPanel> {
       subtitle: '应用信息、运行环境、开源许可与诊断信息。',
       children: [
         _card(
+          context,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('应用信息',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextMain)),
+              Text('应用信息',
+                  style: TextStyle(
+                      fontSize: AppType.label,
+                      fontWeight: FontWeight.bold,
+                      color: context.palette.textMain)),
               const SizedBox(height: 8),
-              const Text('修狗TV', style: TextStyle(fontSize: 13, color: _kTextMain)),
-              const SizedBox(height: 4),
-              const Text('面向 Windows 10/11 x64 的影视桌面客户端；基于 Flutter 与 mpv（media_kit）。',
-                  style: TextStyle(fontSize: 11.5, color: _kTextSub)),
-              const SizedBox(height: 10),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Image.asset(
+                    appIconAsset,
+                    width: 40,
+                    height: 40,
+                    filterQuality: FilterQuality.high,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('修狗TV',
+                            style: TextStyle(
+                                fontSize: AppType.label,
+                                color: context.palette.textMain)),
+                        const SizedBox(height: 4),
+                        Text(
+                            '面向 Windows 10/11 x64 的影视桌面客户端；基于 Flutter 与 mpv（media_kit）。',
+                            style: TextStyle(
+                                fontSize: AppType.body,
+                                color: context.palette.textSub)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
               _AboutRow(
                   label: '版本',
                   value: _versionText,
                   valueKey: const ValueKey('about-version')),
+              if (widget.updateSection != null) ...[
+                const SizedBox(height: 12),
+                widget.updateSection!,
+              ],
             ],
           ),
         ),
+        const SizedBox(height: 16),
         _card(
+          context,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('运行环境',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextMain)),
+              Text('运行环境',
+                  style: TextStyle(
+                      fontSize: AppType.label,
+                      fontWeight: FontWeight.bold,
+                      color: context.palette.textMain)),
               const SizedBox(height: 8),
               const _AboutRow(label: '播放引擎', value: 'mpv（经 media_kit 接入）'),
               _AboutRow(label: 'mpv 版本', value: _mpvVersionText),
@@ -2926,20 +3337,26 @@ class _AboutPanelState extends State<AboutPanel> {
             ],
           ),
         ),
+        const SizedBox(height: 16),
         _card(
+          context,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('开源许可',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextMain)),
+              Text('开源许可',
+                  style: TextStyle(
+                      fontSize: AppType.label,
+                      fontWeight: FontWeight.bold,
+                      color: context.palette.textMain)),
               const SizedBox(height: 6),
-              const Text('查看应用与依赖组件（Flutter、mpv / media_kit 等）的开源许可。',
-                  style: TextStyle(fontSize: 11.5, color: _kTextSub)),
-              const SizedBox(height: 10),
+              Text('查看应用与依赖组件（Flutter、mpv / media_kit 等）的开源许可。',
+                  style: TextStyle(
+                      fontSize: AppType.body, color: context.palette.textSub)),
+              const SizedBox(height: 12),
               Align(
                 alignment: Alignment.centerLeft,
                 child: OutlinedButton(
-                  style: _outlinedStyle(),
+                  style: _outlinedStyle(context),
                   onPressed: _openLicenses,
                   child: const Text('查看开源许可'),
                 ),
@@ -2947,35 +3364,44 @@ class _AboutPanelState extends State<AboutPanel> {
             ],
           ),
         ),
+        const SizedBox(height: 16),
         _card(
+          context,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('诊断信息',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: _kTextMain)),
+              Text('诊断信息',
+                  style: TextStyle(
+                      fontSize: AppType.label,
+                      fontWeight: FontWeight.bold,
+                      color: context.palette.textMain)),
               const SizedBox(height: 6),
-              const Text('仅含以下字段，不含订阅地址与凭据；点击复制后由你自行粘贴使用。',
-                  style: TextStyle(fontSize: 11.5, color: _kTextSub)),
-              const SizedBox(height: 10),
+              Text('仅含以下字段，不含订阅地址与凭据；点击复制后由你自行粘贴使用。',
+                  style: TextStyle(
+                      fontSize: AppType.body, color: context.palette.textSub)),
+              const SizedBox(height: 12),
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF121218),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: _kBorder),
+                  color: context.palette.panel,
+                  borderRadius: BorderRadius.circular(AppRadii.sm),
+                  border: Border.all(color: context.palette.border),
                 ),
                 child: SelectableText(
                   _diagnosticsText(),
                   key: const ValueKey('about-diagnostics'),
-                  style: const TextStyle(fontSize: 11.5, color: Color(0xFFC8C8D8), height: 1.6),
+                  style: TextStyle(
+                      fontSize: AppType.body,
+                      color: context.palette.textBody,
+                      height: 1.6),
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
               Align(
                 alignment: Alignment.centerLeft,
                 child: OutlinedButton(
-                  style: _outlinedStyle(),
+                  style: _outlinedStyle(context),
                   onPressed: () => unawaited(_copyDiagnostics()),
                   child: const Text('复制诊断信息'),
                 ),
@@ -2998,17 +3424,21 @@ class _AboutRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
+      padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
             width: 88,
-            child: Text(label, style: const TextStyle(fontSize: 12, color: _kTextSub)),
+            child: Text(label,
+                style: TextStyle(
+                    fontSize: AppType.label, color: context.palette.textSub)),
           ),
           Expanded(
             child: Text(value,
-                key: valueKey, style: const TextStyle(fontSize: 12, color: _kTextMain)),
+                key: valueKey,
+                style: TextStyle(
+                    fontSize: AppType.label, color: context.palette.textMain)),
           ),
         ],
       ),
@@ -3031,22 +3461,29 @@ class _HomeSiteStatusBanner extends StatelessWidget {
             return const SizedBox.shrink();
           }
           return Padding(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(
               children: [
                 Expanded(
                   child: Text(readError ?? saveError ?? '正在保存首页站源…',
-                      style: TextStyle(color: readError != null || saveError != null
-                          ? Colors.orangeAccent : _kTextSub)),
+                      style: TextStyle(
+                          fontSize: AppType.body,
+                          color: readError != null || saveError != null
+                              ? context.palette.warning
+                              : context.palette.textSub)),
                 ),
                 if (readError != null)
                   TextButton(
-                    onPressed: () => unawaited(_saveWithStatus(repository.reloadHomeSitePreferences())),
+                    onPressed: () => unawaited(_saveWithStatus(
+                        repository.reloadHomeSitePreferences())),
                     child: const Text('重新读取首页站源'),
                   )
                 else if (saveError != null)
                   TextButton(
-                    onPressed: saving ? null : () => unawaited(_saveWithStatus(repository.retryHomeSiteSave())),
+                    onPressed: saving
+                        ? null
+                        : () => unawaited(
+                            _saveWithStatus(repository.retryHomeSiteSave())),
                     child: const Text('重试保存首页站源'),
                   ),
               ],
@@ -3067,41 +3504,58 @@ class _SettingsSaveBannerState extends State<_SettingsSaveBanner> {
   late final _stream = widget.repository.saveStateStream;
   @override
   Widget build(BuildContext context) => StreamBuilder<SettingsSaveState>(
-    stream: _stream,
-    initialData: widget.repository.saveState,
-    builder: (context, snapshot) {
-      final state = snapshot.data ?? widget.repository.saveState;
-      if (!state.hasFailure && !state.isSaving) return const SizedBox.shrink();
-      final names = [
-        if (state.failedTargets.contains(SettingsSaveTarget.player)) '播放器设置',
-        if (state.failedTargets.contains(SettingsSaveTarget.sources)) '配置源历史',
-        if (state.failedTargets.contains(SettingsSaveTarget.startup)) '下次进入页面',
-        if (state.failedTargets.contains(SettingsSaveTarget.search)) '搜索设置',
-        if (state.failedTargets.contains(SettingsSaveTarget.history)) '历史记录数量',
-        if (state.failedTargets.contains(SettingsSaveTarget.selfCheck)) '自检偏好',
-        if (state.failedTargets.contains(SettingsSaveTarget.playSkip)) '片头片尾',
-        if (state.failedTargets.contains(SettingsSaveTarget.appearance)) '外观',
-      ].join('、');
-      return Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(children: [
-          Expanded(child: Text(
-            state.hasFailure
-                ? (dataRestorePendingRestart
-                    ? '$names 未保存：数据已恢复，请重启应用后再修改（本次修改不会写入磁盘）。'
-                    : '$names 尚未保存到磁盘，修改暂留本次会话。')
-                : '正在保存设置…',
-            style: TextStyle(color: state.hasFailure ? Colors.orange : _kTextSub),
-          )),
-          if (state.hasFailure) TextButton(
-            onPressed: state.isSaving ? null :
-                () => unawaited(_saveWithStatus(widget.repository.retryFailedSaves())),
-            child: const Text('重试保存'),
-          ),
-        ]),
+        stream: _stream,
+        initialData: widget.repository.saveState,
+        builder: (context, snapshot) {
+          final state = snapshot.data ?? widget.repository.saveState;
+          if (!state.hasFailure && !state.isSaving) {
+            return const SizedBox.shrink();
+          }
+          final names = [
+            if (state.failedTargets.contains(SettingsSaveTarget.player))
+              '播放器设置',
+            if (state.failedTargets.contains(SettingsSaveTarget.sources))
+              '配置源历史',
+            if (state.failedTargets.contains(SettingsSaveTarget.startup))
+              '下次进入页面',
+            if (state.failedTargets.contains(SettingsSaveTarget.search)) '搜索设置',
+            if (state.failedTargets.contains(SettingsSaveTarget.history))
+              '历史记录数量',
+            if (state.failedTargets.contains(SettingsSaveTarget.selfCheck))
+              '自检偏好',
+            if (state.failedTargets.contains(SettingsSaveTarget.playSkip))
+              '片头片尾',
+            if (state.failedTargets.contains(SettingsSaveTarget.appearance))
+              '外观',
+          ].join('、');
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(children: [
+              Expanded(
+                  child: Text(
+                state.hasFailure
+                    ? (dataRestorePendingRestart
+                        ? '$names 未保存：数据已恢复，请重启应用后再修改（本次修改不会写入磁盘）。'
+                        : '$names 尚未保存到磁盘，修改暂留本次会话。')
+                    : '正在保存设置…',
+                style: TextStyle(
+                    fontSize: AppType.body,
+                    color: state.hasFailure
+                        ? context.palette.warning
+                        : context.palette.textSub),
+              )),
+              if (state.hasFailure)
+                TextButton(
+                  onPressed: state.isSaving
+                      ? null
+                      : () => unawaited(_saveWithStatus(
+                          widget.repository.retryFailedSaves())),
+                  child: const Text('重试保存'),
+                ),
+            ]),
+          );
+        },
       );
-    },
-  );
 }
 
 class _PlayerApplicationStatus extends StatelessWidget {
@@ -3111,7 +3565,11 @@ class _PlayerApplicationStatus extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = application;
-    if (app == null) return const Text('尚未连接播放器，不能确认参数应用状态。', style: TextStyle(color: _kTextSub));
+    if (app == null) {
+      return Text('尚未连接播放器，不能确认参数应用状态。',
+          style: TextStyle(
+              fontSize: AppType.body, color: context.palette.textSub));
+    }
     return StreamBuilder<SettingsApplicationState>(
       stream: app.states,
       initialData: app.state,
@@ -3124,17 +3582,35 @@ class _PlayerApplicationStatus extends StatelessWidget {
           SettingsApplicationPhase.failed => '部分播放器参数未确认，请查看失败项。',
           SettingsApplicationPhase.closed => '播放器已关闭，参数不再应用。',
         };
-        return _card(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(message, style: TextStyle(color: state.failures.isEmpty ? _kTextMain : Colors.orangeAccent)),
-          const SizedBox(height: 8),
-          const Text('参数确认不代表正在使用硬解；实际解码与画面效果需播放验证。默认音量 / 倍速仅在初始化时应用。', style: TextStyle(color: _kTextSub)),
-          if (state.defaultsPending) const Text('默认音量 / 倍速已修改，下次初始化播放器时应用，不改变当前播放。', style: TextStyle(color: _kTextSub)),
-          for (final failure in state.failures.entries)
-            Text('${failure.key}：${failure.value}', style: const TextStyle(color: Colors.orangeAccent)),
-          if (state.failures.isNotEmpty)
-            TextButton(onPressed: state.canRetry ? () => unawaited(app.retry()) : null,
-              child: const Text('重试应用')),
-        ]));
+        return _card(context,
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(message,
+                  style: TextStyle(
+                      fontSize: AppType.label,
+                      color: state.failures.isEmpty
+                          ? context.palette.textMain
+                          : context.palette.warning)),
+              const SizedBox(height: 8),
+              Text('参数确认不代表正在使用硬解；实际解码与画面效果需播放验证。默认音量 / 倍速仅在初始化时应用。',
+                  style: TextStyle(
+                      fontSize: AppType.body, color: context.palette.textSub)),
+              if (state.defaultsPending)
+                Text('默认音量 / 倍速已修改，下次初始化播放器时应用，不改变当前播放。',
+                    style: TextStyle(
+                        fontSize: AppType.body,
+                        color: context.palette.textSub)),
+              for (final failure in state.failures.entries)
+                Text('${failure.key}：${failure.value}',
+                    style: TextStyle(
+                        fontSize: AppType.body,
+                        color: context.palette.warning)),
+              if (state.failures.isNotEmpty)
+                TextButton(
+                    onPressed:
+                        state.canRetry ? () => unawaited(app.retry()) : null,
+                    child: const Text('重试应用')),
+            ]));
       },
     );
   }

@@ -25,6 +25,7 @@ class CompanionSpiderApi {
 
   Future<bool> loadSpider(Site site) async {
     if (!processManager.isRunning) return false;
+    processManager.notifyActivity();
 
     try {
       final res = await _dio.post<dynamic>(
@@ -37,7 +38,8 @@ class CompanionSpiderApi {
         },
       );
       if (res.statusCode == 200) {
-        final dynamic data = res.data is String ? jsonDecode(res.data as String) : res.data;
+        final dynamic data =
+            res.data is String ? jsonDecode(res.data as String) : res.data;
         if (data is Map) {
           return data['code'] == 0;
         }
@@ -54,13 +56,15 @@ class CompanionSpiderApi {
   /// 伴随服务未运行或下发失败时返回 false，由调用方决定是否提示。
   Future<bool> configureSelfCheck(bool enabled) async {
     if (!processManager.isRunning) return false;
+    processManager.notifyActivity();
     try {
       final res = await _dio.post<dynamic>(
         '${processManager.baseUrl}/spider/call',
         data: {'method': 'selfCheckConfig', 'enabled': enabled.toString()},
       );
       if (res.statusCode == 200) {
-        final dynamic data = res.data is String ? jsonDecode(res.data as String) : res.data;
+        final dynamic data =
+            res.data is String ? jsonDecode(res.data as String) : res.data;
         if (data is Map && data['code'] == 0) return true;
       }
     } catch (_) {}
@@ -77,7 +81,10 @@ class CompanionSpiderApi {
     int maxCategories = 2,
     int perSiteTimeoutSeconds = 20,
   }) async {
-    if (!processManager.isRunning || sites.isEmpty) return const SelfCheckReport();
+    if (!processManager.isRunning || sites.isEmpty) {
+      return const SelfCheckReport();
+    }
+    processManager.notifyActivity();
 
     final payloadSites = jsonEncode([
       for (final site in sites)
@@ -101,12 +108,15 @@ class CompanionSpiderApi {
           'timeoutMs': '$budgetMs',
         },
         // 单个批次可能跑满看门狗预算，接收超时按预算放大，避免客户端先于服务端放弃。
-        options: Options(receiveTimeout: Duration(milliseconds: budgetMs + 15000)),
+        options:
+            Options(receiveTimeout: Duration(milliseconds: budgetMs + 15000)),
       );
       if (res.statusCode == 200) {
-        final dynamic data = res.data is String ? jsonDecode(res.data as String) : res.data;
+        final dynamic data =
+            res.data is String ? jsonDecode(res.data as String) : res.data;
         if (data is Map && data['code'] == 0) {
-          return SelfCheckReport.tryParse(data['data']) ?? const SelfCheckReport();
+          return SelfCheckReport.tryParse(data['data']) ??
+              const SelfCheckReport();
         }
       }
     } catch (_) {}
@@ -124,7 +134,8 @@ class CompanionSpiderApi {
   }
 
   /// 获取分类视频列表
-  Future<VodPageResult> fetchCategory(Site site, {required String categoryId, int page = 1, bool filter = true}) async {
+  Future<VodPageResult> fetchCategory(Site site,
+      {required String categoryId, int page = 1, bool filter = true}) async {
     final rawJson = await _callSpider(
       site: site,
       method: 'categoryContent',
@@ -164,7 +175,8 @@ class CompanionSpiderApi {
   }
 
   /// 搜索视频
-  Future<VodPageResult> search(Site site, {required String keyword, int page = 1, bool quick = false}) async {
+  Future<VodPageResult> search(Site site,
+      {required String keyword, int page = 1, bool quick = false}) async {
     final rawJson = await _callSpider(
       site: site,
       method: 'searchContent',
@@ -178,7 +190,8 @@ class CompanionSpiderApi {
   }
 
   /// 获取 Spider 播放结果；不将空响应或影片标识伪装成媒体地址。
-  Future<SpiderPlayResult> fetchPlayResult(Site site, {required String flag, required String id}) async {
+  Future<SpiderPlayResult> fetchPlayResult(Site site,
+      {required String flag, required String id}) async {
     final raw = await _callSpider(
       site: site,
       method: 'playerContent',
@@ -199,14 +212,19 @@ class CompanionSpiderApi {
     }
     final parse = int.tryParse('${decoded['parse'] ?? 0}');
     final jx = int.tryParse('${decoded['jx'] ?? 0}');
-    if (parse == null || jx == null || ![0, 1].contains(parse) || ![0, 1].contains(jx)) {
+    if (parse == null ||
+        jx == null ||
+        ![0, 1].contains(parse) ||
+        ![0, 1].contains(jx)) {
       throw const FormatException('不支持的 Spider 解析类型');
     }
     if ('${decoded['playUrl'] ?? ''}'.trim().isNotEmpty) {
       throw const FormatException('暂不支持 Spider 网页解析前缀');
     }
     dynamic header = decoded['header'];
-    if (header is String && header.trim().isNotEmpty) header = jsonDecode(header);
+    if (header is String && header.trim().isNotEmpty) {
+      header = jsonDecode(header);
+    }
     if (header != null && header != '' && header is! Map) {
       throw const FormatException('Spider 请求头格式无效');
     }
@@ -220,7 +238,8 @@ class CompanionSpiderApi {
   }
 
   /// 仅获取地址的兼容入口；播放调用应使用完整结果以保留解析标志与请求头。
-  Future<String> fetchPlayUrl(Site site, {required String flag, required String id}) async =>
+  Future<String> fetchPlayUrl(Site site,
+          {required String flag, required String id}) async =>
       (await fetchPlayResult(site, flag: flag, id: id)).url;
 
   Future<String> _callSpider({
@@ -229,6 +248,7 @@ class CompanionSpiderApi {
     required Map<String, String> params,
   }) async {
     if (!processManager.isRunning) return '';
+    processManager.notifyActivity();
 
     try {
       final reqBody = {
@@ -246,7 +266,8 @@ class CompanionSpiderApi {
       );
 
       if (res.statusCode == 200) {
-        final dynamic data = res.data is String ? jsonDecode(res.data as String) : res.data;
+        final dynamic data =
+            res.data is String ? jsonDecode(res.data as String) : res.data;
         if (data is Map && data['code'] == 0) {
           final dynamic rawData = data['data'];
           if (rawData is String) {
@@ -297,7 +318,9 @@ class CompanionSpiderApi {
         return VodPageResult(
           page: int.tryParse(decoded['page']?.toString() ?? '1') ?? 1,
           pageCount: int.tryParse(decoded['pagecount']?.toString() ?? '1') ?? 1,
-          total: int.tryParse(decoded['total']?.toString() ?? '${items.length}') ?? items.length,
+          total:
+              int.tryParse(decoded['total']?.toString() ?? '${items.length}') ??
+                  items.length,
           limit: int.tryParse(decoded['limit']?.toString() ?? '20') ?? 20,
           categories: categories,
           list: items,
@@ -315,5 +338,6 @@ class SpiderPlayResult {
   final bool needsParse;
   final Map<String, String> headers;
 
-  const SpiderPlayResult({required this.url, required this.needsParse, this.headers = const {}});
+  const SpiderPlayResult(
+      {required this.url, required this.needsParse, this.headers = const {}});
 }

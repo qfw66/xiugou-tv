@@ -40,6 +40,10 @@ doc/
 !COPYING.*
 !NOTICE
 !NOTICE.*
+# 第三方组件署名与开源协作文档（属「许可 / 版权说明」与对外协作入口）
+!/THIRD_PARTY_LICENSES.md
+!/CONTRIBUTING.md
+!/SECURITY.md
 
 # AI 提示、规则、会话、工具配置及本地工作记录不入库
 .do-it/
@@ -150,6 +154,9 @@ $RECYCLE.BIN/
 # ---- 公开发布排除（第三方内容 / 二进制 / 内部记录，2026-10-19）----
 /docs/
 /PROGRESS.md
+/CONTRIBUTING.md
+/SECURITY.md
+/THIRD_PARTY_LICENSES.md
 /test/repro/
 /test/samples/
 /test/_probe_*.txt
@@ -160,6 +167,8 @@ $RECYCLE.BIN/
 # /test/lib/*.jar        —— test/ 已不在仓库内
 
 # ---- 仓库只保留「clone 后可构建」的最小集合 ----
+/scripts/measure_memory_idle.ps1
+/companion/test_service.ps1
 /test/
 /web/
 /scripts/tests/

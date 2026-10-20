@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../core/config/models/vod_config.dart';
+import '../../theme/app_palette.dart';
+import '../../theme/app_tokens.dart';
 
 /// 站点源快速切换选择弹窗
 class SiteSelectorDialog extends StatefulWidget {
@@ -36,17 +38,19 @@ class _SiteSelectorDialogState extends State<SiteSelectorDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     final filteredSites = widget.sites.where((site) {
       if (_filterKeyword.isEmpty) return true;
       final kw = _filterKeyword.toLowerCase();
-      return site.name.toLowerCase().contains(kw) || site.key.toLowerCase().contains(kw);
+      return site.name.toLowerCase().contains(kw) ||
+          site.key.toLowerCase().contains(kw);
     }).toList();
 
     return Dialog(
-      backgroundColor: const Color(0xFF181820),
+      backgroundColor: palette.panel,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: Color(0xFF2E2E3C), width: 1),
+        borderRadius: BorderRadius.circular(AppRadii.lg),
+        side: BorderSide(color: palette.borderStrong, width: 1),
       ),
       child: Container(
         width: 680,
@@ -61,28 +65,33 @@ class _SiteSelectorDialogState extends State<SiteSelectorDialog> {
                 Container(
                   padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF282834),
-                    borderRadius: BorderRadius.circular(10),
+                    color: palette.raised,
+                    borderRadius: BorderRadius.circular(AppRadii.md),
                   ),
-                  child: const Icon(Icons.hub_rounded, color: Color(0xFFE50914), size: 20),
+                  child: Icon(Icons.hub_rounded,
+                      color: palette.accentInk, size: 20),
                 ),
                 const SizedBox(width: 12),
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
+                    Text(
                       '切换点播站源',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+                      style: TextStyle(
+                          fontSize: AppType.h2,
+                          fontWeight: FontWeight.bold,
+                          color: palette.textTitle),
                     ),
                     Text(
                       '共 ${widget.sites.length} 个可用站点',
-                      style: const TextStyle(fontSize: 12, color: Color(0xFF888898)),
+                      style: TextStyle(fontSize: AppType.body, color: palette.textSub),
                     ),
                   ],
                 ),
                 const Spacer(),
                 IconButton(
-                  icon: const Icon(Icons.close_rounded, color: Color(0xFFA0A0B0), size: 22),
+                  icon: Icon(Icons.close_rounded,
+                      color: palette.textSub, size: 22),
                   onPressed: () => Navigator.of(context).pop(),
                   tooltip: '关闭',
                 ),
@@ -93,15 +102,17 @@ class _SiteSelectorDialogState extends State<SiteSelectorDialog> {
             // 搜索过滤栏
             TextField(
               controller: _searchController,
-              style: const TextStyle(fontSize: 13, color: Colors.white),
+              style: TextStyle(fontSize: AppType.label, color: palette.textMain),
               onChanged: (val) => setState(() => _filterKeyword = val.trim()),
               decoration: InputDecoration(
                 hintText: '搜索站源名称或关键字...',
-                hintStyle: const TextStyle(fontSize: 13, color: Color(0xFF686878)),
-                prefixIcon: const Icon(Icons.search_rounded, size: 20, color: Color(0xFF808090)),
+                hintStyle: TextStyle(fontSize: AppType.label, color: palette.textDim),
+                prefixIcon: Icon(Icons.search_rounded,
+                    size: 20, color: palette.textSub),
                 suffixIcon: _filterKeyword.isNotEmpty
                     ? IconButton(
-                        icon: const Icon(Icons.clear_rounded, size: 18, color: Color(0xFF808090)),
+                        icon: Icon(Icons.clear_rounded,
+                            size: 18, color: palette.textSub),
                         onPressed: () {
                           _searchController.clear();
                           setState(() => _filterKeyword = '');
@@ -109,20 +120,21 @@ class _SiteSelectorDialogState extends State<SiteSelectorDialog> {
                       )
                     : null,
                 filled: true,
-                fillColor: const Color(0xFF20202A),
+                fillColor: palette.raised,
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: Color(0xFF323242)),
+                  borderRadius: BorderRadius.circular(AppRadii.md),
+                  borderSide: BorderSide(color: palette.pressed),
                 ),
                 enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: Color(0xFF323242)),
+                  borderRadius: BorderRadius.circular(AppRadii.md),
+                  borderSide: BorderSide(color: palette.pressed),
                 ),
                 focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: Color(0xFFE50914), width: 1.5),
+                  borderRadius: BorderRadius.circular(AppRadii.md),
+                  borderSide: BorderSide(color: palette.accentInk, width: 1.5),
                 ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               ),
             ),
             const SizedBox(height: 16),
@@ -130,14 +142,15 @@ class _SiteSelectorDialogState extends State<SiteSelectorDialog> {
             // 站点列表网格
             Expanded(
               child: filteredSites.isEmpty
-                  ? const Center(
+                  ? Center(
                       child: Text(
                         '未找到匹配的站源',
-                        style: TextStyle(color: Color(0xFF707082), fontSize: 14),
+                        style: TextStyle(color: palette.textDim, fontSize: AppType.title),
                       ),
                     )
                   : GridView.builder(
-                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
                         crossAxisCount: 3,
                         childAspectRatio: 2.5,
                         crossAxisSpacing: 12,
@@ -185,11 +198,12 @@ class _SiteCardState extends State<_SiteCard> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     final site = widget.site;
     final isSelected = widget.isSelected;
 
     String tag;
-    Color tagColor = isSelected ? const Color(0xFFFF8B94) : const Color(0xFF808092);
+    Color tagColor = isSelected ? palette.danger : palette.textSub;
     final rawApi = site.api.trim();
     final rawExt = site.ext?.trim() ?? '';
     if (site.type == 0 || site.type == 1) {
@@ -201,7 +215,7 @@ class _SiteCardState extends State<_SiteCard> {
       tag = 'HTTP 扩展';
     } else {
       tag = 'Dex 插件 (Android)';
-      tagColor = const Color(0xFF707080);
+      tagColor = palette.textDim;
     }
 
     return MouseRegion(
@@ -211,30 +225,32 @@ class _SiteCardState extends State<_SiteCard> {
       child: GestureDetector(
         onTap: widget.onTap,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 140),
+          duration: AppMotion.base,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
             color: isSelected
-                ? const Color(0xFF381519)
+                ? palette.accentWash
                 : _isHovered
-                    ? const Color(0xFF262634)
-                    : const Color(0xFF1E1E28),
-            borderRadius: BorderRadius.circular(10),
+                    ? palette.hover
+                    : palette.raised,
+            borderRadius: BorderRadius.circular(AppRadii.md),
             border: Border.all(
               color: isSelected
-                  ? const Color(0xFFE50914)
+                  ? palette.accentInk
                   : _isHovered
-                      ? const Color(0xFF48485C)
-                      : const Color(0xFF2C2C3A),
+                      ? palette.borderStrong
+                      : palette.pressed,
               width: isSelected ? 1.5 : 1,
             ),
           ),
           child: Row(
             children: [
               Icon(
-                isSelected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+                isSelected
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_unchecked,
                 size: 16,
-                color: isSelected ? const Color(0xFFE50914) : const Color(0xFF707080),
+                color: isSelected ? palette.accentInk : palette.textDim,
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -245,9 +261,11 @@ class _SiteCardState extends State<_SiteCard> {
                     Text(
                       site.name,
                       style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                        color: isSelected ? Colors.white : const Color(0xFFDCDCE8),
+                        fontSize: AppType.label,
+                        fontWeight:
+                            isSelected ? FontWeight.bold : FontWeight.w500,
+                        color:
+                            isSelected ? palette.textTitle : palette.textBody,
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -256,7 +274,7 @@ class _SiteCardState extends State<_SiteCard> {
                     Text(
                       tag,
                       style: TextStyle(
-                        fontSize: 10,
+                        fontSize: AppType.caption,
                         color: tagColor,
                         fontWeight: FontWeight.w500,
                       ),

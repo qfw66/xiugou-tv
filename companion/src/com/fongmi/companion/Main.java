@@ -13,11 +13,17 @@ import com.fongmi.companion.selfcheck.PayloadInspector;
  * <p>握手行的格式 {@code [COMPANION_READY] PORT=<n>} 被 Flutter 侧的
  * {@code companion_process_manager} 解析，改动会导致桌面端连不上 Java 服务，
  * 因此这里保持逐字节不变。
+ *
+ * <p>{@code --stdin-watch=on} 时额外监视 stdin：修狗TV 的 Flutter 侧持有通往本
+ * 进程的 stdin 管道，主进程异常退出（崩溃/被强杀）时管道关闭、read 返回 EOF，
+ * 本进程随即自行退出，避免留下无人回收的孤立 java 进程（⑥ 内存批）。默认关闭：
+ * 其它启动方式（脚本探活、手工调试）的 stdin 可能直接是 NUL，常开会导致秒退。
  */
 public class Main {
 
     public static void main(String[] args) {
         int port = 0; // 0 = 由系统分配空闲端口
+        boolean stdinWatch = false; // --stdin-watch=on 启用，默认关闭（见类注释）
         for (String arg : args) {
             if (arg.startsWith("--port=")) {
                 try {
@@ -35,6 +41,12 @@ public class Main {
                 if (on) {
                     System.out.println("[SelfCheck] toggle=on");
                 }
+            } else if (arg.startsWith("--stdin-watch=")) {
+                // 与 --self-check 同口径：只有显式 on/true/1 才启用，缺省关闭。
+                String value = arg.substring("--stdin-watch=".length()).trim();
+                stdinWatch = "on".equalsIgnoreCase(value)
+                        || "true".equalsIgnoreCase(value)
+                        || "1".equals(value);
             }
         }
 
@@ -45,6 +57,10 @@ public class Main {
             int boundPort = AndroidBridge.serve(port);
             System.out.println("[COMPANION_READY] PORT=" + boundPort);
             System.out.flush();
+
+            if (stdinWatch) {
+                startStdinWatchdog();
+            }
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 System.out.println("[COMPANION_STOPPING]");
@@ -58,5 +74,27 @@ public class Main {
             e.printStackTrace();
             System.exit(1);
         }
+    }
+
+    /**
+     * 监视 stdin 的守护线程：读到 EOF（或管道异常）即认为父进程已离开，自行退出。
+     * 退出走 System.exit(0)，会触达停机钩子，日志中可见 [COMPANION_STOPPING]。
+     */
+    private static void startStdinWatchdog() {
+        Thread thread = new Thread(() -> {
+            try {
+                byte[] buffer = new byte[256];
+                while (System.in.read(buffer) != -1) {
+                    // 输入内容无意义：父进程只用这条管道传递"存活"信号。
+                }
+            } catch (Exception ignored) {
+                // 管道中断与 EOF 同等处理。
+            }
+            System.out.println("[COMPANION_STDIN_EOF]");
+            System.out.flush();
+            System.exit(0);
+        }, "companion-stdin-watch");
+        thread.setDaemon(true);
+        thread.start();
     }
 }

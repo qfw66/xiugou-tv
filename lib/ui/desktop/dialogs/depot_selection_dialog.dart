@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../core/config/config_repository.dart';
+import '../../theme/app_palette.dart';
+import '../../theme/app_tokens.dart';
 
 /// 多仓（Depot）订阅选择弹窗：列出仓库清单，返回用户选择的条目下标；取消返回 null
 class DepotSelectionDialog extends StatelessWidget {
@@ -9,11 +11,12 @@ class DepotSelectionDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     return Dialog(
-      backgroundColor: const Color(0xFF181820),
+      backgroundColor: palette.panel,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: Color(0xFF2E2E3C), width: 1),
+        borderRadius: BorderRadius.circular(AppRadii.lg),
+        side: BorderSide(color: palette.borderStrong, width: 1),
       ),
       child: Container(
         width: 560,
@@ -28,29 +31,34 @@ class DepotSelectionDialog extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF282834),
-                    borderRadius: BorderRadius.circular(10),
+                    color: palette.raised,
+                    borderRadius: BorderRadius.circular(AppRadii.md),
                   ),
-                  child: const Icon(Icons.account_tree_rounded, color: Color(0xFFE50914), size: 20),
+                  child: Icon(Icons.account_tree_rounded,
+                      color: palette.accentInk, size: 20),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
+                      Text(
                         '选择订阅仓库',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+                        style: TextStyle(
+                            fontSize: AppType.h2,
+                            fontWeight: FontWeight.bold,
+                            color: palette.textTitle),
                       ),
                       Text(
                         '检测到多仓订阅，共 ${entries.length} 个来源',
-                        style: const TextStyle(fontSize: 12, color: Color(0xFF888898)),
+                        style: TextStyle(fontSize: AppType.body, color: palette.textSub),
                       ),
                     ],
                   ),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.close_rounded, color: Color(0xFFA0A0B0), size: 22),
+                  icon: Icon(Icons.close_rounded,
+                      color: palette.textSub, size: 22),
                   onPressed: () => Navigator.of(context).pop(),
                   tooltip: '取消',
                 ),
@@ -72,9 +80,9 @@ class DepotSelectionDialog extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 12),
-            const Text(
+            Text(
               '提示：选择后将加载对应子配置；若选中的仍是多仓会继续提示选择。',
-              style: TextStyle(fontSize: 11, color: Color(0xFF686878)),
+              style: TextStyle(fontSize: AppType.caption, color: palette.textDim),
             ),
           ],
         ),
@@ -98,6 +106,7 @@ class _DepotEntryTileState extends State<_DepotEntryTile> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     final entry = widget.entry;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -106,13 +115,13 @@ class _DepotEntryTileState extends State<_DepotEntryTile> {
       child: GestureDetector(
         onTap: widget.onTap,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
+          duration: AppMotion.base,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: _hovered ? const Color(0xFF2A2A38) : const Color(0xFF20202A),
-            borderRadius: BorderRadius.circular(10),
+            color: _hovered ? palette.hover : palette.raised,
+            borderRadius: BorderRadius.circular(AppRadii.md),
             border: Border.all(
-              color: _hovered ? const Color(0xFFE50914) : const Color(0xFF323242),
+              color: _hovered ? palette.accentInk : palette.pressed,
               width: 1,
             ),
           ),
@@ -121,7 +130,7 @@ class _DepotEntryTileState extends State<_DepotEntryTile> {
               Icon(
                 Icons.folder_rounded,
                 size: 18,
-                color: _hovered ? const Color(0xFFE50914) : const Color(0xFF8A8A9A),
+                color: _hovered ? palette.accentInk : palette.textSub,
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -132,9 +141,9 @@ class _DepotEntryTileState extends State<_DepotEntryTile> {
                       entry.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 13.5,
-                        color: Colors.white,
+                      style: TextStyle(
+                        fontSize: AppType.title,
+                        color: palette.textTitle,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -143,12 +152,13 @@ class _DepotEntryTileState extends State<_DepotEntryTile> {
                       entry.url,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11.5, color: Color(0xFF7A7A8A)),
+                      style: TextStyle(fontSize: AppType.body, color: palette.textDim),
                     ),
                   ],
                 ),
               ),
-              const Icon(Icons.chevron_right_rounded, size: 18, color: Color(0xFF6A6A7A)),
+              Icon(Icons.chevron_right_rounded,
+                  size: 18, color: palette.textDim),
             ],
           ),
         ),

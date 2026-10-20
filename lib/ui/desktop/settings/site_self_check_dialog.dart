@@ -6,11 +6,10 @@ import 'package:flutter/services.dart';
 import '../../../core/companion/companion_spider_api.dart';
 import '../../../core/companion/site_self_check_report.dart';
 import '../../../core/config/models/vod_config.dart';
-
-const _kTextMain = Color(0xFFE6E6F0);
-const _kTextSub = Color(0xFF8C8CA0);
-const _kAccent = Color(0xFFE50914);
-const _kPanel = Color(0xFF202026);
+import '../../theme/app_palette.dart';
+import '../../theme/app_tokens.dart';
+import '../widgets/app_message.dart';
+import '../widgets/focus_ring.dart';
 
 /// 站点体检弹窗：对当前配置里的 Spider 站点逐个探测，边跑边出结果。
 ///
@@ -106,13 +105,15 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
   }
 
   String _nameOf(SiteSelfCheckEntry entry) =>
-      _nameByKey[entry.key]?.trim().isNotEmpty == true ? _nameByKey[entry.key]! : entry.key;
+      _nameByKey[entry.key]?.trim().isNotEmpty == true
+          ? _nameByKey[entry.key]!
+          : entry.key;
 
   Color _badgeColor(SiteSelfCheckEntry entry) {
-    if (entry.isOk) return const Color(0xFF4CAF50);
-    if (entry.isDegraded) return const Color(0xFFFFB300);
-    if (entry.isTimeout) return const Color(0xFF78909C);
-    return _kAccent;
+    if (entry.isOk) return context.palette.success;
+    if (entry.isDegraded) return context.palette.warning;
+    if (entry.isTimeout) return context.palette.textDim;
+    return context.palette.danger;
   }
 
   String _metricsText(SiteSelfCheckEntry entry) {
@@ -131,7 +132,8 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
     final failed = _entries.length - ok - degraded - timeout;
     final buffer = StringBuffer()
       ..writeln('修狗TV 站点体检结果')
-      ..writeln('共 ${_entries.length} 站：可用 $ok / 降级 $degraded / 失败 $failed / 超时 $timeout');
+      ..writeln(
+          '共 ${_entries.length} 站：可用 $ok / 降级 $degraded / 失败 $failed / 超时 $timeout');
     for (final entry in _entries) {
       buffer.write('[${entry.verdictLabel}] ${_nameOf(entry)}（${entry.key}）');
       buffer.write(' ${_metricsText(entry)}');
@@ -144,9 +146,7 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
   Future<void> _copy() async {
     await Clipboard.setData(ClipboardData(text: _reportText()));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('体检结果已复制到剪贴板（不含订阅地址与凭据）')),
-    );
+    showAppMessage('体检结果已复制到剪贴板（不含订阅地址与凭据）', type: AppMessageType.success);
   }
 
   @override
@@ -157,7 +157,11 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
     final failed = _entries.length - ok - degraded - timeout;
 
     return Dialog(
-      backgroundColor: _kPanel,
+      backgroundColor: context.palette.panel,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadii.lg),
+        side: BorderSide(color: context.palette.borderStrong),
+      ),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 620, maxHeight: 560),
         child: Padding(
@@ -168,9 +172,22 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
             children: [
               Row(
                 children: [
-                  const Expanded(
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: context.palette.accentWash,
+                      borderRadius: BorderRadius.circular(AppRadii.md),
+                    ),
+                    child: Icon(Icons.health_and_safety_outlined,
+                        size: 20, color: context.palette.accentInk),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
                     child: Text('站点体检',
-                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: _kTextMain)),
+                        style: TextStyle(
+                            fontSize: AppType.heading,
+                            fontWeight: FontWeight.bold,
+                            color: context.palette.textTitle)),
                   ),
                   if (_running)
                     const SizedBox(
@@ -185,31 +202,37 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
                 _running
                     ? '正在逐个探测 $_processed / $_total 个站点（每站最多 ${widget.perSiteTimeoutSeconds} 秒）…'
                     : '完成：共 $_total 站 · 可用 $ok · 降级 $degraded · 失败 $failed · 超时 $timeout',
-                style: const TextStyle(fontSize: 12, color: _kTextSub),
+                style: TextStyle(
+                    fontSize: AppType.body, color: context.palette.textSub),
               ),
               if (_running) ...[
                 const SizedBox(height: 10),
                 LinearProgressIndicator(
-                  value: _total == 0 ? null : (_processed / _total).clamp(0.0, 1.0),
-                  backgroundColor: const Color(0xFF2C2C36),
+                  value: _total == 0
+                      ? null
+                      : (_processed / _total).clamp(0.0, 1.0),
+                  backgroundColor: context.palette.raised,
                 ),
               ],
               const SizedBox(height: 12),
               Flexible(
                 child: _entries.isEmpty
-                    ? const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 24),
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 24),
                         child: Center(
-                          child: Text('正在准备探测…', style: TextStyle(fontSize: 12.5, color: _kTextSub)),
+                          child: Text('正在准备探测…',
+                              style: TextStyle(
+                                  fontSize: AppType.label,
+                                  color: context.palette.textSub)),
                         ),
                       )
                     : ListView.separated(
                         shrinkWrap: true,
                         itemCount: _entries.length,
-                        separatorBuilder: (_, __) => const Divider(
+                        separatorBuilder: (_, __) => Divider(
                           height: 12,
                           thickness: 1,
-                          color: Color(0xFF2C2C36),
+                          color: context.palette.raised,
                         ),
                         itemBuilder: (context, index) {
                           final entry = _entries[index];
@@ -219,14 +242,21 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
                               Row(
                                 children: [
                                   Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 6, vertical: 2),
                                     decoration: BoxDecoration(
-                                      color: _badgeColor(entry).withValues(alpha: 0.16),
-                                      borderRadius: BorderRadius.circular(4),
+                                      color: _badgeColor(entry)
+                                          .withValues(alpha: 0.16),
+                                      borderRadius:
+                                          BorderRadius.circular(AppRadii.xs),
                                     ),
                                     child: Text(
                                       entry.verdictLabel,
-                                      style: TextStyle(fontSize: 11, color: _badgeColor(entry)),
+                                      style: TextStyle(
+                                          fontSize: AppType.caption,
+                                          // 高对比文字（深浅主题均 ≥13:1）；
+                                          // 语义色保留在 16% 底上（B6 对比度修正）
+                                          color: context.palette.textTitle),
                                     ),
                                   ),
                                   const SizedBox(width: 8),
@@ -234,23 +264,30 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
                                     child: Text(
                                       _nameOf(entry),
                                       overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(fontSize: 12.5, color: _kTextMain),
+                                      style: TextStyle(
+                                          fontSize: AppType.label,
+                                          color: context.palette.textMain),
                                     ),
                                   ),
                                   Text(
                                     _metricsText(entry),
-                                    style: const TextStyle(fontSize: 11.5, color: _kTextSub),
+                                    style: TextStyle(
+                                        fontSize: AppType.body,
+                                        color: context.palette.textSub),
                                   ),
                                 ],
                               ),
                               if (entry.error.isNotEmpty)
                                 Padding(
-                                  padding: const EdgeInsets.only(top: 4, left: 2),
+                                  padding:
+                                      const EdgeInsets.only(top: 4, left: 2),
                                   child: Text(
                                     entry.error,
                                     maxLines: 3,
                                     overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(fontSize: 11.5, color: Color(0xFFFF8A80)),
+                                    style: TextStyle(
+                                        fontSize: AppType.body,
+                                        color: context.palette.danger),
                                   ),
                                 ),
                             ],
@@ -261,15 +298,23 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
               const SizedBox(height: 12),
               Row(
                 children: [
-                  TextButton.icon(
-                    onPressed: _entries.isEmpty ? null : () => unawaited(_copy()),
-                    icon: const Icon(Icons.copy_all_outlined, size: 16),
-                    label: const Text('复制结果'),
+                  FocusOutline(
+                    radius: AppRadii.pill,
+                    child: TextButton.icon(
+                      onPressed:
+                          _entries.isEmpty ? null : () => unawaited(_copy()),
+                      icon: const Icon(Icons.copy_all_outlined, size: 16),
+                      label: const Text('复制结果'),
+                    ),
                   ),
                   const Spacer(),
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('关闭', style: TextStyle(color: _kTextSub)),
+                  FocusOutline(
+                    radius: AppRadii.pill,
+                    child: TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: Text('关闭',
+                          style: TextStyle(color: context.palette.textSub)),
+                    ),
                   ),
                 ],
               ),

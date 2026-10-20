@@ -33,9 +33,16 @@ import 'core/settings/wallpaper_store.dart';
 import 'core/storage/cache_maintenance.dart';
 import 'core/storage/data_backup_service.dart';
 import 'core/storage/data_restore_guard.dart';
+import 'core/update/installer_launcher.dart';
+import 'core/update/update_controller.dart';
+import 'core/update/update_downloader.dart';
+import 'core/update/update_preferences.dart';
+import 'core/update/update_preferences_notifier.dart';
+import 'core/update/update_preferences_store.dart';
+import 'core/update/update_service.dart';
 import 'ui/desktop/catalog/vod_detail_dialog.dart';
-import 'ui/desktop/player/episode_skip_dialog.dart';
 import 'ui/desktop/catalog/vod_grid_view.dart';
+import 'ui/desktop/catalog/vod_grid_skeleton.dart';
 import 'ui/desktop/catalog/vod_list_view.dart';
 import 'ui/desktop/catalog/search_site_groups.dart';
 import 'ui/desktop/dialogs/depot_selection_dialog.dart';
@@ -45,10 +52,18 @@ import 'ui/desktop/wallpaper/wallpaper_size_probe.dart';
 import 'ui/desktop/dialogs/live_channels_dialog.dart';
 import 'ui/desktop/dialogs/push_stream_dialog.dart';
 import 'ui/desktop/dialogs/site_selector_dialog.dart';
+import 'ui/desktop/dialogs/update_dialog.dart';
+import 'ui/desktop/dialogs/update_source_dialog.dart';
 import 'ui/desktop/player/desktop_video_player.dart';
+import 'ui/desktop/settings/about_update_section.dart';
 import 'ui/desktop/settings/settings_page.dart';
+import 'ui/desktop/widgets/app_message.dart';
 import 'ui/desktop/widgets/desktop_window_frame.dart';
 import 'ui/desktop/window/desktop_window_manager.dart';
+import 'ui/theme/app_palette.dart';
+import 'ui/desktop/widgets/focus_ring.dart';
+import 'ui/theme/app_tokens.dart';
+import 'ui/theme/app_theme.dart';
 
 // --- 全局依赖 Provider ---
 
@@ -77,10 +92,17 @@ final searchPreferencesProvider = StreamProvider<SearchPreferences>((ref) {
   return ref.watch(settingsRepositoryProvider).searchPreferencesStream;
 });
 
-/// 外观偏好（SET-08：壁纸）；随设置保存 / 读取实时更新
+/// 外观偏好（SET-08：壁纸；主题）；随设置保存 / 读取实时更新
 final appearancePreferencesProvider =
     StreamProvider<AppearancePreferences>((ref) {
   return ref.watch(settingsRepositoryProvider).appearancePreferencesStream;
+});
+
+/// 当前主题模式：默认深色；「跟随系统」由 MaterialApp 依平台亮度解析。
+final themeModeProvider = Provider<AppThemeMode>((ref) {
+  final preferences = ref.watch(appearancePreferencesProvider).valueOrNull ??
+      ref.read(settingsRepositoryProvider).appearancePreferences;
+  return preferences.themeMode;
 });
 
 /// 壁纸副本管理。像素探针依赖 `dart:ui`，因此在这里（UI 层）装配。
@@ -95,11 +117,64 @@ final startupEntryProvider = Provider<StartupEntry>((ref) => StartupEntry.vod);
 /// 设置中心是否打开（独立全屏页，覆盖主视图与播放器）
 final settingsPageOpenProvider = StateProvider<bool>((ref) => false);
 
+// --- 检测更新（BACKLOG §8）---
+
+final updatePreferencesStoreProvider =
+    Provider<UpdatePreferencesStore>((ref) => UpdatePreferencesStore());
+
+final updatePreferencesProvider =
+    StateNotifierProvider<UpdatePreferencesNotifier, UpdatePreferences>((ref) {
+  final notifier =
+      UpdatePreferencesNotifier(ref.watch(updatePreferencesStoreProvider));
+  unawaited(notifier.load());
+  return notifier;
+});
+
+final updateServiceProvider = Provider<UpdateService>((ref) {
+  final service = UpdateService();
+  ref.onDispose(service.dispose);
+  return service;
+});
+
+final updateDownloaderProvider = Provider<UpdateDownloader>((ref) {
+  final downloader = UpdateDownloader();
+  ref.onDispose(downloader.close);
+  return downloader;
+});
+
+final installerLauncherProvider =
+    Provider<InstallerLauncher>((ref) => InstallerLauncher());
+
+final updateControllerProvider =
+    StateNotifierProvider<UpdateController, UpdateUiState>((ref) {
+  return UpdateController(
+    service: ref.watch(updateServiceProvider),
+    downloader: ref.watch(updateDownloaderProvider),
+    launcher: ref.watch(installerLauncherProvider),
+    preferences: ref.read(updatePreferencesProvider.notifier),
+    closeApp: () => ref.read(windowManagerProvider).close(),
+  );
+});
+
+/// 打开更新对话框（检查结果、下载进度、安装确认都在同一框内切换）。
+Future<void> showUpdateDialog(BuildContext context) => showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _UpdateDialogHost(),
+    );
+
+/// 打开「更新源」设置。
+Future<void> showUpdateSourceDialog(BuildContext context) => showDialog<void>(
+      context: context,
+      builder: (_) => const _UpdateSourceDialogHost(),
+    );
+
 final cmsApiProvider = Provider<CmsJsonApi>((ref) => CmsJsonApi());
 final siteApiProvider = Provider<SiteApi>((ref) => SiteApi(
       cmsApi: ref.watch(cmsApiProvider),
       // 伴随服务懒启动后由 SiteApi 把当前开关推给 Java 侧
-      selfCheckEnabled: () => ref.read(settingsRepositoryProvider).selfCheckPreferences.enabled,
+      selfCheckEnabled: () =>
+          ref.read(settingsRepositoryProvider).selfCheckPreferences.enabled,
     ));
 final parseEngineProvider = Provider<ParseEngine>((ref) => ParseEngine());
 final searchEngineProvider = Provider<SearchEngine>(
@@ -111,6 +186,21 @@ final liveRepositoryProvider = Provider<LiveRepository>((ref) {
   return repository;
 });
 
+/// ⑤-2/⑤-3 直播运行态：当前频道列表与高亮索引（播放器抽屉 / ←→ 切台共用）。
+/// 仅本次运行内有效；跨启动的「上次频道」走 live_last.json。
+class LivePlaybackRuntime {
+  final List<Live> channels;
+  final int index;
+
+  const LivePlaybackRuntime({required this.channels, required this.index});
+}
+
+final liveRuntimeProvider = StateProvider<LivePlaybackRuntime?>((ref) => null);
+
+/// ⑤ 修复：直播入口「先进入播放页再加载」的加载态。
+/// true 时播放页可见（即使尚无播放规格）并显示居中加载指示；加载完成或
+/// 用户中途返回即复位（迟到的起播结果按此作废，不产生幽灵播放）。
+final liveEntryLoadingProvider = StateProvider<bool>((ref) => false);
 final epgRepositoryProvider = Provider<EpgRepository>((ref) {
   final repository = EpgRepository();
   ref.onDispose(repository.dispose);
@@ -118,8 +208,8 @@ final epgRepositoryProvider = Provider<EpgRepository>((ref) {
 });
 
 /// 存储与缓存盘点 / 清理（SET-09）。默认使用真实 %APPDATA%/XiugouTV。
-final cacheMaintenanceProvider = Provider<CacheMaintenance>(
-    (ref) => CacheMaintenance());
+final cacheMaintenanceProvider =
+    Provider<CacheMaintenance>((ref) => CacheMaintenance());
 
 /// 数据备份与恢复（SET-10）。读取前等待配置 / 设置保存链落定。
 final dataBackupServiceProvider = Provider<DataBackupService>((ref) {
@@ -145,13 +235,14 @@ final playbackHistoryTrackerProvider = Provider<PlaybackHistoryTracker>((ref) {
   return tracker;
 });
 
-/// 自动换线提示（SET-12）：由播放器外层监听并显示 SnackBar。
+/// 自动换线提示（SET-12）：由播放器外层监听并显示顶部浮层消息。
 final lineSwitchNoticeProvider = StateProvider<String?>((ref) => null);
 
 /// 播放器内手动换线（SET-12 重做）：与自动换线共用同一条执行链路。
 final manualLineSwitchProvider =
     Provider<Future<void> Function(PlaybackSession, int)>((ref) {
-  return (session, sourceIndex) => _manualSwitchToLine(ref, session, sourceIndex);
+  return (session, sourceIndex) =>
+      _manualSwitchToLine(ref, session, sourceIndex);
 });
 
 /// 早期错误自动换线控制器（SET-12）。
@@ -408,6 +499,83 @@ Future<void> _launchPlayback(WidgetRef ref, MediaPlaySpec spec,
   ref.read(settingsPageOpenProvider.notifier).state = false;
 }
 
+// --- ⑤ 直播播放（入口直连 / 切台 / 抽屉与管理弹窗共用） ---
+
+/// 起播指定直播频道：更新运行态（抽屉 / 切台的单一数据源）、记录启动入口与
+/// 「上次频道」（以用户选择为准——失败也保留，便于下次原样重试）。
+/// 返回是否成功起播；失败给统一提示而不抛出（直播失败可直接换台重试）。
+Future<bool> _startLiveChannel(WidgetRef ref, List<Live> channels, int index,
+    {bool Function()? isStale}) async {
+  if (index < 0 || index >= channels.length) return false;
+  final live = channels[index];
+  ref.read(liveRuntimeProvider.notifier).state =
+      LivePlaybackRuntime(channels: List.unmodifiable(channels), index: index);
+  unawaited(
+      ref.read(settingsRepositoryProvider).recordLastEntry(StartupEntry.live));
+  unawaited(ref.read(liveRepositoryProvider).saveLastChannelKey(live.key));
+  try {
+    await _launchPlayback(
+        ref,
+        MediaPlaySpec(
+          url: live.url,
+          headers: live.headers.isEmpty ? null : live.headers,
+          title: live.name,
+          isLive: true,
+        ),
+        isStale: isStale);
+    if (isStale?.call() ?? false) return false;
+    return true;
+  } catch (_) {
+    // 入口「先页面后加载」期间用户已退出：静默作废，不给失败提示。
+    if (isStale?.call() ?? false) return false;
+    showAppMessage('直播播放失败，请检查地址或尝试其他频道', type: AppMessageType.error);
+    return false;
+  }
+}
+
+/// ⑤-3 切台：相对位移循环选择（← / → 与抽屉共用），成功后给轻提示。
+Future<void> _switchLiveChannel(WidgetRef ref, int delta) async {
+  final runtime = ref.read(liveRuntimeProvider);
+  if (runtime == null || runtime.channels.isEmpty || delta == 0) return;
+  final next = (runtime.index + delta) % runtime.channels.length;
+  final name = runtime.channels[next].name;
+  final started = await _startLiveChannel(ref, runtime.channels, next);
+  if (started) {
+    showAppMessage('已切换至 $name', type: AppMessageType.info);
+  }
+}
+
+/// 管理弹窗选台回调：优先在当前列表定位；新频道（刚导入）并入列表后播放。
+Future<void> _playLiveFromDialog(WidgetRef ref, Live live) async {
+  final runtime = ref.read(liveRuntimeProvider);
+  final channels = [...?runtime?.channels];
+  final index = channels.indexWhere((channel) => channel.key == live.key);
+  if (index >= 0) {
+    await _startLiveChannel(ref, channels, index);
+    return;
+  }
+  channels.add(live);
+  await _startLiveChannel(ref, channels, channels.length - 1);
+}
+
+/// ⑤-3 抽屉「管理频道」入口：在播放器上直接打开管理弹窗（不打断播放）。
+Future<void> _showLiveManagerDialog(BuildContext context, WidgetRef ref) async {
+  final repo = ref.read(configRepositoryProvider);
+  final sourceUrl = repo.currentWindowConfig.lastConfigUrl;
+  await showDialog<void>(
+    context: context,
+    builder: (_) => Consumer(
+      builder: (_, dialogRef, __) => LiveChannelsDialog(
+        lives: dialogRef.watch(vodConfigProvider).lives,
+        repository: dialogRef.watch(liveRepositoryProvider),
+        epgRepository: dialogRef.watch(epgRepositoryProvider),
+        baseUri: sourceUrl == null ? null : Uri.tryParse(sourceUrl),
+        onPlayLive: (live) => unawaited(_playLiveFromDialog(ref, live)),
+      ),
+    ),
+  );
+}
+
 /// 解析指定集数的播放地址（失败或地址为空返回 null，报错口径与既有选集一致）。
 Future<MediaPlaySpec?> _resolveEpisodeSpec(
   WidgetRef ref, {
@@ -462,7 +630,9 @@ Future<MediaPlaySpec?> _resolveEpisodeSpec(
   final opening = _openingStart(ref, item.id);
   final resume = existing?.resumePosition;
   final startPosition =
-      (opening != null && (resume == null || resume < opening)) ? opening : resume;
+      (opening != null && (resume == null || resume < opening))
+          ? opening
+          : resume;
 
   final spec = MediaPlaySpec(
     url: resolved.url,
@@ -593,15 +763,15 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})>
     );
     ref.read(activePlaybackSessionProvider.notifier).state = session;
     ref.read(autoLineSwitchProvider).arm(
-      sources: allSources,
-      currentSourceIndex: candidate.sourceIndex,
-      currentSourceName: candidate.source.name,
-      episodeName: candidate.episode.name,
-      currentEpisodeUrl: candidate.episode.url,
-      tried: tried,
-      epoch: _playbackSessionEpoch,
-      startPosition: prepared.spec.startPosition ?? Duration.zero,
-    );
+          sources: allSources,
+          currentSourceIndex: candidate.sourceIndex,
+          currentSourceName: candidate.source.name,
+          episodeName: candidate.episode.name,
+          currentEpisodeUrl: candidate.episode.url,
+          tried: tried,
+          epoch: _playbackSessionEpoch,
+          startPosition: prepared.spec.startPosition ?? Duration.zero,
+        );
     if (tried.length > 1) {
       final start = prepared.spec.startPosition ?? Duration.zero;
       ref.read(lineSwitchNoticeProvider.notifier).state =
@@ -612,9 +782,7 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})>
   }
 
   return (
-    error: attempts.length > 1
-        ? '所有备用线路均不可用，请稍后重试'
-        : '播放解析失败，请检查站源或解析配置',
+    error: attempts.length > 1 ? '所有备用线路均不可用，请稍后重试' : '播放解析失败，请检查站源或解析配置',
     resumeMatch: null,
   );
 }
@@ -631,8 +799,7 @@ String _formatPlaybackPosition(Duration position) {
 }
 
 /// 跨站续播提示（SET-11）：只在非精确 ID 命中时出现，并提供「从头播放」逃生口。
-void _showResumeHint(
-    BuildContext context, WidgetRef ref, HistoryResumeMatch? match) {
+void _showResumeHint(WidgetRef ref, HistoryResumeMatch? match) {
   if (match == null || match.level == HistoryMatchLevel.exact) return;
   final resume = match.record.resumePosition;
   if (resume == null) return;
@@ -641,21 +808,14 @@ void _showResumeHint(
       : (match.record.sourceName.trim().isNotEmpty
           ? match.record.sourceName.trim()
           : '其他站点');
-  final messenger = ScaffoldMessenger.maybeOf(context);
-  if (messenger == null) return;
-  messenger.showSnackBar(SnackBar(
-    // Flutter 3.4x 起 `SnackBar.persist` 默认是 `action != null`：带按钮的提示
-    // 会永久常驻（不启动自动关闭计时器）。续播提示只是一次性告知，必须显式
-    // 关掉持久化，否则会一直挡在播放器上直到用户点掉。
-    persist: false,
-    duration: const Duration(seconds: 5),
-    content: Text('已从「$source」的观看进度续播'
-        '（${_formatPlaybackPosition(resume)}）'),
-    action: SnackBarAction(
+  showAppMessage(
+    '已从「$source」的观看进度续播（${_formatPlaybackPosition(resume)}）',
+    type: AppMessageType.info,
+    action: AppMessageAction(
       label: '从头播放',
       onPressed: () => unawaited(_restartCurrentFromStart(ref)),
     ),
-  ));
+  );
 }
 
 /// 把当前记录进度清零并从 0 继续播放（只影响当前记录，不删除其他站点记录）。
@@ -888,20 +1048,20 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})> _switchEpisode(
       lineSwitchKey(latest.sourceIndex, latest.sourceName),
     };
     ref.read(activePlaybackSessionProvider.notifier).state = latest.copyWith(
-          index: targetIndex,
-          switching: false,
-          triedLines: resetTried,
-        );
-    ref.read(autoLineSwitchProvider).arm(
-      sources: latest.sources,
-      currentSourceIndex: latest.sourceIndex,
-      currentSourceName: latest.sourceName,
-      episodeName: latest.episodes[targetIndex].name,
-      currentEpisodeUrl: latest.episodes[targetIndex].url,
-      tried: resetTried,
-      epoch: _playbackSessionEpoch,
-      startPosition: prepared.spec.startPosition ?? Duration.zero,
+      index: targetIndex,
+      switching: false,
+      triedLines: resetTried,
     );
+    ref.read(autoLineSwitchProvider).arm(
+          sources: latest.sources,
+          currentSourceIndex: latest.sourceIndex,
+          currentSourceName: latest.sourceName,
+          episodeName: latest.episodes[targetIndex].name,
+          currentEpisodeUrl: latest.episodes[targetIndex].url,
+          tried: resetTried,
+          epoch: _playbackSessionEpoch,
+          startPosition: prepared.spec.startPosition ?? Duration.zero,
+        );
   }
   return (error: null, resumeMatch: prepared.resumeMatch);
 }
@@ -913,6 +1073,15 @@ Duration _skipSetLimit(Duration duration) {
   final half = Duration(milliseconds: duration.inMilliseconds ~/ 2);
   const tenMinutes = Duration(minutes: 10);
   return half < tenMinutes ? half : tenMinutes;
+}
+
+/// 片头 / 片尾校验提示用的时间格式（h:mm:ss / mm:ss）。
+String _formatSkipMs(int ms) {
+  final d = Duration(milliseconds: ms);
+  final hours = d.inHours;
+  final minutes = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return hours > 0 ? '$hours:$minutes:$seconds' : '$minutes:$seconds';
 }
 
 /// 当前影片生效的片头起点（未设置或总开关关闭时为 null）。
@@ -934,107 +1103,125 @@ PlayerSkipNav? _buildSkipNav(WidgetRef ref, PlaybackSession? session,
     endingMs: entry?.endingMs ?? 0,
     // 总开关关闭时，「跳过片头」胶囊不应出现（自动跳过已被 _openingStart 关闭）。
     enabled: preferences.enabled,
-    onOpeningPressed: () =>
-        unawaited(_editSkipMarker(playerContext, ref, ending: false)),
-    onEndingPressed: () =>
-        unawaited(_editSkipMarker(playerContext, ref, ending: true)),
+    onSetOpeningAt: (ms) =>
+        unawaited(_editSkipMarker(playerContext, ref, ending: false, atMs: ms)),
+    onSetEndingAt: (ms) =>
+        unawaited(_editSkipMarker(playerContext, ref, ending: true, atMs: ms)),
+    onClearOpening: () => unawaited(
+        _editSkipMarker(playerContext, ref, ending: false, clear: true)),
+    onClearEnding: () => unawaited(
+        _editSkipMarker(playerContext, ref, ending: true, clear: true)),
   );
 }
 
-/// 打开设置面板并保存片头 / 片尾（含重叠校验与失败重试）。
+/// 写入片头 / 片尾标记（点击即记，不再弹窗）。
+///
+/// - [atMs] 为**绝对时间点**毫秒；缺省用当前播放位置；
+/// - 片尾由宿主换算为「距片尾偏移」后落盘（沿用 `play_skip_preferences` 口径）；
+/// - [clear] 清除该侧标记（保留另一侧，空条目自动移除）；
+/// - 范围（min(时长/2, 10 分钟)）与重叠校验保留，反馈走顶部浮层消息。
 Future<void> _editSkipMarker(BuildContext context, WidgetRef ref,
-    {required bool ending}) async {
+    {required bool ending, int? atMs, bool clear = false}) async {
   final session = ref.read(activePlaybackSessionProvider);
   if (session == null || ref.read(activePlaySpecProvider) == null) return;
   // 切换 / 刷新过渡期时长与位置可能仍属上一集：避免据此写入错误时间点
   if (session.switching || ref.read(playerRefreshBusyProvider)) return;
-  final engine = ref.read(playerEngineProvider);
-  final duration = engine.duration;
   final label = ending ? '片尾' : '片头';
-  if (duration <= Duration.zero) {
-    ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('时长未知，暂时无法设置片头 / 片尾')));
-    return;
-  }
-
   final repository = ref.read(settingsRepositoryProvider);
   final preferences = repository.playSkipPreferences;
   final entry = preferences.entryFor(session.item.id);
-  final currentMs = entry == null ? 0 : (ending ? entry.endingMs : entry.openingMs);
-  final positionMs = ending
-      ? (duration - engine.position).inMilliseconds
-      : engine.position.inMilliseconds;
-  final limitMs = _skipSetLimit(duration).inMilliseconds;
 
-  final value = await showEpisodeSkipDialog(
-    context,
-    label: label,
-    currentMs: currentMs,
-    positionMs: positionMs,
-    limitMs: limitMs,
-  );
-  if (value == null || !context.mounted) return;
+  // updatedAt 单调递增：系统时钟回拨时不至于让自己刚写的条目成为「最旧」而被淘汰
+  final now = DateTime.now().millisecondsSinceEpoch;
+  final newest = preferences.items.values
+      .fold<int>(0, (acc, item) => item.updatedAt > acc ? item.updatedAt : acc);
+  final stamp = now > newest ? now : newest + 1;
+
+  Future<bool> persist(PlaySkipEntry next) async {
+    final updated = preferences.upsert(session.item.id, next);
+    try {
+      await repository.updatePlaySkipPreferences(updated);
+      return true;
+    } catch (_) {
+      if (!context.mounted) return false;
+      showAppMessage(
+        '$label保存失败，请重试',
+        type: AppMessageType.error,
+        action: AppMessageAction(
+          label: '重试',
+          // 用仓库的失败重试（取当前内存快照），避免回放本次的旧快照覆盖后续修改
+          onPressed: () => unawaited(repository.retryFailedSaves()),
+        ),
+      );
+      return false;
+    }
+  }
+
+  if (clear) {
+    final currentMs = ending ? (entry?.endingMs ?? 0) : (entry?.openingMs ?? 0);
+    if (entry == null || currentMs <= 0) return;
+    final next = entry.copyWith(
+        openingMs: ending ? null : 0,
+        endingMs: ending ? 0 : null,
+        updatedAt: stamp);
+    if (await persist(next) && context.mounted) {
+      showAppMessage('$label已清除', type: AppMessageType.success);
+    }
+    return;
+  }
+
+  final engine = ref.read(playerEngineProvider);
+  final duration = engine.duration;
+  if (duration <= Duration.zero) {
+    showAppMessage('时长未知，暂时无法设置片头 / 片尾', type: AppMessageType.warning);
+    return;
+  }
+
+  final pointMs = atMs ?? engine.position.inMilliseconds;
+  // 片尾存「距片尾偏移」（时长 − 标记点）。
+  final valueMs = ending ? duration.inMilliseconds - pointMs : pointMs;
+  final limitMs = _skipSetLimit(duration).inMilliseconds;
+  if (valueMs <= 0 || valueMs > limitMs) {
+    showAppMessage('仅允许在$label附近的 ${_formatSkipMs(limitMs)} 内设置，请先调整播放位置',
+        type: AppMessageType.warning);
+    return;
+  }
 
   // 重叠校验：片头起点 + 片尾偏移必须小于总时长（留 1s 余量）
   final otherMs =
       entry == null ? 0 : (ending ? entry.openingMs : entry.endingMs);
-  if (value > 0 &&
-      otherMs > 0 &&
-      value + otherMs >= duration.inMilliseconds - 1000) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text('片头与片尾重叠，请调整后再设置')));
+  if (otherMs > 0 && valueMs + otherMs >= duration.inMilliseconds - 1000) {
+    showAppMessage('片头与片尾重叠，请调整后再设置', type: AppMessageType.warning);
     return;
   }
 
-  // updatedAt 单调递增：系统时钟回拨时不至于让自己刚写的条目成为「最旧」而被淘汰
-  final now = DateTime.now().millisecondsSinceEpoch;
-  final newest = preferences.items.values.fold<int>(
-      0, (acc, item) => item.updatedAt > acc ? item.updatedAt : acc);
-  final updated = preferences.upsert(
-    session.item.id,
-    PlaySkipEntry(
-      openingMs: ending ? (entry?.openingMs ?? 0) : value,
-      endingMs: ending ? value : (entry?.endingMs ?? 0),
-      updatedAt: now > newest ? now : newest + 1,
-    ),
-  );
-  try {
-    await repository.updatePlaySkipPreferences(updated);
-  } catch (_) {
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('$label保存失败，请重试'),
-      action: SnackBarAction(
-        label: '重试',
-        // 用仓库的失败重试（取当前内存快照），避免回放本次的旧快照覆盖后续修改
-        onPressed: () => unawaited(repository.retryFailedSaves()),
-      ),
-    ));
-    return;
+  final next = (entry ?? const PlaySkipEntry()).copyWith(
+      openingMs: ending ? null : valueMs,
+      endingMs: ending ? valueMs : null,
+      updatedAt: stamp);
+  if (await persist(next) && context.mounted) {
+    showAppMessage('$label已更新', type: AppMessageType.success);
   }
-  if (!context.mounted) return;
-  ScaffoldMessenger.of(context)
-      .showSnackBar(SnackBar(content: Text('$label已更新')));
 }
 
-/// 播放器切集入口：失败时以 SnackBar 提示（与详情页选集失败口径一致）。
+/// 播放器切集入口：失败时以顶部浮层消息提示（与详情页选集失败口径一致）。
 Future<void> _handleEpisodeSwitch(
     BuildContext context, WidgetRef ref, int targetIndex) async {
   final result = await _switchEpisode(ref, targetIndex);
   if (!context.mounted) return;
   if (result.error != null) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(result.error!)));
+    showAppMessage(result.error!, type: AppMessageType.error);
     return;
   }
-  _showResumeHint(context, ref, result.resumeMatch);
+  _showResumeHint(ref, result.resumeMatch);
 }
 
 /// 刷新当前播放：可解析场景（点播剧集）重新解析，其余原样重载。
 ///
 /// 保留刷新前位置、不新增历史记录、失败不打断当前播放；
 /// 返回 `refreshed` 表示是否真的重载过，`error` 为用户可展示的错误文案。
-Future<({String? error, bool refreshed})> _refreshPlayback(WidgetRef ref) async {
+Future<({String? error, bool refreshed})> _refreshPlayback(
+    WidgetRef ref) async {
   final spec = ref.read(activePlaySpecProvider);
   if (spec == null) return (error: null, refreshed: false);
   if (ref.read(playerRefreshBusyProvider) ||
@@ -1096,9 +1283,7 @@ Future<({String? error, bool refreshed})> _refreshPlayback(WidgetRef ref) async 
         resolved = null;
       }
       if (resolved == null) {
-        error = timedOut
-            ? '刷新失败：解析超时，请稍后重试'
-            : '刷新失败：播放解析失败，请检查站源或解析配置';
+        error = timedOut ? '刷新失败：解析超时，请稍后重试' : '刷新失败：播放解析失败，请检查站源或解析配置';
       } else {
         target = MediaPlaySpec(
           url: resolved.url,
@@ -1145,15 +1330,15 @@ Future<({String? error, bool refreshed})> _refreshPlayback(WidgetRef ref) async 
       }
       if (session != null && ref.read(activePlaySpecProvider) != null) {
         ref.read(autoLineSwitchProvider).arm(
-          sources: session.sources,
-          currentSourceIndex: session.sourceIndex,
-          currentSourceName: session.sourceName,
-          episodeName: session.episodes[session.index].name,
-          currentEpisodeUrl: session.episodes[session.index].url,
-          tried: resetTried,
-          epoch: _playbackSessionEpoch,
-          startPosition: position,
-        );
+              sources: session.sources,
+              currentSourceIndex: session.sourceIndex,
+              currentSourceName: session.sourceName,
+              episodeName: session.episodes[session.index].name,
+              currentEpisodeUrl: session.episodes[session.index].url,
+              tried: resetTried,
+              epoch: _playbackSessionEpoch,
+              startPosition: position,
+            );
       }
     }
   } finally {
@@ -1203,13 +1388,12 @@ Future<String?> _replayFromStart(WidgetRef ref, MpvPlayerEngine engine) async {
   return null;
 }
 
-/// 重播入口：失败时以 SnackBar 提示（与刷新失败同口径）。
+/// 重播入口：失败时以顶部浮层消息提示（与刷新失败同口径）。
 Future<void> _handleReplayRequested(
     BuildContext context, WidgetRef ref, MpvPlayerEngine engine) async {
   final error = await _replayFromStart(ref, engine);
   if (error != null && context.mounted) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(error)));
+    showAppMessage(error, type: AppMessageType.error);
   }
 }
 
@@ -1219,8 +1403,11 @@ Future<void> _handleRefreshPlayback(BuildContext context, WidgetRef ref) async {
   if (!context.mounted) return;
   final message = result.error ?? (result.refreshed ? '已刷新' : null);
   if (message != null) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+    showAppMessage(
+      message,
+      type:
+          result.error != null ? AppMessageType.error : AppMessageType.success,
+    );
   }
 }
 
@@ -1467,16 +1654,18 @@ class _ConfigDialogState extends State<ConfigDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      backgroundColor: const Color(0xFF202026),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      title: const Row(
+      backgroundColor: context.palette.raised,
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadii.lg)),
+      title: Row(
         children: [
-          Icon(Icons.settings_outlined, color: Color(0xFFE50914), size: 20),
-          SizedBox(width: 8),
+          Icon(Icons.settings_outlined,
+              color: context.palette.accentInk, size: 20),
+          const SizedBox(width: 8),
           Text('配置源设置',
               style: TextStyle(
-                  fontSize: 16,
-                  color: Colors.white,
+                  fontSize: AppType.heading,
+                  color: context.palette.textTitle,
                   fontWeight: FontWeight.bold)),
         ],
       ),
@@ -1486,9 +1675,10 @@ class _ConfigDialogState extends State<ConfigDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
+            Text(
               '输入配置文件地址，粘贴 JSON / Base64 内容，或导入本地文件：',
-              style: TextStyle(fontSize: 13, color: Color(0xFFB0B0C0)),
+              style: TextStyle(
+                  fontSize: AppType.label, color: context.palette.textBody),
             ),
             const SizedBox(height: 12),
             TextField(
@@ -1496,15 +1686,16 @@ class _ConfigDialogState extends State<ConfigDialog> {
               enabled: !_isLoading,
               minLines: 1,
               maxLines: 6,
-              style: const TextStyle(fontSize: 13, color: Colors.white),
+              style: TextStyle(
+                  fontSize: AppType.label, color: context.palette.textMain),
               decoration: InputDecoration(
                 hintText: 'https://example.com/tv.json 或粘贴配置内容',
-                hintStyle: const TextStyle(color: Color(0xFF606070)),
+                hintStyle: TextStyle(color: context.palette.textDim),
                 filled: true,
-                fillColor: const Color(0xFF16161A),
+                fillColor: context.palette.raised,
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: Color(0xFF383844)),
+                  borderRadius: BorderRadius.circular(AppRadii.sm),
+                  borderSide: BorderSide(color: context.palette.borderStrong),
                 ),
                 contentPadding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1516,22 +1707,23 @@ class _ConfigDialogState extends State<ConfigDialog> {
                 OutlinedButton.icon(
                   onPressed: _isLoading ? null : _importFromFile,
                   icon: const Icon(Icons.folder_open_rounded, size: 16),
-                  label:
-                      const Text('导入本地文件…', style: TextStyle(fontSize: 12.5)),
+                  label: const Text('导入本地文件…',
+                      style: TextStyle(fontSize: AppType.label)),
                   style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFFD0D0DE),
-                    side: const BorderSide(color: Color(0xFF383844)),
+                    foregroundColor: context.palette.textBody,
+                    side: BorderSide(color: context.palette.borderStrong),
                     shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8)),
+                        borderRadius: BorderRadius.circular(AppRadii.sm)),
                     padding: const EdgeInsets.symmetric(
                         horizontal: 14, vertical: 10),
                   ),
                 ),
                 const SizedBox(width: 12),
-                const Expanded(
+                Expanded(
                   child: Text(
                     '支持 TVBox 配置 / 多仓清单 / CMS 资源站清单',
-                    style: TextStyle(fontSize: 11.5, color: Color(0xFF707082)),
+                    style: TextStyle(
+                        fontSize: AppType.body, color: context.palette.textDim),
                   ),
                 ),
               ],
@@ -1542,14 +1734,16 @@ class _ConfigDialogState extends State<ConfigDialog> {
                 width: double.infinity,
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF3A171B),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: const Color(0xFF8F2D36)),
+                  color: context.palette.accentWash,
+                  borderRadius: BorderRadius.circular(AppRadii.sm),
+                  border: Border.all(color: context.palette.danger),
                 ),
                 child: Text(
                   _errorMessage!,
-                  style: const TextStyle(
-                      fontSize: 12, height: 1.4, color: Color(0xFFFFB5BA)),
+                  style: TextStyle(
+                      fontSize: AppType.body,
+                      height: 1.4,
+                      color: context.palette.danger),
                 ),
               ),
             ],
@@ -1559,22 +1753,24 @@ class _ConfigDialogState extends State<ConfigDialog> {
       actions: [
         TextButton(
           onPressed: _isLoading ? null : () => Navigator.of(context).pop(),
-          child: const Text('取消', style: TextStyle(color: Color(0xFF888896))),
+          child: Text('取消', style: TextStyle(color: context.palette.textSub)),
         ),
         ElevatedButton(
           style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFFE50914),
-            foregroundColor: Colors.white,
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+            backgroundColor: context.palette.accent,
+            // 品牌底上必须显式前景 onPrimary：M3 默认前景是 primary=品牌色，会同色不可见
+            foregroundColor: Theme.of(context).colorScheme.onPrimary,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppRadii.sm)),
           ),
           onPressed: _isLoading ? null : _load,
           child: _isLoading
-              ? const SizedBox(
+              ? SizedBox(
                   width: 16,
                   height: 16,
                   child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Colors.white),
+                      strokeWidth: 2,
+                      color: Theme.of(context).colorScheme.onPrimary),
                 )
               : const Text('加载配置',
                   style: TextStyle(fontWeight: FontWeight.bold)),
@@ -1632,7 +1828,8 @@ class _PlaySkipWatcherState extends ConsumerState<_PlaySkipWatcher> {
     final session = ref.read(activePlaybackSessionProvider);
     if (session == null) return;
     if (session.switching || ref.read(playerRefreshBusyProvider)) return;
-    final preferences = ref.read(settingsRepositoryProvider).playSkipPreferences;
+    final preferences =
+        ref.read(settingsRepositoryProvider).playSkipPreferences;
     if (!preferences.enabled) return;
     final entry = preferences.entryFor(session.item.id);
     if (entry == null || entry.endingMs <= 0) return;
@@ -1703,6 +1900,141 @@ class _VideoScaleBindingState extends State<_VideoScaleBinding> {
   }
 }
 
+/// 更新对话框的宿主：把 Riverpod 状态接到纯展示的 [UpdateDialog] 上。
+class _UpdateDialogHost extends ConsumerWidget {
+  const _UpdateDialogHost();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(updateControllerProvider);
+    final prefs = ref.watch(updatePreferencesProvider);
+    final controller = ref.read(updateControllerProvider.notifier);
+    final tag = state.result?.manifest?.tag;
+    return UpdateDialog(
+      state: state,
+      currentVersion: appVersionLabel ?? '未知版本',
+      isPortable: controller.isPortable,
+      skipped: tag != null && prefs.isSkipped(tag),
+      onDownload: () => unawaited(controller.downloadAndInstall()),
+      onCancelDownload: controller.cancelDownload,
+      onInstall: () => unawaited(controller.install()),
+      onSkip: () => unawaited(controller.skipCurrentVersion()),
+      onClearSkip: () => unawaited(controller.clearSkipped()),
+      onRetry: () => unawaited(controller.check()),
+      onClose: () => Navigator.of(context).pop(),
+      onOpenReleasePage: () => unawaited(controller.openReleasePage()),
+      onOpenFolder: () => unawaited(controller.openDownloadFolder()),
+    );
+  }
+}
+
+class _UpdateSourceDialogHost extends ConsumerWidget {
+  const _UpdateSourceDialogHost();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final prefs = ref.watch(updatePreferencesProvider);
+    final notifier = ref.read(updatePreferencesProvider.notifier);
+    return UpdateSourceDialog(
+      initialSource: prefs.source,
+      onSave: notifier.setSource,
+    );
+  }
+}
+
+/// 关于页的更新区块：把状态与动作接到纯展示的 [AboutUpdateSection]。
+class AboutUpdateSectionHost extends ConsumerWidget {
+  const AboutUpdateSectionHost({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final prefs = ref.watch(updatePreferencesProvider);
+    final state = ref.watch(updateControllerProvider);
+    final controller = ref.read(updateControllerProvider.notifier);
+    return AboutUpdateSection(
+      preferences: prefs,
+      state: state,
+      currentVersion: appVersionLabel ?? '未知版本',
+      onCheck: () {
+        unawaited(controller.check());
+        unawaited(showUpdateDialog(context));
+      },
+      onEditSource: () => unawaited(showUpdateSourceDialog(context)),
+      onAutoCheckChanged: (value) => unawaited(
+          ref.read(updatePreferencesProvider.notifier).setAutoCheck(value)),
+      onClearSkipped: () => unawaited(controller.clearSkipped()),
+      onOpenResult: () => unawaited(showUpdateDialog(context)),
+    );
+  }
+}
+
+/// 启动后检查一次更新。
+///
+/// 用户口径（2026-10-19）：只在打开软件后执行一次，默认开启，可在关于页关闭。
+/// 播放中或已有弹窗时不打断，改为底部提示条。
+class UpdateCheckHost extends ConsumerStatefulWidget {
+  final Widget child;
+  final Duration delay;
+
+  const UpdateCheckHost({
+    super.key,
+    required this.child,
+    this.delay = const Duration(seconds: 8),
+  });
+
+  @override
+  ConsumerState<UpdateCheckHost> createState() => _UpdateCheckHostState();
+}
+
+class _UpdateCheckHostState extends ConsumerState<UpdateCheckHost> {
+  Timer? _timer;
+  bool _ran = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(widget.delay, _run);
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _run() async {
+    if (_ran || !mounted) return;
+    _ran = true;
+    if (!ref.read(updatePreferencesProvider).autoCheck) return;
+
+    final controller = ref.read(updateControllerProvider.notifier);
+    final result = await controller.check();
+    if (!mounted || result == null) return;
+    if (result.status != UpdateCheckStatus.available || result.skipped) return;
+
+    final playing = ref.read(activePlaySpecProvider) != null;
+    final settingsOpen = ref.read(settingsPageOpenProvider);
+    final unobstructed = ModalRoute.of(context)?.isCurrent ?? false;
+    if (playing || settingsOpen || !unobstructed) {
+      showAppMessage(
+        '发现新版本 ${result.manifest?.tag ?? ''}',
+        type: AppMessageType.warning,
+        action: AppMessageAction(
+          label: '查看',
+          onPressed: () {
+            if (mounted) unawaited(showUpdateDialog(context));
+          },
+        ),
+      );
+      return;
+    }
+    unawaited(showUpdateDialog(context));
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
 /// Windows 桌面应用程序顶层组件
 class XiugouTvApp extends ConsumerWidget {
   const XiugouTvApp({super.key});
@@ -1713,15 +2045,20 @@ class XiugouTvApp extends ConsumerWidget {
     final currentSite = ref.watch(currentSiteProvider);
     final activeSiteName = currentSite?.name;
     final activePlaySpec = ref.watch(activePlaySpecProvider);
+    final liveEntryLoading = ref.watch(liveEntryLoadingProvider);
     final activeSession = ref.watch(activePlaybackSessionProvider);
+    // ⑤-2/⑤-3 直播运行态：仅直播播放时下发给抽屉层与切台快捷键
+    final liveRuntime = ref.watch(liveRuntimeProvider);
+    final liveChannels = activePlaySpec?.isLive == true
+        ? (liveRuntime?.channels ?? const <Live>[])
+        : const <Live>[];
     final playerEngine = ref.watch(playerEngineProvider);
     final showSettings = ref.watch(settingsPageOpenProvider);
     final refreshBusy = ref.watch(playerRefreshBusyProvider);
     final autoSwitchBusy = ref.watch(playerAutoSwitchBusyProvider);
-    final playSkipPreferences = ref
-            .watch(playSkipPreferencesProvider)
-            .valueOrNull ??
-        ref.read(settingsRepositoryProvider).playSkipPreferences;
+    final playSkipPreferences =
+        ref.watch(playSkipPreferencesProvider).valueOrNull ??
+            ref.read(settingsRepositoryProvider).playSkipPreferences;
     final isRealMpvEngine = playerEngine.runtimeType == MpvPlayerEngine;
     final trackNavs =
         isRealMpvEngine ? buildPlayerTrackNavs(playerEngine) : null;
@@ -1729,120 +2066,156 @@ class XiugouTvApp extends ConsumerWidget {
     return MaterialApp(
       title: '修狗TV',
       debugShowCheckedModeBanner: false,
-      themeMode: ThemeMode.dark,
-      darkTheme: ThemeData(
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF101014),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFFE50914),
-          surface: Color(0xFF18181C),
-        ),
-        fontFamily: 'Segoe UI',
-        fontFamilyFallback: const [
-          'Microsoft YaHei',
-          'PingFang SC',
-          'sans-serif'
+      theme: buildAppTheme(
+          brightness: Brightness.light, palette: AppPalette.light),
+      darkTheme:
+          buildAppTheme(brightness: Brightness.dark, palette: AppPalette.dark),
+      themeMode: switch (ref.watch(themeModeProvider)) {
+        AppThemeMode.dark => ThemeMode.dark,
+        AppThemeMode.light => ThemeMode.light,
+        AppThemeMode.system => ThemeMode.system,
+      },
+      // 全局消息浮层：挂在 Navigator 之上（盖过对话框），空白区域不拦截事件。
+      builder: (context, child) => Stack(
+        children: [
+          child ?? const SizedBox.shrink(),
+          AppMessageHost(key: appMessageKey),
         ],
       ),
       home: Builder(
-        builder: (innerContext) => DesktopWindowFrame(
-          windowManager: windowMgr,
-          activeSiteName: activeSiteName,
-          onSettingsPressed: () => openSettingsPage(ref),
-          onSiteSelectorPressed: () =>
-              showSiteSelectorDialog(innerContext, ref),
-          child: DesktopShell(
-            showPlayer: activePlaySpec != null,
-            showSettings: showSettings,
-            settingsView: showSettings
-                ? SettingsPage(
-                    playerSettingsApplication: playerEngine.settingsApplication,
-                    playerEngine: playerEngine,
-                    configRepository: ref.read(configRepositoryProvider),
-                    settingsRepository: ref.read(settingsRepositoryProvider),
-                    cacheMaintenance: ref.read(cacheMaintenanceProvider),
-                    epgRepository: ref.read(epgRepositoryProvider),
-                    dataBackupService: ref.read(dataBackupServiceProvider),
-                    wallpaperStore: ref.read(wallpaperStoreProvider),
-                    isPlaybackActive: () =>
-                        ref.read(activePlaySpecProvider) != null,
-                    onClose: () => ref
-                        .read(settingsPageOpenProvider.notifier)
-                        .state = false,
-                    onAddConfig: (pageContext) => showDialog<void>(
-                      context: pageContext,
-                      builder: (_) => ConfigDialog(
-                          repository: ref.read(configRepositoryProvider)),
-                    ),
-                  )
-                : null,
-            mainView: WallpaperBackdrop(
-              store: ref.read(wallpaperStoreProvider),
-              child: const DesktopMainView(),
-            ),
-            playerView: activePlaySpec == null
-                ? null
-                : _LineSwitchNoticeHost(
-                    child: _PlaySkipWatcher(
-                    engine: playerEngine,
-                    child: _VideoScaleBinding(
-                      repository: ref.read(settingsRepositoryProvider),
-                      builder: (playerContext, scale) => DesktopVideoPlayer(
+        builder: (innerContext) => UpdateCheckHost(
+          child: DesktopWindowFrame(
+            windowManager: windowMgr,
+            activeSiteName: activeSiteName,
+            onSettingsPressed: () => openSettingsPage(ref),
+            onSiteSelectorPressed: () =>
+                showSiteSelectorDialog(innerContext, ref),
+            child: DesktopShell(
+              showPlayer: activePlaySpec != null || liveEntryLoading,
+              showSettings: showSettings,
+              settingsView: showSettings
+                  ? SettingsPage(
+                      playerSettingsApplication:
+                          playerEngine.settingsApplication,
                       playerEngine: playerEngine,
-                      windowManager: windowMgr,
-                      scale: scale,
-                      playerInfoLabel: 'MPV 播放器',
-                      episodeNav: _buildEpisodeNav(
-                          ref, activeSession, playerContext,
-                          refreshBusy: refreshBusy || autoSwitchBusy),
-                      lineNav: _buildLineNav(
-                          ref, activeSession,
-                          busy: refreshBusy || autoSwitchBusy),
-                      refreshNav: PlayerRefreshNav(
-                        busy: refreshBusy ||
-                            autoSwitchBusy ||
-                            (activeSession?.switching ?? false),
-                        onRefresh: () =>
-                            _handleRefreshPlayback(playerContext, ref),
+                      configRepository: ref.read(configRepositoryProvider),
+                      settingsRepository: ref.read(settingsRepositoryProvider),
+                      cacheMaintenance: ref.read(cacheMaintenanceProvider),
+                      epgRepository: ref.read(epgRepositoryProvider),
+                      dataBackupService: ref.read(dataBackupServiceProvider),
+                      wallpaperStore: ref.read(wallpaperStoreProvider),
+                      isPlaybackActive: () =>
+                          ref.read(activePlaySpecProvider) != null,
+                      updateSection: const AboutUpdateSectionHost(),
+                      onClose: () => ref
+                          .read(settingsPageOpenProvider.notifier)
+                          .state = false,
+                      onAddConfig: (pageContext) => showDialog<void>(
+                        context: pageContext,
+                        builder: (_) => ConfigDialog(
+                            repository: ref.read(configRepositoryProvider)),
                       ),
-                      skipNav: _buildSkipNav(
-                          ref, activeSession, playerContext, playSkipPreferences),
-                      replayNav: PlayerReplayNav(
-                        busy: refreshBusy ||
-                            autoSwitchBusy ||
-                            (activeSession?.switching ?? false),
-                        onReplay: () => unawaited(_handleReplayRequested(
-                            playerContext, ref, playerEngine)),
-                      ),
-                      videoTracksNav: trackNavs?.video,
-                      audioTracksNav: trackNavs?.audio,
-                      subtitleTracksNav: trackNavs?.subtitle,
-                      onScaleChanged: (value) =>
-                          _handleScaleChanged(ref, value),
-                      resetNav: PlayerResetNav(
-                        enabled: !refreshBusy &&
-                            !autoSwitchBusy &&
-                            !(activeSession?.switching ?? false),
-                        onReset: () =>
-                            _handleResetPlayerData(ref, playerEngine),
-                      ),
-                      onBack: () {
-                        ref.read(autoLineSwitchProvider).disarm();
-                        // 先同步捕获最终播放位置写入历史，再停止引擎（stop 会重置位置）
-                        unawaited(
-                            ref.read(playbackHistoryTrackerProvider).stop());
-                        playerEngine.stop();
-                        ref.read(activePlaySpecProvider.notifier).state = null;
-                        // 关闭播放会话并作废在途切换结果
-                        _playbackSessionEpoch++;
-                        ref
-                            .read(activePlaybackSessionProvider.notifier)
-                            .state = null;
-                      },
+                    )
+                  : null,
+              mainView: WallpaperBackdrop(
+                store: ref.read(wallpaperStoreProvider),
+                child: const DesktopMainView(),
+              ),
+              playerView: activePlaySpec == null && !liveEntryLoading
+                  ? null
+                  : Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        _LineSwitchNoticeHost(
+                          child: _PlaySkipWatcher(
+                            engine: playerEngine,
+                            child: _VideoScaleBinding(
+                              repository: ref.read(settingsRepositoryProvider),
+                              builder: (playerContext, scale) =>
+                                  DesktopVideoPlayer(
+                                playerEngine: playerEngine,
+                                windowManager: windowMgr,
+                                scale: scale,
+                                playerInfoLabel: 'MPV 播放器',
+                                episodeNav: _buildEpisodeNav(
+                                    ref, activeSession, playerContext,
+                                    refreshBusy: refreshBusy || autoSwitchBusy),
+                                lineNav: _buildLineNav(ref, activeSession,
+                                    busy: refreshBusy || autoSwitchBusy),
+                                onLivePrev: liveChannels.isEmpty
+                                    ? null
+                                    : () =>
+                                        unawaited(_switchLiveChannel(ref, -1)),
+                                onLiveNext: liveChannels.isEmpty
+                                    ? null
+                                    : () =>
+                                        unawaited(_switchLiveChannel(ref, 1)),
+                                liveChannels: liveChannels,
+                                liveCurrentIndex: liveRuntime?.index ?? 0,
+                                onLiveSelect: (index) => unawaited(
+                                    _startLiveChannel(
+                                        ref, liveChannels, index)),
+                                onLiveManage: () => unawaited(
+                                    _showLiveManagerDialog(innerContext, ref)),
+                                refreshNav: PlayerRefreshNav(
+                                  busy: refreshBusy ||
+                                      autoSwitchBusy ||
+                                      (activeSession?.switching ?? false),
+                                  onRefresh: () => _handleRefreshPlayback(
+                                      playerContext, ref),
+                                ),
+                                skipNav: _buildSkipNav(ref, activeSession,
+                                    playerContext, playSkipPreferences),
+                                replayNav: PlayerReplayNav(
+                                  busy: refreshBusy ||
+                                      autoSwitchBusy ||
+                                      (activeSession?.switching ?? false),
+                                  onReplay: () => unawaited(
+                                      _handleReplayRequested(
+                                          playerContext, ref, playerEngine)),
+                                ),
+                                videoTracksNav: trackNavs?.video,
+                                audioTracksNav: trackNavs?.audio,
+                                subtitleTracksNav: trackNavs?.subtitle,
+                                onScaleChanged: (value) =>
+                                    _handleScaleChanged(ref, value),
+                                resetNav: PlayerResetNav(
+                                  enabled: !refreshBusy &&
+                                      !autoSwitchBusy &&
+                                      !(activeSession?.switching ?? false),
+                                  onReset: () =>
+                                      _handleResetPlayerData(ref, playerEngine),
+                                ),
+                                onBack: () {
+                                  ref.read(autoLineSwitchProvider).disarm();
+                                  // 先同步捕获最终播放位置写入历史，再停止引擎（stop 会重置位置）
+                                  unawaited(ref
+                                      .read(playbackHistoryTrackerProvider)
+                                      .stop());
+                                  playerEngine.stop();
+                                  ref
+                                      .read(activePlaySpecProvider.notifier)
+                                      .state = null;
+
+                                  // ⑤ 修复：加载态中返回同样撤销（迟到起播作废，见 _enterLive）
+                                  ref
+                                      .read(liveEntryLoadingProvider.notifier)
+                                      .state = false;
+                                  // 关闭播放会话并作废在途切换结果
+                                  _playbackSessionEpoch++;
+                                  ref
+                                      .read(activePlaybackSessionProvider
+                                          .notifier)
+                                      .state = null;
+                                },
+                              ),
+                            ),
+                          ),
+                        ),
+                        if (liveEntryLoading) const _LiveEntryLoadingOverlay(),
+                      ],
                     ),
-                    ),
-                  ),
-                ),
+            ),
           ),
         ),
       ),
@@ -1850,7 +2223,57 @@ class XiugouTvApp extends ConsumerWidget {
   }
 }
 
-/// 监听自动换线提示并显示 SnackBar（SET-12）。
+/// ⑤ 修复：直播入口「先进入播放页再加载」的过渡态。
+///
+/// 居中的加载指示 + 文案（skill `Loading States`：异步等待必须有可见反馈，
+/// 不能冻结 UI）；`IgnorePointer` 保证底层控制条（返回 / 播放）仍可点，
+/// Esc 也可直接退出。
+class _LiveEntryLoadingOverlay extends StatelessWidget {
+  const _LiveEntryLoadingOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return IgnorePointer(
+      child: Center(
+        child: Semantics(
+          liveRegion: true,
+          container: true,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 34,
+                height: 34,
+                child: CircularProgressIndicator(
+                    strokeWidth: 3.5, color: palette.accentInk),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              Text('正在加载直播频道…',
+                  style: TextStyle(
+                      color: palette.playerText, fontSize: AppType.body)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// SET-12 换线「进行中」提示的展示时长（压短，避免把结果提示压在换台之后）。
+const Duration _lineSwitchProgressDuration = Duration(milliseconds: 1200);
+
+/// 换线提示类型：进度 = info、失败 = error、缺集 = warning、其余（已切换）= success。
+AppMessageType _lineSwitchNoticeType(String message) {
+  if (message.contains('正在尝试') || message.contains('正在切换')) {
+    return AppMessageType.info;
+  }
+  if (message.contains('失败')) return AppMessageType.error;
+  if (message.contains('请换一条')) return AppMessageType.warning;
+  return AppMessageType.success;
+}
+
+/// 监听自动换线提示并显示顶部浮层消息（SET-12）。
 class _LineSwitchNoticeHost extends ConsumerStatefulWidget {
   final Widget child;
 
@@ -1869,19 +2292,15 @@ class _LineSwitchNoticeHostState extends ConsumerState<_LineSwitchNoticeHost> {
     _last = message;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final messenger = ScaffoldMessenger.maybeOf(context);
-      if (messenger == null) return;
-      // 不能 hideCurrentSnackBar：SET-11 的续播提示（带「从头播放」）正在展示
-      // 或排队时会被吞掉（评审 N7）。改为纯排队；「进行中」提示压到 1.2 秒，
-      // 避免把后面的结果提示压到用户已经换台之后才出现。
-      final isProgress =
-          message.contains('正在尝试') || message.contains('正在切换');
-      messenger.showSnackBar(SnackBar(
-        duration: isProgress
-            ? const Duration(milliseconds: 1200)
-            : const Duration(seconds: 3),
-        content: Text(message),
-      ));
+      // 消息改为堆叠展示后，「换线提示会吞掉续播提示」的旧坑（评审 N7）已
+      // 消失；「进行中」提示仍压到 1.2 秒，避免把结果提示压到用户已经换台
+      // 之后才出现。
+      final isProgress = message.contains('正在尝试') || message.contains('正在切换');
+      showAppMessage(
+        message,
+        type: _lineSwitchNoticeType(message),
+        duration: isProgress ? _lineSwitchProgressDuration : null,
+      );
       ref.read(lineSwitchNoticeProvider.notifier).state = null;
       // 复位去重键：同一文案在后续会话/再次换线时仍需提示，只抑制同一帧内的重复。
       _last = null;
@@ -1913,7 +2332,8 @@ class WallpaperBackdrop extends ConsumerStatefulWidget {
   final WallpaperStore store;
   final Widget child;
 
-  const WallpaperBackdrop({super.key, required this.store, required this.child});
+  const WallpaperBackdrop(
+      {super.key, required this.store, required this.child});
 
   @override
   ConsumerState<WallpaperBackdrop> createState() => _WallpaperBackdropState();
@@ -1923,13 +2343,9 @@ class _WallpaperBackdropState extends ConsumerState<WallpaperBackdrop> {
   String? _fileName;
   Future<String?>? _resolved;
 
-  static const Color _baseColor = Color(0xFF101014);
-
-  /// 55% 黑遮罩（`0x8C`）。固定值、不提供滑杆：可调透明度会让对比度变成用户责任。
-  static const Color _scrimColor = Color(0x8C000000);
-
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     final preferences = ref.watch(appearancePreferencesProvider).valueOrNull ??
         AppearancePreferences.none;
     if (preferences.wallpaperFileName != _fileName) {
@@ -1940,7 +2356,7 @@ class _WallpaperBackdropState extends ConsumerState<WallpaperBackdrop> {
     return Stack(
       fit: StackFit.expand,
       children: [
-        const ColoredBox(color: _baseColor),
+        ColoredBox(color: palette.background),
         FutureBuilder<String?>(
           future: _resolved,
           builder: (context, snapshot) {
@@ -1959,7 +2375,8 @@ class _WallpaperBackdropState extends ConsumerState<WallpaperBackdrop> {
                   cacheWidth: cacheWidth,
                   errorBuilder: (_, __, ___) => const SizedBox.shrink(),
                 ),
-                const ColoredBox(color: _scrimColor),
+                // 遮罩随主题：深色 55% 黑，浅色 55% 白（固定值，不提供滑杆）
+                ColoredBox(color: palette.scrim),
               ],
             );
           },
@@ -2024,6 +2441,9 @@ class DesktopMainView extends ConsumerStatefulWidget {
 
 class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   final TextEditingController _searchController = TextEditingController();
+
+  /// 搜索框焦点（聚焦时外框高亮；B3）
+  final FocusNode _searchFocusNode = FocusNode();
   final ScrollController _categoryScrollController = ScrollController();
   final ScrollController _searchSiteScrollController = ScrollController();
 
@@ -2056,6 +2476,9 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   /// 本次直播弹窗内是否已启动频道播放（用于区分「关闭后回到点播」）
   bool _livePlaybackStartedInDialog = false;
 
+  /// 直播入口防重入（频道列表可能来自网络，缓慢时避免双击叠加加载）。
+  bool _liveEntryBusy = false;
+
   /// 从「详情/选集弹窗」起播时记住来源：退出播放器后要回到这个弹窗，而不是首页。
   VodDetail? _playbackOriginDetail;
   Site? _playbackOriginSite;
@@ -2081,10 +2504,24 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     _searchPending = false;
   }
 
-  void _synchronizeSite() {
-    if (!mounted || _loadedSiteIdentity == _currentSiteIdentity()) return;
+  /// 清空搜索词并回到常规首页 / 分类加载（搜索框清除、换源同步与
+  /// 空态行动按钮共用——B2）。
+  void _clearSearchToHome() {
     _searchController.clear();
     loadSiteData();
+  }
+
+  void _synchronizeSite() {
+    if (!mounted || _loadedSiteIdentity == _currentSiteIdentity()) return;
+    _clearSearchToHome();
+  }
+
+  /// 搜索进行中（聚合增量或非聚合整块等待）——搜索按钮据此禁用并显示转圈（B3）。
+  bool get _searchBusy => _isSearching && (_searchPending || _isLoading);
+
+  /// 搜索框聚焦变化：刷新外框高亮（B3）。
+  void _onSearchFocusChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -2101,12 +2538,16 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
         loadSiteData();
       }
     });
+    // 搜索框聚焦时高亮外框（B3）
+    _searchFocusNode.addListener(_onSearchFocusChanged);
   }
 
   @override
   void dispose() {
     _cancelSearchStream();
     _searchController.dispose();
+    _searchFocusNode.removeListener(_onSearchFocusChanged);
+    _searchFocusNode.dispose();
     _categoryScrollController.dispose();
     _searchSiteScrollController.dispose();
     super.dispose();
@@ -2414,8 +2855,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const Center(
-        child: CircularProgressIndicator(color: Color(0xFFE50914)),
+      builder: (_) => Center(
+        child: CircularProgressIndicator(color: context.palette.accentInk),
       ),
     );
 
@@ -2425,9 +2866,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       if (mounted) {
         Navigator.of(context).pop(); // 关闭 loading 弹窗
         if (detail == null) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('获取详情失败: 详情为空')),
-          );
+          showAppMessage('获取详情失败: 详情为空', type: AppMessageType.error);
           return;
         }
         _showDetailDialog(detail, targetSite);
@@ -2435,9 +2874,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     } catch (e) {
       if (mounted) {
         Navigator.of(context).pop();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('获取详情失败: $e')),
-        );
+        showAppMessage('获取详情失败: $e', type: AppMessageType.error);
       }
     }
   }
@@ -2466,7 +2903,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
         onPlayEpisode: (selection) {
           _playbackOriginDetail = detail;
           _playbackOriginSite = site;
-          unawaited(_startPlayEpisode(detail.item, selection, targetSite: site));
+          unawaited(
+              _startPlayEpisode(detail.item, selection, targetSite: site));
         },
       ),
     );
@@ -2507,11 +2945,10 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     );
     if (!mounted) return;
     if (result.error != null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(result.error!)));
+      showAppMessage(result.error!, type: AppMessageType.error);
       return;
     }
-    _showResumeHint(context, ref, result.resumeMatch);
+    _showResumeHint(ref, result.resumeMatch);
   }
 
   /// 续播时重新解析选集；Spider 失败明确报错，CMS 保留历史直链兜底。
@@ -2527,9 +2964,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     if (site == null &&
         record.episodeUrl.isNotEmpty &&
         !(Uri.tryParse(record.episodeUrl)?.hasScheme ?? false)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('原站源已不可用，请重新导入配置后续播')),
-      );
+      showAppMessage('原站源已不可用，请重新导入配置后续播', type: AppMessageType.error);
       return;
     }
 
@@ -2551,9 +2986,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       } catch (_) {
         if (site?.usesCompanion ?? false) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('播放解析失败，请检查站源或解析配置')),
-            );
+            showAppMessage('播放解析失败，请检查站源或解析配置', type: AppMessageType.error);
           }
           return;
         }
@@ -2562,9 +2995,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     if (!mounted) return;
     if (playUrl.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('该记录缺少可用播放地址，无法续播')),
-        );
+        showAppMessage('该记录缺少可用播放地址，无法续播', type: AppMessageType.error);
       }
       return;
     }
@@ -2630,7 +3061,10 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
           repository: dialogRef.watch(liveRepositoryProvider),
           epgRepository: dialogRef.watch(epgRepositoryProvider),
           baseUri: sourceUrl == null ? null : Uri.tryParse(sourceUrl),
-          onPlayLive: _playLive,
+          onPlayLive: (live) {
+            _livePlaybackStartedInDialog = true;
+            unawaited(_playLiveFromDialog(ref, live));
+          },
         ),
       ),
     );
@@ -2644,23 +3078,56 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     }
   }
 
-  Future<void> _playLive(Live live) async {
-    _livePlaybackStartedInDialog = true;
-    _recordStartupEntry(StartupEntry.live);
+  /// ⑤-2 直播入口：加载频道 → 按「上次频道」解析起播位 → 直接起播。
+  /// 没有任何可用频道时回退到频道管理弹窗（内含导入与空态行动）。
+  /// 冷启动直播入口与本页点按共用同一路径。
+  Future<void> _enterLive() async {
+    if (_liveEntryBusy) return;
+    _liveEntryBusy = true;
+    final loading = ref.read(liveEntryLoadingProvider.notifier);
+    bool cancelled() => ref.read(liveEntryLoadingProvider) != true;
+    // ⑤ 修复「先卡后跳」：点击立即进入播放页（加载态），频道加载与起播都在
+    // 页面内进行；Esc / 返回可中途退出，迟到的起播结果作废（cancelled）。
+    loading.state = true;
     try {
-      await _launchPlayback(ref, MediaPlaySpec(
-        url: live.url,
-        headers: live.headers.isEmpty ? null : live.headers,
-        title: live.name,
-        isLive: true,
-      ));
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('直播播放失败，请检查地址或尝试其他频道')),
-        );
+      _recordStartupEntry(StartupEntry.live);
+      final configRepo = ref.read(configRepositoryProvider);
+      final sourceUrl = configRepo.currentWindowConfig.lastConfigUrl;
+      final lives = ref.read(vodConfigProvider).lives;
+      final liveRepository = ref.read(liveRepositoryProvider);
+      List<Live> channels;
+      try {
+        channels = (await liveRepository.load(lives,
+                baseUri: sourceUrl == null ? null : Uri.tryParse(sourceUrl)))
+            .channels;
+      } catch (_) {
+        channels = const [];
       }
+      if (!mounted || cancelled()) return;
+      if (channels.isEmpty) {
+        // 没有任何可用频道：撤下加载页，回到既有的管理弹窗。
+        loading.state = false;
+        await _showLiveDialog();
+        return;
+      }
+      final lastKey = await liveRepository.loadLastChannelKey();
+      if (!mounted || cancelled()) return;
+      await _startLiveChannel(
+          ref, channels, _resolveLiveStartIndex(channels, lastKey),
+          isStale: cancelled);
+    } finally {
+      if (!cancelled()) loading.state = false;
+      _liveEntryBusy = false;
     }
+  }
+
+  /// 起播位：优先「上次频道」；找不到（换过源 / 频道没了）回落第一个。
+  static int _resolveLiveStartIndex(List<Live> channels, String? lastKey) {
+    if (lastKey != null && lastKey.isNotEmpty) {
+      final index = channels.indexWhere((channel) => channel.key == lastKey);
+      if (index >= 0) return index;
+    }
+    return 0;
   }
 
   void _showPushDialog() {
@@ -2704,6 +3171,11 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       if (previous != null && next == null) {
         _recordStartupEntry(StartupEntry.vod);
         _restorePlaybackOriginDetail();
+        // ⑤-2 冷启动直播直连：离开播放器后恢复被推迟的主视图加载
+        if (_startupLiveEntryPending) {
+          _startupLiveEntryPending = false;
+          loadSiteData();
+        }
       }
     });
 
@@ -2734,47 +3206,50 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
               width: 80,
               height: 80,
               decoration: BoxDecoration(
-                color: const Color(0xFF181820),
-                borderRadius: BorderRadius.circular(40),
-                border: Border.all(color: const Color(0xFF282834), width: 1.5),
+                color: context.palette.panel,
+                borderRadius: BorderRadius.circular(AppRadii.pill),
+                border: Border.all(color: context.palette.border, width: 1.5),
               ),
-              child: const Icon(Icons.tv_rounded,
-                  size: 42, color: Color(0xFFE50914)),
+              child: Icon(Icons.tv_rounded,
+                  size: 42, color: context.palette.accentInk),
             ),
             const SizedBox(height: 20),
-            const Text(
+            Text(
               '修狗TV',
               style: TextStyle(
-                  fontSize: 20,
+                  fontSize: AppType.h1,
                   fontWeight: FontWeight.bold,
-                  color: Colors.white,
+                  color: context.palette.textTitle,
                   letterSpacing: 0.5),
             ),
             const SizedBox(height: 8),
-            const Text(
+            Text(
               '尚未加载影视配置，请添加 TVBox 影视配置订阅源',
-              style: TextStyle(fontSize: 13, color: Color(0xFF888898)),
+              style: TextStyle(
+                  fontSize: AppType.label, color: context.palette.textSub),
             ),
             const SizedBox(height: 24),
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFE50914),
-                foregroundColor: Colors.white,
+                backgroundColor: context.palette.accent,
+                // 品牌底上必须显式前景 onPrimary：M3 默认前景是 primary=品牌色，会同色不可见
+                foregroundColor: Theme.of(context).colorScheme.onPrimary,
                 padding:
                     const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
                 shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8)),
+                    borderRadius: BorderRadius.circular(AppRadii.sm)),
               ),
               icon: const Icon(Icons.settings_outlined, size: 18),
               label: const Text('立即配置影视源',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  style: TextStyle(
+                      fontSize: AppType.title, fontWeight: FontWeight.w600)),
               onPressed: () {
                 showConfigDialog(context, ref);
               },
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
-              onPressed: _showLiveDialog,
+              onPressed: _enterLive,
               icon: const Icon(Icons.live_tv_outlined, size: 18),
               label: const Text('打开电视直播'),
             ),
@@ -2799,9 +3274,9 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
             width: 140,
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
             decoration: BoxDecoration(
-              color: const Color(0xFF15151E),
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: const Color(0xFF262634), width: 1.2),
+              color: context.palette.panel,
+              borderRadius: BorderRadius.circular(AppRadii.lg),
+              border: Border.all(color: context.palette.border, width: 1.2),
             ),
             child: Column(
               children: [
@@ -2813,11 +3288,11 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                 ),
                 const SizedBox(height: 14),
 
-                // 2. [ 直播 ] 按钮
+                // 2. [ 直播 ] 按钮（⑤-2：直连播放上次频道，无频道回退管理弹窗）
                 _NavButton(
                   title: '直播',
                   icon: Icons.live_tv_rounded,
-                  onTap: _showLiveDialog,
+                  onTap: _enterLive,
                 ),
                 const SizedBox(height: 14),
 
@@ -2839,31 +3314,37 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                 const Spacer(),
 
                 // 底部设置中心入口
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
+                FocusRing(
                     onTap: () => openSettingsPage(ref),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          vertical: 8, horizontal: 10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1E1E2A),
-                        borderRadius: BorderRadius.circular(8),
+                    semanticLabel: '设置中心',
+                    borderRadius:
+                        const BorderRadius.all(Radius.circular(AppRadii.sm)),
+                    child: MouseRegion(
+                      cursor: SystemMouseCursors.click,
+                      child: GestureDetector(
+                        onTap: () => openSettingsPage(ref),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              vertical: 8, horizontal: 10),
+                          decoration: BoxDecoration(
+                            color: context.palette.card,
+                            borderRadius: BorderRadius.circular(AppRadii.sm),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.settings_outlined,
+                                  size: 14, color: context.palette.textSub),
+                              const SizedBox(width: 4),
+                              Text('设置中心',
+                                  style: TextStyle(
+                                      fontSize: AppType.caption,
+                                      color: context.palette.textSub)),
+                            ],
+                          ),
+                        ),
                       ),
-                      child: const Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.settings_outlined,
-                              size: 14, color: Color(0xFF888898)),
-                          SizedBox(width: 4),
-                          Text('设置中心',
-                              style: TextStyle(
-                                  fontSize: 11, color: Color(0xFF888898))),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
+                    )),
               ],
             ),
           ),
@@ -2879,36 +3360,44 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                 Row(
                   children: [
                     Expanded(
-                      child: Container(
+                      child: AnimatedContainer(
+                        duration: _searchFocusNode.hasFocus
+                            ? AppMotion.enter
+                            : AppMotion.exit,
                         height: 44,
                         decoration: BoxDecoration(
-                          color: const Color(0xFF161620),
-                          borderRadius: BorderRadius.circular(12),
+                          color: context.palette.raised,
+                          borderRadius: BorderRadius.circular(AppRadii.md),
+                          // 聚焦高亮外框（skill: focus-states；B3）
                           border: Border.all(
-                              color: const Color(0xFF282836), width: 1.0),
+                              color: _searchFocusNode.hasFocus
+                                  ? context.palette.accentInk
+                                  : context.palette.borderStrong,
+                              width: _searchFocusNode.hasFocus ? 1.5 : 1.0),
                         ),
                         child: TextField(
                           controller: _searchController,
-                          style: const TextStyle(
-                              fontSize: 13, color: Colors.white),
+                          focusNode: _searchFocusNode,
+                          style: TextStyle(
+                              fontSize: AppType.label,
+                              color: context.palette.textMain),
                           textAlignVertical: TextAlignVertical.center,
                           decoration: InputDecoration(
                             isDense: true,
                             hintText: searchPrefs.aggregate
                                 ? '搜索全网影片 (回车聚合检索所有站源)'
                                 : '搜索当前站源影片 (回车检索当前站源)',
-                            hintStyle: const TextStyle(
-                                fontSize: 13, color: Color(0xFF6E6E82)),
-                            prefixIcon: const Icon(Icons.search_rounded,
-                                size: 20, color: Color(0xFF808094)),
+                            hintStyle: TextStyle(
+                                fontSize: AppType.label,
+                                color: context.palette.textDim),
+                            prefixIcon: Icon(Icons.search_rounded,
+                                size: 20, color: context.palette.textDim),
                             suffixIcon: _searchController.text.isNotEmpty
                                 ? IconButton(
-                                    icon: const Icon(Icons.clear_rounded,
-                                        size: 18, color: Color(0xFF808094)),
-                                    onPressed: () {
-                                      _searchController.clear();
-                                      loadSiteData();
-                                    },
+                                    icon: Icon(Icons.clear_rounded,
+                                        size: 18,
+                                        color: context.palette.textDim),
+                                    onPressed: _clearSearchToHome,
                                   )
                                 : null,
                             border: InputBorder.none,
@@ -2920,17 +3409,28 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                       ),
                     ),
                     const SizedBox(width: 10),
-                    // 搜索执行按钮
+                    // 搜索执行按钮（进行中禁用 + 小转圈：skill: loading-buttons；B3）
                     IconButton(
-                      icon: const Icon(Icons.search_rounded,
-                          size: 22, color: Color(0xFFE50914)),
+                      icon: _searchBusy
+                          ? SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: context.palette.accentInk,
+                              ),
+                            )
+                          : Icon(Icons.search_rounded,
+                              size: 22, color: context.palette.accentInk),
                       tooltip: searchPrefs.aggregate ? '聚合搜索' : '搜索当前站源',
-                      onPressed: () => _handleSearch(_searchController.text),
+                      onPressed: _searchBusy
+                          ? null
+                          : () => _handleSearch(_searchController.text),
                     ),
                     // 刷新按钮
                     IconButton(
-                      icon: const Icon(Icons.refresh_rounded,
-                          size: 22, color: Color(0xFFA0A0B4)),
+                      icon: Icon(Icons.refresh_rounded,
+                          size: 22, color: context.palette.textDim),
                       tooltip: '刷新内容',
                       onPressed: () => loadSiteData(
                           category: _selectedCategory,
@@ -2959,39 +3459,39 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                               (_searchPending ? 1 : 0),
                           separatorBuilder: (_, __) => const SizedBox(width: 8),
                           itemBuilder: (context, index) {
-                          if (showSearchSiteAll && index == 0) {
+                            if (showSearchSiteAll && index == 0) {
+                              return _FilterPill(
+                                key: const ValueKey('search-site-pill-all'),
+                                label: '全部',
+                                count: _items.length,
+                                isSelected: activeSearchSiteKey == null,
+                                onTap: () =>
+                                    setState(() => _searchSiteGroupKey = null),
+                              );
+                            }
+                            final groupIndex =
+                                index - (showSearchSiteAll ? 1 : 0);
+                            if (groupIndex >= searchSiteGroups.length) {
+                              // 搜索中：尾部进度胶囊（不可点，完成后自动消失）
+                              return _SearchProgressPill(
+                                completed: _searchCompleted,
+                                total: _searchTotal,
+                              );
+                            }
+                            final group = searchSiteGroups[groupIndex];
+                            final isSelected = activeSearchSiteKey == group.key;
                             return _FilterPill(
-                              key: const ValueKey('search-site-pill-all'),
-                              label: '全部',
-                              count: _items.length,
-                              isSelected: activeSearchSiteKey == null,
-                              onTap: () =>
-                                  setState(() => _searchSiteGroupKey = null),
+                              key: ValueKey('search-site-pill-${group.key}'),
+                              label: group.name,
+                              count: group.count,
+                              isSelected: isSelected,
+                              onTap: () => setState(() {
+                                _searchSiteGroupKey =
+                                    isSelected ? null : group.key;
+                              }),
                             );
-                          }
-                          final groupIndex =
-                              index - (showSearchSiteAll ? 1 : 0);
-                          if (groupIndex >= searchSiteGroups.length) {
-                            // 搜索中：尾部进度胶囊（不可点，完成后自动消失）
-                            return _SearchProgressPill(
-                              completed: _searchCompleted,
-                              total: _searchTotal,
-                            );
-                          }
-                          final group = searchSiteGroups[groupIndex];
-                          final isSelected = activeSearchSiteKey == group.key;
-                          return _FilterPill(
-                            key: ValueKey('search-site-pill-${group.key}'),
-                            label: group.name,
-                            count: group.count,
-                            isSelected: isSelected,
-                            onTap: () => setState(() {
-                              _searchSiteGroupKey =
-                                  isSelected ? null : group.key;
-                            }),
-                          );
-                        },
-                      ),
+                          },
+                        ),
                       ),
                     ),
                     const SizedBox(height: 10),
@@ -3028,43 +3528,61 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                 Expanded(
                   child: Container(
                     decoration: BoxDecoration(
-                      color: const Color(0xFF121218),
-                      borderRadius: BorderRadius.circular(16),
+                      color: context.palette.panel,
+                      borderRadius: BorderRadius.circular(AppRadii.lg),
                       border: Border.all(
-                          color: const Color(0xFF242430), width: 1.0),
+                          color: context.palette.divider, width: 1.0),
                     ),
                     clipBehavior: Clip.antiAlias,
                     child: _isLoading
-                        ? const Center(
-                            child: CircularProgressIndicator(
-                                color: Color(0xFFE50914)),
-                          )
+                        // B2 首屏加载：首页 / 分类用海报骨架（与真网格同布局，
+                        // 加载完成不跳变）；搜索加载为整块等待（B3：带文案解释）。
+                        ? (_isSearching
+                            ? Center(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    CircularProgressIndicator(
+                                        color: context.palette.accentInk),
+                                    const SizedBox(height: 12),
+                                    // 等待要有解释（skill: Loading Indicators；B3）
+                                    Text('正在搜索…',
+                                        style: TextStyle(
+                                            fontSize: AppType.body,
+                                            color: context.palette.textSub)),
+                                  ],
+                                ),
+                              )
+                            : const VodGridSkeleton())
                         : _errorMessage != null
                             ? Center(
                                 child: Column(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    const Icon(Icons.error_outline_rounded,
-                                        size: 36, color: Color(0xFFFF6B6B)),
+                                    Icon(Icons.error_outline_rounded,
+                                        size: 36,
+                                        color: context.palette.danger),
                                     const SizedBox(height: 10),
                                     Text(_errorMessage!,
-                                        style: const TextStyle(
-                                            color: Color(0xFFFFB5BA),
-                                            fontSize: 13)),
+                                        style: TextStyle(
+                                            color: context.palette.danger,
+                                            fontSize: AppType.label)),
                                     const SizedBox(height: 16),
                                     ElevatedButton(
                                       style: ElevatedButton.styleFrom(
                                           backgroundColor:
-                                              const Color(0xFFE50914)),
+                                              context.palette.accent,
+                                          // 品牌底上必须显式前景 onPrimary：M3 默认前景是 primary=品牌色，会同色不可见
+                                          foregroundColor: Theme.of(context)
+                                              .colorScheme
+                                              .onPrimary),
                                       onPressed: () => _isSearching
                                           ? _handleSearch(
                                               _searchController.text)
                                           : loadSiteData(
                                               category: _selectedCategory,
                                               preserveCategories: true),
-                                      child: const Text('重试',
-                                          style:
-                                              TextStyle(color: Colors.white)),
+                                      child: const Text('重试'),
                                     ),
                                   ],
                                 ),
@@ -3079,7 +3597,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                               ? Icons.search_off_rounded
                                               : Icons.inbox_rounded,
                                           size: 40,
-                                          color: const Color(0xFF5A5A6C),
+                                          color: context.palette.textDim,
                                         ),
                                         const SizedBox(height: 10),
                                         Text(
@@ -3094,9 +3612,38 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                                           ? '未找到相关聚合搜索结果'
                                                           : '未找到相关搜索结果'))
                                                   : '当前分类下暂无内容'),
-                                          style: const TextStyle(
-                                              color: Color(0xFF888898),
-                                              fontSize: 13),
+                                          style: TextStyle(
+                                              color: context.palette.textSub,
+                                              fontSize: AppType.label),
+                                        ),
+                                        // 搜索 0 结果时给弱建议（skill: No Results；B3）
+                                        if (_isSearching &&
+                                            !_searchPending &&
+                                            _searchNotice == null) ...[
+                                          const SizedBox(height: 6),
+                                          Text('可尝试更换关键词，或切换站源',
+                                              style: TextStyle(
+                                                  fontSize: AppType.caption,
+                                                  color:
+                                                      context.palette.textDim)),
+                                        ],
+                                        const SizedBox(height: 16),
+                                        // B2 空态行动化（skill: Empty States：说明 + 行动）
+                                        ElevatedButton(
+                                          style: ElevatedButton.styleFrom(
+                                              backgroundColor:
+                                                  context.palette.accent,
+                                              // 品牌底上必须显式前景 onPrimary：M3 默认前景是 primary=品牌色，会同色不可见
+                                              foregroundColor: Theme.of(context)
+                                                  .colorScheme
+                                                  .onPrimary),
+                                          onPressed: _isSearching
+                                              ? _clearSearchToHome
+                                              : () => loadSiteData(
+                                                  category: _selectedCategory,
+                                                  preserveCategories: true),
+                                          child: Text(
+                                              _isSearching ? '清空搜索' : '刷新'),
                                         ),
                                       ],
                                     ),
@@ -3144,67 +3691,72 @@ class _NavButtonState extends State<_NavButton> {
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      onEnter: (_) => setState(() => _isHovered = true),
-      onExit: (_) => setState(() => _isHovered = false),
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
+    return FocusRing(
         onTap: widget.onTap,
-        child: AnimatedScale(
-          scale: _isHovered ? 1.03 : 1.0,
-          duration: const Duration(milliseconds: 140),
-          curve: Curves.easeOutCubic,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 140),
-            width: double.infinity,
-            height: 72,
-            decoration: BoxDecoration(
-              color: _isHovered
-                  ? const Color(0xFF282838)
-                  : const Color(0xFF1D1D28),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: _isHovered
-                    ? const Color(0xFFE50914)
-                    : const Color(0xFF2E2E40),
-                width: _isHovered ? 1.5 : 1.0,
-              ),
-              boxShadow: _isHovered
-                  ? [
-                      BoxShadow(
-                        color: const Color(0xFFE50914).withAlpha(35),
-                        blurRadius: 10,
-                        offset: const Offset(0, 3),
-                      ),
-                    ]
-                  : null,
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  widget.icon,
-                  size: 24,
-                  color: _isHovered
-                      ? const Color(0xFFE50914)
-                      : const Color(0xFFD0D0E0),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  widget.title,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: _isHovered ? Colors.white : const Color(0xFFD0D0DC),
-                    letterSpacing: 0.5,
+        semanticLabel: widget.title,
+        borderRadius: const BorderRadius.all(Radius.circular(AppRadii.lg)),
+        child: MouseRegion(
+          onEnter: (_) => setState(() => _isHovered = true),
+          onExit: (_) => setState(() => _isHovered = false),
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: widget.onTap,
+            child: AnimatedScale(
+              scale: _isHovered ? 1.03 : 1.0,
+              duration: AppMotion.base,
+              curve: Curves.easeOutCubic,
+              child: AnimatedContainer(
+                duration: AppMotion.base,
+                width: double.infinity,
+                height: 72,
+                decoration: BoxDecoration(
+                  color:
+                      _isHovered ? context.palette.hover : context.palette.card,
+                  borderRadius: BorderRadius.circular(AppRadii.lg),
+                  border: Border.all(
+                    color: _isHovered
+                        ? context.palette.accentInk
+                        : context.palette.borderStrong,
+                    width: _isHovered ? 1.5 : 1.0,
                   ),
+                  boxShadow: _isHovered
+                      ? [
+                          BoxShadow(
+                            color: context.palette.accentInk.withAlpha(35),
+                            blurRadius: 10,
+                            offset: const Offset(0, 3),
+                          ),
+                        ]
+                      : null,
                 ),
-              ],
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      widget.icon,
+                      size: 24,
+                      color: _isHovered
+                          ? context.palette.accentInk
+                          : context.palette.textMain,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      widget.title,
+                      style: TextStyle(
+                        fontSize: AppType.label,
+                        fontWeight: FontWeight.bold,
+                        color: _isHovered
+                            ? context.palette.textTitle
+                            : context.palette.textMain,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
-        ),
-      ),
-    );
+        ));
   }
 }
 
@@ -3225,29 +3777,31 @@ class _SearchProgressPill extends StatelessWidget {
       key: const ValueKey('search-progress-pill'),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
       decoration: BoxDecoration(
-        color: const Color(0xFF1B1B24),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFF2A2A38), width: 1),
+        color: context.palette.card,
+        borderRadius: BorderRadius.circular(AppRadii.md),
+        border: Border.all(color: context.palette.border, width: 1),
       ),
       alignment: Alignment.center,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const SizedBox(
+          SizedBox(
             width: 12,
             height: 12,
             child: CircularProgressIndicator(
               strokeWidth: 2,
-              color: Color(0xFF888898),
+              color: context.palette.textSub,
+              // 有总数时给确定性进度（skill: Progress Indicators）；无总数保持动画
+              value: total > 0 ? (completed / total).clamp(0.0, 1.0) : null,
             ),
           ),
           const SizedBox(width: 8),
           Text(
             label,
-            style: const TextStyle(
-              fontSize: 12,
+            style: TextStyle(
+              fontSize: AppType.body,
               fontWeight: FontWeight.w500,
-              color: Color(0xFFB0B0C0),
+              color: context.palette.textBody,
             ),
           ),
         ],
@@ -3280,80 +3834,87 @@ class _FilterPillState extends State<_FilterPill> {
   @override
   Widget build(BuildContext context) {
     final isSelected = widget.isSelected;
+    // 选中态底色是品牌色，文字用 onPrimary（近黑）保证对比度。
+    final onAccent = Theme.of(context).colorScheme.onPrimary;
 
-    return MouseRegion(
-      onEnter: (_) => setState(() => _isHovered = true),
-      onExit: (_) => setState(() => _isHovered = false),
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
+    return FocusRing(
         onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 140),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-          decoration: BoxDecoration(
-            color: isSelected
-                ? const Color(0xFFE50914)
-                : _isHovered
-                    ? const Color(0xFF282836)
-                    : const Color(0xFF1B1B24),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: isSelected
-                  ? const Color(0xFFE50914)
-                  : _isHovered
-                      ? const Color(0xFF48485C)
-                      : const Color(0xFF2A2A38),
-              width: 1,
-            ),
-          ),
-          alignment: Alignment.center,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 220),
-                child: Text(
-                  widget.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                    color: isSelected
-                        ? Colors.white
-                        : _isHovered
-                            ? Colors.white
-                            : const Color(0xFFB0B0C0),
-                  ),
+        semanticLabel: widget.label,
+        borderRadius: const BorderRadius.all(Radius.circular(AppRadii.md)),
+        child: MouseRegion(
+          onEnter: (_) => setState(() => _isHovered = true),
+          onExit: (_) => setState(() => _isHovered = false),
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: widget.onTap,
+            child: AnimatedContainer(
+              // 进 200 / 出 140：与海报网格卡同一节奏（D2；B3）
+              duration: _isHovered ? AppMotion.enter : AppMotion.exit,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              decoration: BoxDecoration(
+                color: isSelected
+                    ? context.palette.accent
+                    : _isHovered
+                        ? context.palette.borderStrong
+                        : context.palette.card,
+                borderRadius: BorderRadius.circular(AppRadii.md),
+                border: Border.all(
+                  color: isSelected
+                      ? context.palette.accent
+                      : _isHovered
+                          ? context.palette.borderStrong
+                          : context.palette.border,
+                  width: 1,
                 ),
               ),
-              if (widget.count != null) ...[
-                const SizedBox(width: 6),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: isSelected
-                        ? Colors.white.withAlpha(46)
-                        : const Color(0xFF2A2A38),
-                    borderRadius: BorderRadius.circular(7),
-                  ),
-                  child: Text(
-                    '${widget.count}',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: isSelected
-                          ? Colors.white
-                          : const Color(0xFFA0A0B4),
+              alignment: Alignment.center,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 220),
+                    child: Text(
+                      widget.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: AppType.body,
+                        fontWeight:
+                            isSelected ? FontWeight.bold : FontWeight.w500,
+                        color: isSelected
+                            ? onAccent
+                            : _isHovered
+                                ? context.palette.textTitle
+                                : context.palette.textBody,
+                      ),
                     ),
                   ),
-                ),
-              ],
-            ],
+                  if (widget.count != null) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: isSelected
+                            ? onAccent.withAlpha(46)
+                            : context.palette.border,
+                        borderRadius: BorderRadius.circular(AppRadii.sm),
+                      ),
+                      child: Text(
+                        '${widget.count}',
+                        style: TextStyle(
+                          fontSize: AppType.caption,
+                          fontWeight: FontWeight.w600,
+                          color:
+                              isSelected ? onAccent : context.palette.textDim,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ),
-        ),
-      ),
-    );
+        ));
   }
 }

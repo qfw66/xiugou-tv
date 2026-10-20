@@ -1,6 +1,13 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../window/desktop_window_manager.dart';
+import '../../theme/app_icon_assets.dart';
+import '../../theme/app_palette.dart';
+import 'focus_ring.dart';
+import '../../theme/app_tokens.dart';
+
+/// 标题栏高度：DesktopWindowFrame 顶部栏实高（窗口控制按钮与全局消息浮层定位共用）。
+const double kDesktopTitleBarHeight = 42;
 
 /// Windows 风格自定义无边框窗口标题栏
 class DesktopTitleBar extends StatelessWidget {
@@ -19,46 +26,25 @@ class DesktopTitleBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     return Container(
-      height: 42.0,
-      decoration: const BoxDecoration(
-        color: Color(0xFF14141A),
+      height: kDesktopTitleBarHeight,
+      decoration: BoxDecoration(
+        color: palette.panel,
         border: Border(
-          bottom: BorderSide(color: Color(0xFF24242E), width: 1.0),
+          bottom: BorderSide(color: palette.divider, width: 1.0),
         ),
       ),
       child: Row(
         children: [
           const SizedBox(width: 12),
 
-          // 左侧 1：应用 Logo 标签 Badge [ 影视TV ]
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: const Color(0xFF201216),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: const Color(0xFF5A1A22), width: 1),
-            ),
-            child: const Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.live_tv_rounded,
-                  size: 15,
-                  color: Color(0xFFE50914),
-                ),
-                SizedBox(width: 6),
-                Text(
-                  '影视TV',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                    letterSpacing: 0.5,
-                  ),
-                ),
-              ],
-            ),
+          // 左侧 1：应用 Logo（单版圆角图标，不再随主题切换素材）
+          Image.asset(
+            appIconAsset,
+            width: 26,
+            height: 26,
+            filterQuality: FilterQuality.high,
           ),
           const SizedBox(width: 10),
 
@@ -95,7 +81,7 @@ class DesktopTitleBar extends StatelessWidget {
             builder: (context, isPinned, _) {
               return _WindowButton(
                 icon: isPinned ? Icons.push_pin : Icons.push_pin_outlined,
-                iconColor: isPinned ? const Color(0xFFE50914) : null,
+                iconColor: isPinned ? palette.accentInk : null,
                 tooltip: isPinned ? '取消置顶' : '窗口置顶',
                 onPressed: () => windowManager.toggleAlwaysOnTop(),
               );
@@ -203,29 +189,30 @@ class DesktopBeijingClockState extends State<DesktopBeijingClock> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       margin: const EdgeInsets.symmetric(vertical: 7),
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1A24),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: const Color(0xFF2B2B3A), width: 1),
+        color: palette.raised,
+        borderRadius: BorderRadius.circular(AppRadii.sm),
+        border: Border.all(color: palette.border, width: 1),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(
+          Icon(
             Icons.access_time_rounded,
             size: 13,
-            color: Color(0xFF8C8CA0),
+            color: palette.textSub,
           ),
           const SizedBox(width: 6),
           Text(
             _formattedTime,
-            style: const TextStyle(
-              fontSize: 11.5,
+            style: TextStyle(
+              fontSize: AppType.body,
               fontWeight: FontWeight.w500,
-              color: Color(0xFFD4D4E0),
+              color: palette.textBody,
               letterSpacing: 0.3,
             ),
           ),
@@ -254,36 +241,39 @@ class _SiteSourcePillState extends State<_SiteSourcePill> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     return MouseRegion(
       onEnter: (_) => setState(() => _isHovered = true),
       onExit: (_) => setState(() => _isHovered = false),
-      cursor: widget.onTap != null ? SystemMouseCursors.click : SystemMouseCursors.basic,
+      cursor: widget.onTap != null
+          ? SystemMouseCursors.click
+          : SystemMouseCursors.basic,
       child: GestureDetector(
         onTap: widget.onTap,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 140),
+          duration: AppMotion.base,
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           decoration: BoxDecoration(
-            color: _isHovered ? const Color(0xFF2C2C3A) : const Color(0xFF1E1E26),
-            borderRadius: BorderRadius.circular(6),
+            color: _isHovered ? palette.hover : palette.raised,
+            borderRadius: BorderRadius.circular(AppRadii.sm),
             border: Border.all(
-              color: _isHovered ? const Color(0xFFE50914) : const Color(0xFF323240),
+              color: _isHovered ? palette.accentInk : palette.borderStrong,
               width: 1,
             ),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.source_rounded, size: 14, color: Color(0xFFE50914)),
+              Icon(Icons.source_rounded, size: 14, color: palette.accentInk),
               const SizedBox(width: 6),
               ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 160),
                 child: Text(
                   widget.siteName,
                   style: TextStyle(
-                    fontSize: 11,
+                    fontSize: AppType.caption,
                     fontWeight: FontWeight.w600,
-                    color: _isHovered ? Colors.white : const Color(0xFFCACAD8),
+                    color: _isHovered ? palette.textTitle : palette.textBody,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -293,7 +283,7 @@ class _SiteSourcePillState extends State<_SiteSourcePill> {
               Icon(
                 Icons.arrow_drop_down_rounded,
                 size: 16,
-                color: _isHovered ? const Color(0xFFE50914) : const Color(0xFF888898),
+                color: _isHovered ? palette.accentInk : palette.textSub,
               ),
             ],
           ),
@@ -328,42 +318,48 @@ class _WindowButtonState extends State<_WindowButton> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = AppPalette.of(context);
     Color backgroundColor = Colors.transparent;
-    Color iconColor = widget.iconColor ?? const Color(0xFFC8C8D0);
+    Color iconColor = widget.iconColor ?? palette.textBody;
 
     if (_isHovered) {
       if (widget.isCloseButton) {
+        // Windows 关闭键的红色与主题无关，保持不变
         backgroundColor = const Color(0xFFE81123);
         iconColor = Colors.white;
       } else {
-        backgroundColor = const Color(0xFF2D2D36);
-        iconColor = Colors.white;
+        backgroundColor = palette.hover;
+        iconColor = palette.textTitle;
       }
     }
 
-    return Tooltip(
-      message: widget.tooltip,
-      waitDuration: const Duration(milliseconds: 600),
-      child: MouseRegion(
-        onEnter: (_) => setState(() => _isHovered = true),
-        onExit: (_) => setState(() => _isHovered = false),
-        child: GestureDetector(
-          onTap: widget.onPressed,
-          behavior: HitTestBehavior.opaque,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 120),
-            width: 44,
-            height: 42,
-            color: backgroundColor,
-            alignment: Alignment.center,
-            child: Icon(
-              widget.icon,
-              size: 16,
-              color: iconColor,
+    return FocusRing(
+        onTap: widget.onPressed,
+        semanticLabel: widget.tooltip,
+        borderRadius: const BorderRadius.all(Radius.circular(AppRadii.xs)),
+        child: Tooltip(
+          message: widget.tooltip,
+          waitDuration: const Duration(milliseconds: 600),
+          child: MouseRegion(
+            onEnter: (_) => setState(() => _isHovered = true),
+            onExit: (_) => setState(() => _isHovered = false),
+            child: GestureDetector(
+              onTap: widget.onPressed,
+              behavior: HitTestBehavior.opaque,
+              child: AnimatedContainer(
+                duration: AppMotion.base,
+                width: 44,
+                height: kDesktopTitleBarHeight,
+                color: backgroundColor,
+                alignment: Alignment.center,
+                child: Icon(
+                  widget.icon,
+                  size: 16,
+                  color: iconColor,
+                ),
+              ),
             ),
           ),
-        ),
-      ),
-    );
+        ));
   }
 }
