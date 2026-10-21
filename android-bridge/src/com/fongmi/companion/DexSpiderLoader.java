@@ -176,6 +176,22 @@ public class DexSpiderLoader {
             }
         }
 
+        // Level 0.5: 载荷内「去 Guard 后缀」的类发现。
+        //
+        // 载荷里的类名不带 Guard 后缀（Bili / Nmyswv / DouDou …），而配置里的 api
+        // 是 csp_BiliGuard / csp_DouDouGuard，Level 0 的精确匹配必然落空。若此时
+        // 直接落到 Level 1，ALIAS_MAP 会命中 companion 内置的**简化兼容实现**
+        // （Bili 只返回硬编码分类 + B 站搜索、DouDou 直接是 UnsupportedGuardSpider），
+        // 真正的载荷爬虫永远不会被实例化——实测表现就是首页有分类、点进去列表恒空。
+        //
+        // 因此类发现必须先于内置别名执行，与 Level 0 的注释保持同一意图。
+        if (jar != null && !jar.trim().isEmpty() && !hardStop()) {
+            Spider discovered = tryDiscoverFromJar(siteKey, cleanApi, ext, jar);
+            if (discovered != null) {
+                return discovered;
+            }
+        }
+
         // Level 1: Try built-in Spiders in companion classpath
         Class<?> builtinClass = findBuiltinSpiderClass(cleanApi);
         if (builtinClass != null) {
