@@ -3,6 +3,7 @@ package com.fongmi.companion;
 import android.content.Context;
 import com.github.catvod.crawler.Spider;
 import com.github.catvod.crawler.SpiderNull;
+import com.github.catvod.spider.UnsupportedGuardSpider;
 
 import java.io.*;
 import java.lang.reflect.Method;
@@ -51,6 +52,11 @@ public class DexSpiderLoader {
         ALIAS_MAP.put("alist", "AList");
         ALIAS_MAP.put("alistguard", "AList");
 
+        // Fy 继承载荷里的 Pan，Pan.init 在 HotSpot 21 上会稳定触发
+        // EXCEPTION_ACCESS_VIOLATION（-Xint 纯解释执行同样复现，排除 JIT 误编译）。
+        // 但它走的是 Level 0「Guard 站点优先从载荷加载」，比 ALIAS_MAP 更早命中，
+        // 所以拦截必须用 BLOCKED_API 在主流程之前完成（见 isBlockedByCrash）。
+
         // DouDouGuard is an Android-native protected wrapper. It is not Douban.
         // Keep the distinction explicit so the desktop bridge does not fabricate
         // categories while silently returning an empty video list.
@@ -90,6 +96,21 @@ public class DexSpiderLoader {
         DEFAULT_EXT.put("NewCzGuard", "https://www.czzy77.com/");
     }
 
+    /**
+     * 桌面端必须在加载前拒绝的载荷：它们的 init 会让 HotSpot 直接段错误
+     * （EXCEPTION_ACCESS_VIOLATION），而 Java 层捕获不到 SIGSEGV——
+     * 放进来一个，整个 companion 连同其它站一起死。
+     *
+     * 实测：csp_FyGuard → 载荷类 Fy（继承 Pan）→ Pan.init +6 崩，-Xint 同样崩，
+     * 去掉 -noverify 也照崩，只在 Windows JDK21 复现。只能不加载。
+     */
+    private static final java.util.Set<String> BLOCKED_API = new java.util.HashSet<>();
+
+    static {
+        BLOCKED_API.add("fyguard");
+        BLOCKED_API.add("fy");
+    }
+
     public DexSpiderLoader() {
         String userHome = System.getProperty("user.home", ".");
         this.cacheDir = new File(new File(userHome, ".xiugou_tv_companion"), "jars");
@@ -118,6 +139,12 @@ public class DexSpiderLoader {
 
     public Spider getSpider(String siteKey, String api, String ext, String jar) {
         String cleanApi = normalizeApiName(api);
+        // 崩溃站必须在 Level 0（载荷加载）之前短路，否则进程直接消失。
+        if (BLOCKED_API.contains(cleanApi.toLowerCase(java.util.Locale.ROOT))) {
+            System.err.println("[DexSpiderLoader] 已禁用会在本机 JDK 上崩溃的载荷: api=" + api
+                    + " site=" + siteKey + "（加载它会触发 SIGSEGV，拖死整个 companion）");
+            return new UnsupportedGuardSpider();
+        }
         if (ext == null || ext.trim().isEmpty()) {
             String fallback = DEFAULT_EXT.get(cleanApi);
             if (fallback != null) {

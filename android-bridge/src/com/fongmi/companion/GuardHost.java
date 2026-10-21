@@ -96,6 +96,21 @@ public class GuardHost {
         return mapped != null ? mapped : s;
     }
 
+    /**
+     * 载荷并不是按名字 decrypt 来找宿主解密，而是拿它自己混淆过的名字反射问
+     * InitOrigin.i（即本类）要方法：反编译载荷 g8.KJ 可见
+     * {@code InitOrigin.i.getDeclaredMethod(<7 个 U+0AB5>, String.class).invoke(null, s)}，
+     * 失败则 catch 掉并返回空串。名字对不上时，带加密 ext 的站点就表现为
+     * 「homeContent 有分类、categoryContent 0 部」，日志里只有一条 NoSuchMethodException。
+     *
+     * 方法名是载荷自带的混淆名，只能用同名字符串对齐；语义就是本类的 decrypt。
+     * 用 \u0AB5 转义书写，避免源码编码在不同机器上把标识符弄坏。
+     */
+    @SuppressWarnings("checkstyle:MethodName")
+    public static String \u0AB5\u0AB5\u0AB5\u0AB5\u0AB5\u0AB5\u0AB5(String s) {
+        return decrypt(s);
+    }
+
     public static String native_ting_md5(String s) {
         if (s == null) {
             return null;
