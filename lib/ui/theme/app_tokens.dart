@@ -67,6 +67,12 @@ abstract final class AppMotion {
   /// 大位移（页面级过渡、抽屉），B2 之后才会用到
   static const Duration slow = Duration(milliseconds: 240);
 
+  /// Hero 大屏交叉淡入（比常规进入更长，避免切换时"闪一下"）
+  static const Duration heroFade = Duration(milliseconds: 600);
+
+  /// 横向画报轨道翻页滑动
+  static const Duration rowScroll = Duration(milliseconds: 350);
+
   /// 默认缓动：减速到达，符合"到达感"
   static const Curve ease = Curves.easeOutCubic;
 }
@@ -97,6 +103,15 @@ abstract final class AppType {
 
   /// 页面标题
   static const double h1 = 20;
+
+  /// 极微字：海报角标 / 评分胶囊（再小就看不清了）
+  static const double micro = 10;
+
+  /// 大屏主按钮文字（介于正文与分区标题之间）
+  static const double lead = 15;
+
+  /// 巨幅标题：Hero 大屏片名，只用于沉浸大屏
+  static const double display = 38;
 }
 
 /// 键盘焦点环（skill 规则 `focus-states` 属 CRITICAL：焦点必须可见）。
@@ -109,3 +124,47 @@ abstract final class AppFocus {
   /// 环与控件边缘的间距
   static const double ringOffset = 2;
 }
+
+/// 流媒体与质感阴影档位（Infuse × Netflix 风格：景深微光与微浮起）。
+abstract final class AppShadows {
+  /// 卡片悬停时的流光与环境景深光晕
+  static List<BoxShadow> cardHover(Color glowColor) => [
+        BoxShadow(
+          color: glowColor.withValues(alpha: 0.18),
+          blurRadius: 16,
+          offset: const Offset(0, 6),
+          spreadRadius: 1,
+        ),
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.25),
+          blurRadius: 12,
+          offset: const Offset(0, 4),
+        ),
+      ];
+
+  /// 侧边栏与悬浮面板环境投影
+  static List<BoxShadow> subtleDepth() => [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.12),
+          blurRadius: 20,
+          offset: const Offset(2, 0),
+        ),
+      ];
+}
+
+/// 常用视觉渐变（Infuse × Netflix 画报流媒体遮罩）。
+abstract final class AppGradients {
+  /// 海报卡片自下而上的全景无边界黑场融合渐变
+  static const LinearGradient posterCardMask = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    stops: [0.0, 0.45, 0.75, 1.0],
+    colors: [
+      Colors.transparent,
+      Color(0x1A000000),
+      Color(0x99000000),
+      Color(0xF0101014),
+    ],
+  );
+}
+

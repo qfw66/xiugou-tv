@@ -5,12 +5,13 @@ import 'package:package_info_plus/package_info_plus.dart';
 String? appVersionLabel;
 
 /// 读取并缓存版本号；失败时保持 null（不写占位版本）。
+///
+/// 只取 `version`，不拼 build 号：build 号是构建自增标记，不参与更新判断
+/// （`AppVersion.tryParse` 会丢弃 `+` 后缀），展示出来只会造成歧义。
 Future<String?> loadAppVersionLabel() async {
   try {
     final info = await PackageInfo.fromPlatform();
-    final build = info.buildNumber.trim();
-    appVersionLabel =
-        build.isEmpty ? info.version : '${info.version}+$build';
+    appVersionLabel = info.version;
   } catch (_) {
     appVersionLabel = null;
   }

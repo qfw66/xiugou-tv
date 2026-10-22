@@ -8,7 +8,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/平台-Windows%2010%2F11%20x64-0078D4" alt="平台">
-  <img src="https://img.shields.io/badge/版本-1.0.0-2ea44f" alt="版本">
+  <img src="https://img.shields.io/badge/版本-1.0.1-2ea44f" alt="版本">
   <img src="https://img.shields.io/badge/许可证-GPL--3.0-blue" alt="许可证">
 </p>
 

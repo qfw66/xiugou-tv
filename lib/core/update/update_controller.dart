@@ -7,6 +7,8 @@ import 'package:path/path.dart' as p;
 import '../app_info.dart';
 import 'installer_launcher.dart';
 import 'update_downloader.dart';
+import 'update_mirror_health.dart';
+import 'update_mirrors.dart';
 import 'update_preferences_notifier.dart';
 import 'update_service.dart';
 
@@ -56,6 +58,7 @@ class UpdateController extends StateNotifier<UpdateUiState> {
   final UpdateDownloader _downloader;
   final InstallerLauncher _launcher;
   final UpdatePreferencesNotifier _preferences;
+  final UpdateMirrorHealthStore _mirrorHealth;
   final Future<void> Function() _closeApp;
   final String? Function() _versionLabel;
   final Future<void> Function() _beforeInstall;
@@ -71,10 +74,12 @@ class UpdateController extends StateNotifier<UpdateUiState> {
     required Future<void> Function() closeApp,
     String? Function()? versionLabel,
     Future<void> Function()? beforeInstall,
+    UpdateMirrorHealthStore? mirrorHealth,
   })  : _service = service,
         _downloader = downloader,
         _launcher = launcher,
         _preferences = preferences,
+        _mirrorHealth = mirrorHealth ?? UpdateMirrorHealthStore(),
         _closeApp = closeApp,
         _versionLabel = versionLabel ?? (() => appVersionLabel),
         _beforeInstall = beforeInstall ?? _defaultBeforeInstall,
@@ -90,9 +95,12 @@ class UpdateController extends StateNotifier<UpdateUiState> {
     _checking = true;
     state = UpdateUiState(phase: UpdatePhase.checking, result: state.result);
     try {
+      final health = await _mirrorHealth.load();
       final result = await _service.check(
         localVersion: _versionLabel() ?? '',
         preferences: _preferences.state,
+        coolingDownMirrors: health.coolingDownIds(),
+        onMirrorResult: _recordMirrorCheck,
       );
       if (!mounted) return null;
       state = UpdateUiState(phase: UpdatePhase.idle, result: result);
@@ -100,6 +108,13 @@ class UpdateController extends StateNotifier<UpdateUiState> {
     } finally {
       _checking = false;
     }
+  }
+
+  /// 镜像探测结果落盘（尽力而为，不阻断检查）。
+  void _recordMirrorCheck(String mirrorId, bool success) {
+    unawaited(success
+        ? _mirrorHealth.recordCheckSuccess(mirrorId)
+        : _mirrorHealth.recordCheckFailure(mirrorId));
   }
 
   Future<void> downloadAndInstall() async {
@@ -137,16 +152,30 @@ class UpdateController extends StateNotifier<UpdateUiState> {
       );
     }
 
+    final health = await _mirrorHealth.load();
     final outcome = await _downloader.download(
       manifest: manifest,
       asset: asset,
       cancelToken: token,
       onProgress: onProgress,
       onVerifying: onVerifying,
+      candidates: downloadCandidates(
+        assetUrl: asset.url,
+        useMirror: _preferences.state.useMirror,
+        lastGoodMirrorId: health.lastGoodDownloadSource,
+        coolingDown: health.coolingDownIds(),
+      ),
     );
 
     if (!mounted || _downloadToken != token) return;
     _downloadToken = null;
+
+    if (outcome.ok) {
+      unawaited(_mirrorHealth.recordDownloadSuccess(outcome.mirrorId));
+    } else if (outcome.failure != DownloadFailure.cancelled &&
+        outcome.mirrorId != null) {
+      unawaited(_mirrorHealth.recordDownloadFailure(outcome.mirrorId!));
+    }
 
     if (outcome.ok) {
       state = UpdateUiState(

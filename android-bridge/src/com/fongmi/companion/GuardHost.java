@@ -1,5 +1,7 @@
 package com.fongmi.companion;
 
+import com.fongmi.companion.guard.GuardCryptoService;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Map;
@@ -85,7 +87,12 @@ public class GuardHost {
     }
 
     public static String encrypt(String s) {
-        return s;
+        if (s == null) {
+            return null;
+        }
+        // 手机端 encrypt 由壳 so 实现；桌面端优先问常驻服务，不可用时退回恒等。
+        String viaShell = GuardCryptoService.encrypt(s);
+        return viaShell != null ? viaShell : s;
     }
 
     public static String decrypt(String s) {
@@ -93,7 +100,20 @@ public class GuardHost {
             return null;
         }
         String mapped = EXT_MAP.get(s);
-        return mapped != null ? mapped : s;
+        // -Dxiugou.guard.crypto=service 时优先问壳，用来核对「so 结果 vs 离线表」是否一致。
+        if ("service".equals(GuardCryptoService.mode())) {
+            String viaShell = GuardCryptoService.decrypt(s);
+            if (viaShell != null) {
+                return viaShell;
+            }
+            return mapped != null ? mapped : s;
+        }
+        // 默认 auto：表里有的直接返回（零成本），表里没有的才启动壳服务现解。
+        if (mapped != null) {
+            return mapped;
+        }
+        String viaShell = GuardCryptoService.decrypt(s);
+        return viaShell != null ? viaShell : s;
     }
 
     /**
@@ -115,6 +135,12 @@ public class GuardHost {
         if (s == null) {
             return null;
         }
+        // 壳里的 native_ting_md5 不是标准 MD5（实测 "hello" -> 01def1de…），
+        // 优先用 so 的真实实现；服务不可用时才退回标准 MD5 近似。
+        String viaShell = GuardCryptoService.tingMd5(s);
+        if (viaShell != null) {
+            return viaShell;
+        }
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
             byte[] d = md.digest(s.getBytes(StandardCharsets.UTF_8));
@@ -129,6 +155,8 @@ public class GuardHost {
     }
 
     public static int[] calcResult(int[] arr) {
-        return arr;
+        // 原始实现是 so 里的位运算，Java 恒等只是占位；能问到壳就用真值。
+        int[] viaShell = GuardCryptoService.calcResult(arr);
+        return viaShell != null ? viaShell : arr;
     }
 }

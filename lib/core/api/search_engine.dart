@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:developer' as developer;
 import '../config/models/vod_config.dart';
 import 'models/vod_models.dart';
+import 'search_cancel_token.dart';
 import 'site_api.dart';
 
 /// 单个站点的检索批次（增量搜索用）。
@@ -49,6 +50,13 @@ class SearchEngine {
   /// 单站检索超时（保持既有 20 秒语义）
   static const Duration siteTimeout = Duration(seconds: 20);
 
+  /// 伴随（Spider）站源的并发上限。
+  ///
+  /// Java 侧无法中断正在执行的 spider 代码，所以「点叉即停」只能靠**不再启动**：
+  /// CMS 站源可被 Dio 真正中止，保持一次性并发；Spider 站源排队，最多这么多
+  /// 个在跑，取消后队列里一个都不再启动（§18 回归修复）。
+  static const int companionConcurrency = 6;
+
   SearchEngine({SiteApi? siteApi}) : _siteApi = siteApi ?? SiteApi();
 
   void _log(String message) {
@@ -66,9 +74,11 @@ class SearchEngine {
   /// - 顺序：按完成先后（不保证与站源列表顺序一致）；
   /// - 单站异常：吞掉并发送空批次（`error` 非空），流不中断；
   /// - 空关键词 / 无可检索站源：立即结束，不发起请求；
-  /// - 订阅取消：停止发送后续批次（底层请求无法中止，结果丢弃）。
+  /// - 取消：传 [cancelToken]，取消后不再发批次、丢弃在途结果，并把取消传到
+  ///   站源请求（CMS 在途 HTTP 会被中止）。只取消订阅不传令牌时，底层请求仍会跑完。
   Stream<SearchBatch> searchAllIncremental(
-      List<Site> sites, String keyword) async* {
+      List<Site> sites, String keyword,
+      {SearchCancelToken? cancelToken}) async* {
     final query = keyword.trim();
     if (query.isEmpty) return;
 
@@ -81,14 +91,49 @@ class SearchEngine {
       return;
     }
 
-    final pending = <Site, Future<_SiteSearchOutcome>>{
-      for (final site in targetSites) site: _searchSiteOutcome(site, query),
-    };
+    // 已经取消：一个请求都不必发（避免"点完叉才开始"的空跑）
+    if (cancelToken?.isCancelled ?? false) {
+      _log('搜索已被取消：未发起任何站源请求');
+      return;
+    }
+
+    // CMS：可中止，保持一次性并发；Spider：排队 + 有上限。
+    final immediate =
+        targetSites.where((site) => !site.usesCompanion).toList();
+    final queued = targetSites.where((site) => site.usesCompanion).toList();
+    final pending = <Site, Future<_SiteSearchOutcome>>{};
+
+    void start(Site site) {
+      pending[site] =
+          _searchSiteOutcome(site, query, cancelToken: cancelToken);
+    }
+
+    for (final site in immediate) {
+      start(site);
+    }
+
+    var companionActive = 0;
+    void pumpCompanion() {
+      while (companionActive < companionConcurrency &&
+          queued.isNotEmpty &&
+          !(cancelToken?.isCancelled ?? false)) {
+        final site = queued.removeAt(0);
+        companionActive++;
+        start(site);
+        pending[site] = pending[site]!.whenComplete(() => companionActive--);
+      }
+    }
+
+    pumpCompanion();
 
     var completed = 0;
     while (pending.isNotEmpty) {
       final outcome = await Future.any(pending.values);
       pending.remove(outcome.site);
+      if (cancelToken?.isCancelled ?? false) {
+        _log('搜索已取消：丢弃在途结果，剩余 ${pending.length + queued.length} 个站源不再等待');
+        return;
+      }
       completed++;
       yield SearchBatch(
         site: outcome.site,
@@ -97,13 +142,20 @@ class SearchEngine {
         total: targetSites.length,
         error: outcome.error,
       );
+      pumpCompanion();
     }
   }
 
-  Future<_SiteSearchOutcome> _searchSiteOutcome(Site site, String query) async {
+  Future<_SiteSearchOutcome> _searchSiteOutcome(Site site, String query,
+      {SearchCancelToken? cancelToken}) async {
     try {
-      final res =
-          await _siteApi.search(site, keyword: query).timeout(siteTimeout);
+      final res = await _siteApi
+          .search(site, keyword: query, cancelToken: cancelToken)
+          .timeout(siteTimeout);
+      // 取消后结果不再使用：既不打标签也不上报，直接收尾
+      if (cancelToken?.isCancelled ?? false) {
+        return _SiteSearchOutcome(site: site, items: const <VodItem>[]);
+      }
       // 为每个返回项打上站点标签
       final taggedList = res.list.map((item) {
         return item.copyWith(
@@ -117,6 +169,9 @@ class SearchEngine {
       _log('  -> 站源 [${site.name}] 检索完成: 返回 ${taggedList.length} 条数据');
       return _SiteSearchOutcome(site: site, items: taggedList);
     } catch (e) {
+      if (cancelToken?.isCancelled ?? false) {
+        return _SiteSearchOutcome(site: site, items: const <VodItem>[]);
+      }
       _log('  -> 站源 [${site.name}] 检索异常: $e');
       return _SiteSearchOutcome(site: site, items: const <VodItem>[], error: e);
     }
@@ -125,10 +180,12 @@ class SearchEngine {
   /// 对所有已开启搜索的站点并发检索关键词（一次性返回，供非 UI 调用方使用）
   ///
   /// 实现复用 [searchAllIncremental]，保证与增量路径同一套打标 / 去重 / 超时语义。
-  Future<List<VodItem>> searchAll(List<Site> sites, String keyword) async {
+  Future<List<VodItem>> searchAll(List<Site> sites, String keyword,
+      {SearchCancelToken? cancelToken}) async {
     final aggregated = <VodItem>[];
     final seenKeys = <String>{};
-    await for (final batch in searchAllIncremental(sites, keyword)) {
+    await for (final batch in searchAllIncremental(sites, keyword,
+        cancelToken: cancelToken)) {
       appendUniqueSearchItems(aggregated, seenKeys, batch.items);
     }
     final query = keyword.trim();
@@ -147,8 +204,9 @@ class SearchEngine {
       site.searchable != 0 && site.api.isNotEmpty;
 
   /// 仅检索单个站源（聚合关闭时使用）
-  Future<List<VodItem>> searchSite(Site site, String keyword) =>
-      searchAll([site], keyword);
+  Future<List<VodItem>> searchSite(Site site, String keyword,
+          {SearchCancelToken? cancelToken}) =>
+      searchAll([site], keyword, cancelToken: cancelToken);
 }
 
 class _SiteSearchOutcome {

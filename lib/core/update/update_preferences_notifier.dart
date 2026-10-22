@@ -5,7 +5,7 @@ import 'update_preferences_store.dart';
 
 /// 更新偏好的内存状态 + 落盘。
 ///
-/// 与 `SettingsRepository` 分开：更新偏好只有三个字段，独立文件与独立读取路径
+/// 与 `SettingsRepository` 分开：更新偏好只有四个字段，独立文件与独立读取路径
 /// 更小、更好回滚，也不必改 `SettingsSaveTarget` 与既有保存链路。
 class UpdatePreferencesNotifier extends StateNotifier<UpdatePreferences> {
   final UpdatePreferencesStore _store;
@@ -29,6 +29,9 @@ class UpdatePreferencesNotifier extends StateNotifier<UpdatePreferences> {
 
   Future<void> setSource(String source) =>
       _apply(state.copyWith(source: source.trim()));
+
+  Future<void> setUseMirror(bool value) =>
+      _apply(state.copyWith(useMirror: value));
 
   Future<void> skipVersion(String tag) =>
       _apply(state.copyWith(skippedVersion: tag));

@@ -12,6 +12,9 @@ import java.util.Map;
 import okhttp3.Dns;
 import okhttp3.OkHttpClient;
 
+import com.github.catvod.utils.DebugLog;
+import com.github.catvod.utils.HeaderOverride;
+
 /**
  * Standard OkHttp compatible wrapper using Java SE HttpURLConnection.
  */
@@ -44,6 +47,8 @@ public class OkHttp {
         if (client == null) {
             synchronized (OkHttp.class) {
                 client = CLIENT;
+                // 调试/伪装拦截器由构建期补丁统一注入（见 PatchOkHttp），
+                // 这里不再重复添加，否则同一个请求会被记两遍（覆盖前/覆盖后各一条）。
                 if (client == null) CLIENT = client = new OkHttpClient.Builder().dns(dns()).build();
             }
         }
@@ -88,41 +93,57 @@ public class OkHttp {
     }
 
     public static byte[] request(String urlStr, String method, byte[] body, Map<String, String> headers) throws Exception {
+        headers = HeaderOverride.apply(headers);
+        long dbg = DebugLog.httpEnabled() ? DebugLog.nextId() : 0;
+        long started = System.nanoTime();
+        DebugLog.httpRequest(dbg, method, urlStr, headers, body);
         URL url = URI.create(urlStr).toURL();
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod(method);
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(20000);
-        conn.setInstanceFollowRedirects(true);
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+        try {
+            conn.setRequestMethod(method);
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(20000);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
 
-        if (headers != null) {
-            for (Map.Entry<String, String> entry : headers.entrySet()) {
-                conn.setRequestProperty(entry.getKey(), entry.getValue());
+            if (headers != null) {
+                for (Map.Entry<String, String> entry : headers.entrySet()) {
+                    conn.setRequestProperty(entry.getKey(), entry.getValue());
+                }
             }
-        }
 
-        if (body != null && body.length > 0) {
-            conn.setDoOutput(true);
-            try (OutputStream os = conn.getOutputStream()) {
-                os.write(body);
-                os.flush();
+            if (body != null && body.length > 0) {
+                conn.setDoOutput(true);
+                try (OutputStream os = conn.getOutputStream()) {
+                    os.write(body);
+                    os.flush();
+                }
             }
-        }
 
-        int code = conn.getResponseCode();
-        InputStream is = (code >= 200 && code < 400) ? conn.getInputStream() : conn.getErrorStream();
-        if (is == null) return new byte[0];
-
-        try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[8192];
-            int n;
-            while ((n = is.read(buffer)) != -1) {
-                baos.write(buffer, 0, n);
+            int code = conn.getResponseCode();
+            long cost = (System.nanoTime() - started) / 1_000_000L;
+            InputStream is = (code >= 200 && code < 400) ? conn.getInputStream() : conn.getErrorStream();
+            if (is == null) {
+                DebugLog.httpResponse(dbg, code, cost, conn.getContentType(), 0, new byte[0]);
+                return new byte[0];
             }
-            return baos.toByteArray();
+
+            try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192];
+                int n;
+                while ((n = is.read(buffer)) != -1) {
+                    baos.write(buffer, 0, n);
+                }
+                byte[] out = baos.toByteArray();
+                DebugLog.httpResponse(dbg, code, cost, conn.getContentType(), out.length, out);
+                return out;
+            } finally {
+                try { is.close(); } catch (Exception ignored) {}
+            }
+        } catch (Throwable t) {
+            DebugLog.httpError(dbg, t);
+            throw t;
         } finally {
-            try { is.close(); } catch (Exception ignored) {}
             conn.disconnect();
         }
     }

@@ -9,6 +9,9 @@ class DesktopWindowFrame extends StatelessWidget {
   final String? activeSiteName;
   final VoidCallback? onSettingsPressed;
   final VoidCallback? onSiteSelectorPressed;
+  final Widget? searchBar;
+  final VoidCallback? onRefresh;
+  final bool refreshBusy;
 
   const DesktopWindowFrame({
     super.key,
@@ -17,6 +20,9 @@ class DesktopWindowFrame extends StatelessWidget {
     this.activeSiteName,
     this.onSettingsPressed,
     this.onSiteSelectorPressed,
+    this.searchBar,
+    this.onRefresh,
+    this.refreshBusy = false,
   });
 
   @override
@@ -39,6 +45,9 @@ class DesktopWindowFrame extends StatelessWidget {
                         activeSiteName: activeSiteName,
                         onSettingsPressed: onSettingsPressed,
                         onSiteSelectorPressed: onSiteSelectorPressed,
+                        searchBar: searchBar,
+                        onRefresh: onRefresh,
+                        refreshBusy: refreshBusy,
                       ),
                       Expanded(child: child),
                     ],
@@ -68,10 +77,10 @@ class _WindowChromeSyncState extends State<_WindowChromeSync> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     final color = AppPalette.of(context).background;
-    if (_applied == color) return;
-    _applied = color;
-    // 同步调用只发平台消息，不阻塞首帧
-    widget.windowManager.applyBackgroundColor(color);
+    if (_applied != color) {
+      _applied = color;
+      widget.windowManager.applyBackgroundColor(color);
+    }
   }
 
   @override

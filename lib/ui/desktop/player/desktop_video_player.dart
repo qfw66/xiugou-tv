@@ -7,9 +7,12 @@ import '../../../core/player/models/player_settings.dart';
 import '../../../core/player/models/player_state.dart';
 import '../../../core/player/models/track_info.dart';
 import '../../../core/player/mpv_player_engine.dart';
+import '../../../core/player/playback_intent.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../keyboard/player_shortcuts.dart';
+import 'episode_drawer.dart';
+import 'playback_preparing_overlay.dart';
 import '../widgets/focus_ring.dart';
 import '../window/desktop_window_manager.dart';
 import 'live_channel_drawer.dart';
@@ -177,13 +180,14 @@ class PlayerLineOption {
   final bool current;
 
   /// 本次会话里已尝试并失败的线路（灰显、不可点）。
-  final bool tried;
+  /// 确认失败（解析为空 / 启动抛错）；只是「用过」不算。
+  final bool unavailable;
 
   const PlayerLineOption({
     required this.index,
     required this.name,
     this.current = false,
-    this.tried = false,
+    this.unavailable = false,
   });
 }
 
@@ -247,6 +251,9 @@ class DesktopVideoPlayer extends StatefulWidget {
   /// 播放内切集视图模型；为空时不显示「上一集 / 下一集」（直播 / 推送 / 单集）。
   final PlayerEpisodeNav? episodeNav;
 
+  /// 右侧「选集 + 线路」抽屉（§20）；为空时不显示入口（直播 / 推送 / 单集）。
+  final PlayerEpisodeListNav? episodeListNav;
+
   /// 播放内刷新视图模型；为空时不显示「刷新」。
   final PlayerRefreshNav? refreshNav;
 
@@ -293,6 +300,18 @@ class DesktopVideoPlayer extends StatefulWidget {
 
   /// 抽屉「管理频道」入口回调。
   final VoidCallback? onLiveManage;
+
+  /// 起播准备态（§16）：非空时在画面上盖一层骨架/失败面板。
+  ///
+  /// 解析播放地址在弱网下要几秒；把播放页先亮出来、状态放页内，
+  /// 用户点完立刻有反馈，且失败可原地重试。
+  final PlaybackIntent? preparing;
+
+  /// 准备失败时的「重试」回调。
+  final VoidCallback? onRetryPrepare;
+
+  /// 准备态的「返回」回调（退出准备态回到列表）。
+  final VoidCallback? onCancelPrepare;
   const DesktopVideoPlayer({
     super.key,
     required this.playerEngine,
@@ -301,6 +320,7 @@ class DesktopVideoPlayer extends StatefulWidget {
     this.onBack,
     this.videoSurface,
     this.episodeNav,
+    this.episodeListNav,
     this.refreshNav,
     this.skipNav,
     this.replayNav,
@@ -317,6 +337,9 @@ class DesktopVideoPlayer extends StatefulWidget {
     this.liveCurrentIndex = 0,
     this.onLiveSelect,
     this.onLiveManage,
+    this.preparing,
+    this.onRetryPrepare,
+    this.onCancelPrepare,
   });
 
   @override
@@ -330,6 +353,9 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
   bool _showControls = true;
   Timer? _hideControlsTimer;
   static const Duration _hideDelay = Duration(seconds: 3);
+
+  /// §20 选集抽屉（右侧）：打开期间不自动隐藏控制条，Esc / 点遮罩关闭。
+  bool _episodeDrawerOpen = false;
 
   /// 底栏隐藏时下移的距离：必须大于底栏实际高度（约 106px）。
   /// 取 -80 时屏幕底部会残留一条（残留的正好是进度条行，见 backlog §12 #6）。
@@ -369,6 +395,10 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
     if (oldWidget.videoTracksNav != widget.videoTracksNav) {
       _videoSelectionOverride = null;
     }
+    // 会话关闭 / 切成直播：抽屉没有内容可列，直接收起（避免空面板挂屏）。
+    if (widget.episodeListNav == null && _episodeDrawerOpen) {
+      _episodeDrawerOpen = false;
+    }
   }
 
   @override
@@ -394,7 +424,7 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
   void _startHideTimer() {
     _hideControlsTimer?.cancel();
     // 焦点在控制条内时不自动隐藏（WCAG 2.2 focus-not-obscured）。
-    if (_bottomBarHasFocus) return;
+    if (_bottomBarHasFocus || _episodeDrawerOpen) return;
     if (widget.playerEngine.status == PlaybackStatus.playing) {
       _hideControlsTimer = Timer(_hideDelay, () {
         if (mounted && widget.playerEngine.status == PlaybackStatus.playing) {
@@ -415,6 +445,26 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
       if (hasFocus) _showControls = true;
     });
     if (!hasFocus) _startHideTimer();
+  }
+
+  /// §20：工具栏按钮开关右侧选集抽屉。
+  void _toggleEpisodeDrawer() {
+    if (widget.episodeListNav == null) return;
+    if (_episodeDrawerOpen) {
+      _closeEpisodeDrawer();
+      return;
+    }
+    _hideControlsTimer?.cancel();
+    setState(() {
+      _showControls = true;
+      _episodeDrawerOpen = true;
+    });
+  }
+
+  void _closeEpisodeDrawer() {
+    if (!_episodeDrawerOpen) return;
+    setState(() => _episodeDrawerOpen = false);
+    _startHideTimer();
   }
 
   void _togglePlayPause() {
@@ -619,6 +669,11 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
   }
 
   void _handleExit() {
+    // §20：抽屉打开时 Esc 先收抽屉，不退出全屏 / 不返回主视图。
+    if (_episodeDrawerOpen) {
+      _closeEpisodeDrawer();
+      return;
+    }
     // 画中画优先还原：Esc 是小窗的标准退出路径（skill `escape-routes`）。
     if (widget.windowManager.isPipNotifier.value) {
       unawaited(widget.windowManager.exitPip());
@@ -662,6 +717,19 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
       currentIndex: widget.liveCurrentIndex,
       onSelect: widget.onLiveSelect ?? (_) {},
       onManage: widget.onLiveManage ?? () {},
+      child: surface,
+    );
+  }
+
+  /// §20 选集抽屉同样挂在「视频表面层」：控制条在它之上，
+  /// 工具栏按钮可在抽屉打开时再点一次收起，Esc / 点遮罩也能关。
+  Widget _wrapEpisodeLayer(Widget surface) {
+    final nav = widget.episodeListNav;
+    if (nav == null) return surface;
+    return EpisodeDrawerLayer(
+      open: _episodeDrawerOpen,
+      nav: nav,
+      onClose: _closeEpisodeDrawer,
       child: surface,
     );
   }
@@ -739,28 +807,32 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
                 // 1. MPV 原生 Direct3D 11 视频渲染表面
                 //    双击切全屏只挂在这一层：控制条不参与双击判定，连点按钮不会误切全屏。
                 Positioned.fill(
-                  child: _wrapLiveLayer(
-                    LayoutBuilder(
-                      builder: (context, constraints) => Listener(
-                        // 表面层滚轮调音量：仅右半屏生效（左半屏无操作）。
-                        onPointerSignal: (event) => _handleSurfacePointerSignal(
-                            event, constraints.maxWidth),
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: _togglePlayPause,
-                          // PiP：按住画面拖动小窗（原生拖拽）；拖拽与点击由手势
-                          // 竞技场区分，不影响单击播放/暂停。
-                          onPanStart: pip
-                              ? (_) => unawaited(
-                                  widget.windowManager.startDragging())
-                              : null,
-                          onDoubleTap: _handleSurfaceDoubleTap,
-                          child: widget.videoSurface ??
-                              Video(
-                                controller: widget.playerEngine.videoController,
-                                controls: NoVideoControls,
-                                fit: videoFitForScale(widget.scale),
-                              ),
+                  child: _wrapEpisodeLayer(
+                    _wrapLiveLayer(
+                      LayoutBuilder(
+                        builder: (context, constraints) => Listener(
+                          // 表面层滚轮调音量：仅右半屏生效（左半屏无操作）。
+                          onPointerSignal: (event) =>
+                              _handleSurfacePointerSignal(
+                                  event, constraints.maxWidth),
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: _togglePlayPause,
+                            // PiP：按住画面拖动小窗（原生拖拽）；拖拽与点击由手势
+                            // 竞技场区分，不影响单击播放/暂停。
+                            onPanStart: pip
+                                ? (_) => unawaited(
+                                    widget.windowManager.startDragging())
+                                : null,
+                            onDoubleTap: _handleSurfaceDoubleTap,
+                            child: widget.videoSurface ??
+                                Video(
+                                  controller:
+                                      widget.playerEngine.videoController,
+                                  controls: NoVideoControls,
+                                  fit: videoFitForScale(widget.scale),
+                                ),
+                          ),
                         ),
                       ),
                     ),
@@ -935,6 +1007,15 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
                                     child: Row(
                                       children: [
                                         _buildPlayPauseButton(),
+                                        // §20 选集抽屉：集列表入口（与上/下一集相邻）
+                                        if (widget.episodeListNav != null)
+                                          _buildEpisodeButton(
+                                            enabled: !widget
+                                                .episodeListNav!.switching,
+                                            icon: Icons.playlist_play_rounded,
+                                            tooltip: '选集',
+                                            onPressed: _toggleEpisodeDrawer,
+                                          ),
                                         // 上一集 / 下一集（仅点播多集会话；边界与切换中禁用）
                                         if (widget.episodeNav != null) ...[
                                           _buildEpisodeButton(
@@ -988,6 +1069,17 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
                   bottom: _showControls ? 96 : 24,
                   child: _buildSkipIntroPill(),
                 ),
+
+                // 8. 起播准备态（§16）：解析地址期间盖在最上层。
+                //    没有它时，弱网下点选集要干等几秒才进播放页。
+                if (widget.preparing != null)
+                  PlaybackPreparingOverlay(
+                    intent: widget.preparing!,
+                    onRetry: widget.onRetryPrepare,
+                    onCancel: widget.onCancelPrepare,
+                  ),
+
+                // 9. §20 选集 + 线路抽屉挂在视频表面层（控制条之下，见 _wrapEpisodeLayer）。
               ],
             ),
           ),
@@ -1528,13 +1620,16 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
     final lineNav = widget.lineNav;
     if (lineNav != null && lineNav.options.length > 1) {
       for (final option in lineNav.options) {
-        final enabled = !lineNav.busy && !option.current && !option.tried;
+        final enabled =
+            !lineNav.busy && !option.current && !option.unavailable;
         lineRows.add(_panelActionRow(
           icon: option.current
               ? Icons.check_circle_rounded
               : Icons.swap_horiz_rounded,
           label: option.name,
-          value: option.current ? '当前线路' : (option.tried ? '已失败' : null),
+          value: option.current
+              ? '当前线路'
+              : (option.unavailable ? '已失败' : null),
           enabled: enabled,
           onTap: () {
             Navigator.of(context).pop();

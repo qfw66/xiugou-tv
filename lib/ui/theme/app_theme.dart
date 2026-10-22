@@ -48,6 +48,12 @@ ThemeData buildAppTheme({
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(foregroundColor: palette.accentInk),
     ),
+    // Tooltip 的退场动画归零（2026-10-22）：Tooltip 的浮层挂在整页 Overlay 上，
+    // 若宿主（弹窗 / 抽屉 / 控制条）先被移除、浮层还在做退场动画，引擎会收到
+    // 一棵「父节点已删除」的语义更新 —— 控制台就是那句
+    // `Failed to update ui::AXTree, error: <id> will not be in the tree and is not the new root`。
+    // 退场设为 0 后，Tooltip 随宿主一起立刻消失，不再留下悬空节点。
+    tooltipTheme: const TooltipThemeData(exitDuration: Duration.zero),
     extensions: [palette],
   );
 }

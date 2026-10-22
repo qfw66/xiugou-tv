@@ -61,6 +61,21 @@ public class Context {
         return "com.fongmi.android.tv";
     }
 
+    /**
+     * 载荷里 7 处调 {@code getPackageManager()}（取版本号/签名/已装列表做设备指纹）。
+     *
+     * <p>桌面端没有安装 APK，因此返回的 PackageManager 采用**「包未安装」语义**：
+     * {@code getPackageInfo} 照常抛 {@link android.content.pm.PackageManager.NameNotFoundException}。
+     * 这样载荷走的是它自己写好的 catch 分支（而不是 {@code NoClassDefFoundError} 打断整个
+     * {@code InitOrigin.init}），签名校验类站点仍按「拿不到签名」的原有逻辑降级。
+     */
+    public android.content.pm.PackageManager getPackageManager() {
+        return PACKAGE_MANAGER;
+    }
+
+    private static final android.content.pm.PackageManager PACKAGE_MANAGER =
+            new android.content.pm.PackageManager();
+
     public java.io.File getCacheDir() {
         java.io.File dir = new java.io.File(System.getProperty("java.io.tmpdir"), "xiugou_tv_cache");
         if (!dir.exists()) dir.mkdirs();
@@ -71,5 +86,16 @@ public class Context {
         java.io.File dir = new java.io.File(System.getProperty("java.io.tmpdir"), "xiugou_tv_files");
         if (!dir.exists()) dir.mkdirs();
         return dir;
+    }
+
+    /**
+     * 载荷的 {@code g8} 会用它拼 SQLite 路径：
+     * {@code SQLiteDatabase.openDatabase(context.getDatabasePath(name).getAbsolutePath(), ...)}。
+     * 桌面端把数据库文件放在 files/databases 下（目录按需创建）。
+     */
+    public java.io.File getDatabasePath(String name) {
+        java.io.File dir = new java.io.File(getFilesDir(), "databases");
+        if (!dir.exists()) dir.mkdirs();
+        return new java.io.File(dir, name == null ? "default.db" : name);
     }
 }
