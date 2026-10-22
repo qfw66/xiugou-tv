@@ -76,15 +76,15 @@
 ### 首页
 
 <p align="center">
-  <img src="assets/snapshot/home.png" alt="修狗TV 首页：左侧导航、顶部搜索与海报网格" width="900">
+  <img src="assets/snapshot/home.png?v=1.0.1" alt="修狗TV 首页：左侧导航、顶部搜索与海报网格" width="900">
 </p>
 
-<p align="center">左侧导航 + 顶部搜索 + 站点分类横栏 + 海报网格；站点与分类都能一键切换。</p>
+<p align="center">左侧导航 + 顶部搜索 + 站点分类横栏 + 海报网格；站点与分类都能一键切换。</p> 
 
 ### 播放历史
 
 <p align="center">
-  <img src="assets/snapshot/history.png" alt="修狗TV 播放历史" width="900">
+  <img src="assets/snapshot/history.png?v=1.0.1" alt="修狗TV 播放历史" width="900">
 </p>
 
 <p align="center">按时间倒序记录剧集与观看进度，点击即从上次位置续播；保留条数可配置（30–500，默认 150）。</p>
@@ -92,7 +92,7 @@
 ### 设置
 
 <p align="center">
-  <img src="assets/snapshot/settings.png" alt="修狗TV 设置" width="900">
+  <img src="assets/snapshot/settings.png?v=1.0.1" alt="修狗TV 设置" width="900">
 </p>
 
 <p align="center">主题与壁纸、播放器、数据目录、站点自检与备份恢复集中在这里。</p>
