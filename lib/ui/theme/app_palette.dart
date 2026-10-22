@@ -212,4 +212,17 @@ class AppPalette extends ThemeExtension<AppPalette> {
 /// 语义与 [`AppPalette.of`] 完全一致（无注入时回退深色）。
 extension AppPaletteContext on BuildContext {
   AppPalette get palette => AppPalette.of(this);
+
+  /// 微透高光边框（Infuse 风格 1px 细线，深色微白透，浅色微黑透）
+  Color get glassBorder => Theme.of(this).brightness == Brightness.dark
+      ? const Color(0x1FFFFFFF)
+      : const Color(0x12000000);
+
+  /// 侧边栏背景（比主窗口背景略显沉静的精致面板色）
+  Color get sidebarBackground => Theme.of(this).brightness == Brightness.dark
+      ? const Color(0xFF131318)
+      : const Color(0xFFFFFFFF);
+
+  /// 磨砂胶囊底色（海报左上角角标/评分胶囊，保持高对比固定半透深底）
+  Color get glassPill => const Color(0x99000000);
 }

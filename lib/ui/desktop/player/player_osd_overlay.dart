@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
@@ -43,7 +44,7 @@ class OsdController extends ChangeNotifier {
   }
 }
 
-/// 播放器屏幕实时交互浮层提示组件 (On-Screen Display)
+/// 播放器屏幕实时交互浮层提示组件 (On-Screen Display - Infuse 微透磨砂风格)
 class PlayerOsdOverlay extends StatefulWidget {
   final OsdController controller;
 
@@ -54,10 +55,10 @@ class PlayerOsdOverlay extends StatefulWidget {
 }
 
 class _PlayerOsdOverlayState extends State<PlayerOsdOverlay> {
-  /// 淡出期间保留的最后一条内容（B5：离场不再先清空再淡出）。
+  /// 淡出期间保留的最后一条内容（离场不提前清空内容，避免闪烁）。
   OsdMessage? _lastMessage;
 
-  /// 进 200 / 出 140（D2），与播放器控制层同一节奏。
+  /// 进 200ms / 出 140ms（D2 动效节奏，离开更快更跟手）。
   Duration _motion({required bool visible}) =>
       visible ? AppMotion.enter : AppMotion.exit;
 
@@ -67,6 +68,19 @@ class _PlayerOsdOverlayState extends State<PlayerOsdOverlay> {
     if (widget.controller.currentMessage == null && _lastMessage != null) {
       setState(() => _lastMessage = null);
     }
+  }
+
+  /// 尝试从文本中解析百分比（如 "音量: 75%" -> 0.75）以展示进度微光条
+  double? _tryParsePercent(String text) {
+    if (!text.contains('%')) return null;
+    final match = RegExp(r'(\d+)%').firstMatch(text);
+    if (match != null) {
+      final value = int.tryParse(match.group(1) ?? '');
+      if (value != null) {
+        return (value / 100.0).clamp(0.0, 1.0);
+      }
+    }
+    return null;
   }
 
   @override
@@ -107,53 +121,127 @@ class _PlayerOsdOverlayState extends State<PlayerOsdOverlay> {
   }
 
   Widget _buildCard(AppPalette palette, OsdMessage msg) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.lg, vertical: AppSpacing.md),
-      decoration: BoxDecoration(
-        color: palette.playerChrome,
-        borderRadius: BorderRadius.circular(AppRadii.md),
-        border: Border.all(
-            color: palette.playerText.withValues(alpha: 0.2), width: 1),
-        boxShadow: const [
-          BoxShadow(
-            // 浮层阴影固定黑色，与主题无关
-            color: Color(0x66000000),
-            blurRadius: 16,
-            offset: Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(msg.icon, color: palette.accentInk, size: 28),
-          const SizedBox(width: AppSpacing.md),
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                msg.text,
-                style: TextStyle(
-                  color: palette.playerText,
-                  fontSize: AppType.heading,
-                  fontWeight: FontWeight.bold,
-                ),
+    final percent = _tryParsePercent(msg.text);
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(AppRadii.lg),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        child: Container(
+          constraints: const BoxConstraints(minWidth: 140, maxWidth: 360),
+          decoration: BoxDecoration(
+            color: const Color(0xCC101014),
+            borderRadius: BorderRadius.circular(AppRadii.lg),
+            border: Border.all(
+              color: Colors.white.withValues(alpha: 0.16),
+              width: 1,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.45),
+                blurRadius: 28,
+                offset: const Offset(0, 8),
               ),
-              if (msg.subText != null) ...[
-                const SizedBox(height: AppSpacing.xs),
-                Text(
-                  msg.subText!,
-                  style: TextStyle(
-                    color: palette.playerText.withValues(alpha: 0.7),
-                    fontSize: AppType.body,
-                  ),
-                ),
-              ],
             ],
           ),
-        ],
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.lg,
+                  vertical: AppSpacing.md,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // 图标微光徽章底座
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(AppRadii.sm),
+                        border: Border.all(
+                          color: palette.accentInk.withValues(alpha: 0.28),
+                          width: 1,
+                        ),
+                      ),
+                      child: Center(
+                        child: Icon(
+                          msg.icon,
+                          color: palette.accentInk,
+                          size: 22,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: AppSpacing.md),
+                    // 状态说明文本
+                    Flexible(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            msg.text,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: AppType.heading,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: -0.2,
+                              fontFeatures: [
+                                FontFeature.tabularFigures(),
+                              ],
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (msg.subText != null) ...[
+                            const SizedBox(height: 3),
+                            Text(
+                              msg.subText!,
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.72),
+                                fontSize: AppType.body,
+                                fontFeatures: const [
+                                  FontFeature.tabularFigures(),
+                                ],
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              // 如果包含百分比，展示底部细线微发光进度条（3px）
+              if (percent != null)
+                Container(
+                  height: 3,
+                  width: double.infinity,
+                  color: Colors.white.withValues(alpha: 0.10),
+                  alignment: Alignment.centerLeft,
+                  child: FractionallySizedBox(
+                    widthFactor: percent,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: palette.accentInk,
+                        boxShadow: [
+                          BoxShadow(
+                            color: palette.accentInk.withValues(alpha: 0.6),
+                            blurRadius: 4,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }

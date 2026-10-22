@@ -578,20 +578,22 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
         stream: _repo.homeSitePreferencesStream,
         builder: (context, _) {
           final sites = _repo.availableHomeSites;
+          // 下拉额外包含内置虚拟站（豆瓣热播）；footer 的失效提示仍按配置站源算（§17）
+          final choices = _repo.homeSiteChoices;
           final identity = _repo.currentConfigIdentity;
           final preferred = _repo.defaultHomeSite;
           final fallback = _repo.homeSiteFallbackMessage;
-          final selected = preferred == null ? -1 : sites.indexOf(preferred);
+          final selected = preferred == null ? -1 : choices.indexOf(preferred);
           final enabled = identity != null &&
               _repo.homeSiteReadError == null &&
-              (sites.isNotEmpty || _repo.homeSitePreference != null);
+              (choices.isNotEmpty || _repo.homeSitePreference != null);
           return _card(
             context,
             child: _SettingRow(
               title: '首页默认站源',
               description: _repo.currentVodConfig.sites.isEmpty
                   ? '请先导入包含站点的配置'
-                  : '下次启动或切回此配置时生效；标题栏临时切站不会修改此偏好。自动选择沿用原有规则。',
+                  : '下次启动或切回此配置时生效；标题栏临时切站不会修改此偏好。「自动选择」= 没有固定站源时默认落在「豆瓣热播」。',
               trailing: _boxedDropdown(
                 context,
                 child: Semantics(
@@ -613,17 +615,17 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
                           child: Text('已失效：${_repo.homeSitePreference!.name}',
                               overflow: TextOverflow.ellipsis),
                         ),
-                      for (var i = 0; i < sites.length; i++)
+                      for (var i = 0; i < choices.length; i++)
                         DropdownMenuItem(
                           value: i,
                           child: Text(
-                            sites
+                            choices
                                         .where((site) =>
-                                            site.name == sites[i].name)
+                                            site.name == choices[i].name)
                                         .length >
                                     1
-                                ? '${sites[i].name}（${sites[i].key}）'
-                                : sites[i].name,
+                                ? '${choices[i].name}（${choices[i].key}）'
+                                : choices[i].name,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -633,7 +635,7 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
                         : (index) {
                             if (index == null || index == -2) return;
                             unawaited(_setHomeSite(
-                                index == -1 ? null : sites[index], identity));
+                                index == -1 ? null : choices[index], identity));
                           },
                   ),
                 ),
@@ -3194,7 +3196,7 @@ class _AboutPanelState extends State<AboutPanel> {
     try {
       // 版本来自构建注入的 exe 版本资源（package_info_plus 读取），不硬编码
       final info = await PackageInfo.fromPlatform();
-      version = '${info.version}+${info.buildNumber}';
+      version = info.version;
     } catch (_) {
       // 读取失败：显示「读取失败」，不显示占位版本
       versionFailed = true;

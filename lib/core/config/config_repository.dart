@@ -8,6 +8,7 @@ import '../net/ascii_url.dart';
 import '../net/relative_url.dart';
 import 'config_decoder.dart';
 import 'models/desktop_window_config.dart';
+import 'models/builtin_sites.dart';
 import 'models/config_snapshot.dart';
 import 'models/history_record.dart';
 import 'models/home_site_preference.dart';
@@ -143,7 +144,13 @@ class ConfigRepository {
   /// 每次通过 URL / 本地文件成功加载配置后发布（粘贴内容不发布）
   Stream<ConfigLoadEvent> get configLoadedStream => _configLoadedController.stream;
 
-  ConfigRepository({WindowsConfigStorage? storage, Dio? dio})
+  /// 没有「首页默认站源」偏好时的兜底站源。
+  ///
+  /// 生产启动注入 `builtinDoubanSite`（§17/§18：默认打开即豆瓣热播）；测试与其它
+  /// 场景不传，则沿用原来的「按可播性自动挑选」规则。
+  final Site? fallbackHomeSite;
+
+  ConfigRepository({WindowsConfigStorage? storage, Dio? dio, this.fallbackHomeSite})
       : _storage = storage ?? WindowsConfigStorage(),
         _dio = dio ??
             Dio(
@@ -169,8 +176,15 @@ class ConfigRepository {
 
   HomeSitePreference? get homeSitePreference => _homeSitePreferences[_configIdentity];
 
+  /// 可选站源 = 内置虚拟站（豆瓣热播，§17） + 配置里的站源。
+  ///
+  /// 虚拟站不进 `VodConfig.sites`：它没有可执行端点，不该出现在聚合搜索或
+  /// 站源体检里；只在「首页站源」这类导航选择中出现。
+  List<Site> get _selectableSites =>
+      <Site>[builtinDoubanSite, ..._currentVodConfig.sites];
+
   Site? _matchingSite(HomeSitePreference preference) {
-    final candidates = _currentVodConfig.sites.where((site) => site.key == preference.siteKey).toList();
+    final candidates = _selectableSites.where((site) => site.key == preference.siteKey).toList();
     return candidates.length == 1 && preference.matches(candidates.single) &&
         HomeSitePreference.canSelect(candidates.single) ? candidates.single : null;
   }
@@ -184,6 +198,13 @@ class ConfigRepository {
     (site) => HomeSitePreference.canSelect(site) &&
         _currentVodConfig.sites.where((candidate) => candidate.key == site.key).length == 1,
   ));
+
+  /// 首页站源下拉的候选项：内置虚拟站排首位（§17），其后是配置里的可用站源。
+  ///
+  /// [availableHomeSites] 保持「只含配置站源」的原语义——门禁用例与设置页的
+  /// 失效提示都按它算，虚拟站单独拼在这里。
+  List<Site> get homeSiteChoices =>
+      List.unmodifiable(<Site>[builtinDoubanSite, ...availableHomeSites]);
 
   String? get homeSiteFallbackMessage => homeSitePreference != null && defaultHomeSite == null
       ? '默认站源「${homeSitePreference!.name}」已失效或不受支持，当前使用临时站源或自动选择；原偏好已保留。'
@@ -1151,7 +1172,12 @@ class ConfigRepository {
     ));
     final preserved = previousIdentity == _configIdentity && previousSite != null
         ? _matchingSite(HomeSitePreference.fromSite(previousSite)) : null;
-    final preferred = preserved ?? defaultHomeSite;
+    final fallback = fallbackHomeSite;
+    final preferred = preserved ??
+        defaultHomeSite ??
+        (fallback != null && HomeSitePreference.canSelect(fallback)
+            ? fallback
+            : null);
     if (preferred != null) {
       _selectedSite = preferred;
       _vodConfigController.add(_currentVodConfig);
@@ -1161,26 +1187,43 @@ class ConfigRepository {
     }
     _vodConfigController.add(_currentVodConfig);
 
-    // 智能选择首个可用站源 (优先选择标准 CMS 或带 HTTP 端点的站源)
+    // 智能选择首页站源，见 _pickDefaultSite 的优先级说明。
     if (config.sites.isNotEmpty) {
-      final supportedSite = config.sites.firstWhere(
-        (s) {
-          final rawApi = s.api.trim();
-          final rawExt = s.ext?.trim() ?? '';
-          if (s.type == 0 || s.type == 1) return true;
-          if (rawApi.startsWith('http://') || rawApi.startsWith('https://')) return true;
-          if (rawExt.startsWith('http://') || rawExt.startsWith('https://')) return true;
-          return false;
-        },
-        orElse: () => config.sites.first,
-      );
-      _selectedSite = supportedSite;
+      _selectedSite = _pickDefaultSite(config.sites);
       _siteController.add(_selectedSite);
     } else {
       _selectedSite = null;
       _siteController.add(null);
     }
     _publishHomeSites();
+  }
+
+  /// 自动选择首页站源的优先级：
+  /// 1. 标准 CMS（type 0/1）—— 直连最稳，不依赖 companion；
+  /// 2. `csp_*` 加固载荷站点 —— companion 会先在载荷里做「去 Guard 后缀」的类发现
+  ///    （DexSpiderLoader Level 0.5），命中真实爬虫后才有影片数据；
+  /// 3. 带 HTTP 端点的站源（JS / 直连）；
+  /// 4. 兜底第一个。
+  ///
+  /// 旧顺序把「api/ext 是 http」排在 `csp_*` 之前。而 drpy2 风格的 JS 源
+  /// （api=引擎、ext=脚本）在桌面端没有运行时，首页会固定落在跑不了的站源上，
+  /// 表现为分类和影片都为空。
+  static Site _pickDefaultSite(List<Site> sites) {
+    for (final site in sites) {
+      if (site.type == 0 || site.type == 1) return site;
+    }
+    for (final site in sites) {
+      if (site.api.trim().startsWith('csp_')) return site;
+    }
+    bool hasHttp(String? value) {
+      final raw = value?.trim() ?? '';
+      return raw.startsWith('http://') || raw.startsWith('https://');
+    }
+
+    for (final site in sites) {
+      if (hasHttp(site.api) || hasHttp(site.ext)) return site;
+    }
+    return sites.first;
   }
 
   /// 等待当前排队的配置 / 历史 / 首页站源 / 窗口写入落定。

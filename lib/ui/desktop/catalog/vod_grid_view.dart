@@ -23,6 +23,9 @@ abstract final class VodGridMetrics {
   /// 按可用宽度计算列数（3–8 列）
   static int crossAxisCount(double maxWidth) =>
       (maxWidth / cardMinWidth).floor().clamp(3, 8);
+
+  /// 海报解码目标宽度（与卡片实际显示宽度同量级，避免整张 4000px 原图进内存）
+  static const int posterCacheWidth = 512;
 }
 
 /// 桌面端影视海报流瀑布网格组件（精准复现线框图视觉规范）
@@ -30,10 +33,22 @@ class VodGridView extends StatelessWidget {
   final List<VodItem> items;
   final ValueChanged<VodItem> onItemTap;
 
+  /// 逐条决定海报解码器（可选）。
+  ///
+  /// 返回 null 时用默认的 `ResizeImage(NetworkImage(...))`。豆瓣图床必须走
+  /// [DoubanPosterImage]：`NetworkImage` 加头用 `headers.add`，会和 `dart:io`
+  /// 默认 UA 叠成两条，豆瓣直接 403（§17 实测）。
+  final ImageProvider? Function(VodItem item)? imageProviderFor;
+
+  /// 外部滚动控制器（首页无限滚动要读 `maxScrollExtent` 判断是否需要续页）
+  final ScrollController? controller;
+
   const VodGridView({
     super.key,
     required this.items,
     required this.onItemTap,
+    this.imageProviderFor,
+    this.controller,
   });
 
   @override
@@ -67,6 +82,7 @@ class VodGridView extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         return GridView.builder(
+          controller: controller,
           padding: VodGridMetrics.padding,
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: VodGridMetrics.crossAxisCount(constraints.maxWidth),
@@ -80,6 +96,9 @@ class VodGridView extends StatelessWidget {
             return _VodCard(
               item: item,
               index: index,
+              poster: imageProviderFor?.call(item) ??
+                  ResizeImage(NetworkImage(item.pic),
+                      width: VodGridMetrics.posterCacheWidth),
               onTap: () => onItemTap(item),
             );
           },
@@ -94,10 +113,14 @@ class _VodCard extends StatefulWidget {
   final int index;
   final VoidCallback onTap;
 
+  /// 海报解码器（默认 `ResizeImage(NetworkImage(...))`；豆瓣图床由外部注入）
+  final ImageProvider poster;
+
   const _VodCard({
     required this.item,
     required this.index,
     required this.onTap,
+    required this.poster,
   });
 
   @override
@@ -145,192 +168,229 @@ class _VodCardState extends State<_VodCard> {
     final topBadge = _resolveTopBadge();
     final scoreText = _resolveScoreText();
 
-    return FocusRing(
-        onTap: widget.onTap,
-        semanticLabel: widget.item.name,
-        borderRadius: const BorderRadius.all(Radius.circular(AppRadii.md)),
-        child: MouseRegion(
-          onEnter: (_) => setState(() => _isHovered = true),
-          onExit: (_) => setState(() => _isHovered = false),
-          cursor: SystemMouseCursors.click,
-          child: GestureDetector(
+    return MouseRegion(
+        onEnter: (_) => setState(() => _isHovered = true),
+        onExit: (_) => setState(() => _isHovered = false),
+        cursor: SystemMouseCursors.click,
+        // 先缩放再套焦点环：否则缩放只作用于卡片，焦点环停在 100% 尺寸，
+        // 放大 4% 之后环就比卡片小一圈（描边与影片大小对不上）。
+        child: AnimatedScale(
+          scale: _isHovered ? 1.04 : 1.0,
+          duration: _hoverMotion,
+          curve: AppMotion.ease,
+          child: FocusRing(
             onTap: widget.onTap,
-            child: AnimatedScale(
-              scale: _isHovered ? 1.035 : 1.0,
-              duration: _hoverMotion,
-              curve: AppMotion.ease,
+            semanticLabel: widget.item.name,
+            borderRadius: const BorderRadius.all(Radius.circular(AppRadii.lg)),
+            child: GestureDetector(
+              onTap: widget.onTap,
               child: AnimatedContainer(
                 duration: _hoverMotion,
                 curve: AppMotion.ease,
                 decoration: BoxDecoration(
                   color: palette.card,
-                  borderRadius: BorderRadius.circular(AppRadii.md),
-                  border: Border.all(
-                    color:
-                        _isHovered ? palette.accentInk : palette.borderStrong,
-                    width: _isHovered ? 1.5 : 1.0,
-                  ),
+                  borderRadius: BorderRadius.circular(AppRadii.lg),
+                  // 边框不再画在 decoration 上：`Border.all` 在圆角矩形上是
+                  // 居中描边，一半落在盒子外会被圆角裁剪吃掉，四角几乎看不见。
+                  // 描边改由 Stack 最上层的 [_CardRingPainter] 负责。
                   boxShadow: _isHovered
-                      ? [
-                          BoxShadow(
-                            color: palette.accentInk.withValues(alpha: 0.16),
-                            blurRadius: 12,
-                            offset: const Offset(0, 4),
-                          ),
-                        ]
+                      ? AppShadows.cardHover(palette.accentInk)
                       : null,
                 ),
                 clipBehavior: Clip.antiAlias,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                child: Stack(
+                  fit: StackFit.expand,
                   children: [
-                    // 海报封面容器（含左上角标与左下角评分标签）
-                    Expanded(
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          // 封面图片
-                          Image.network(
-                            widget.item.pic,
-                            // ⑥ 内存批：卡片最宽约 310px，512 覆盖 1.5x DPR 内清晰度，
-                            // 避免按原图（常见 500~1000px 宽）全尺寸解码。
-                            cacheWidth: 512,
-                            fit: BoxFit.cover,
-                            errorBuilder: (context, error, stackTrace) =>
-                                Container(
-                              color: palette.raised,
-                              child: Center(
-                                child: Icon(
-                                  Icons.movie_creation_outlined,
-                                  size: 38,
-                                  color: palette.textDim,
-                                ),
-                              ),
+                    // 1. 全景海报封面（Netflix 式画报铺满）
+                    //
+                    // 直播频道常见「无台标」（pic 为空）。此前仍会构造
+                    // NetworkImage('') 并真的发起请求，加载失败后再走 errorBuilder：
+                    // 上千个频道滚动时就是上千次无效请求 + 异常上报，直接拖垮滚动。
+                    // 空 URL 直接渲染占位，不发请求。
+                    if (widget.item.pic.trim().isEmpty)
+                      Container(
+                        color: palette.raised,
+                        child: Center(
+                          child: Icon(
+                            Icons.movie_creation_outlined,
+                            size: 40,
+                            color: palette.textDim,
+                          ),
+                        ),
+                      )
+                    else
+                      Image(
+                        image: widget.poster,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) => Container(
+                          color: palette.raised,
+                          child: Center(
+                            child: Icon(
+                              Icons.movie_creation_outlined,
+                              size: 40,
+                              color: palette.textDim,
                             ),
                           ),
+                        ),
+                      ),
 
-                          // 底部暗色渐变，增强文字可视度
-                          Positioned(
-                            left: 0,
-                            right: 0,
-                            bottom: 0,
-                            height: 50,
-                            child: DecoratedBox(
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.topCenter,
-                                  end: Alignment.bottomCenter,
-                                  colors: [
-                                    Colors.transparent,
-                                    // 海报底部固定压暗（与主题无关），保证任何海报上文字可读
-                                    Colors.black.withAlpha(200),
-                                  ],
-                                ),
-                              ),
-                            ),
+                    // 2. 底部电影级平滑黑场渐变（从透明平滑过渡至浓郁深黑，保证标题绝对可读）
+                    Positioned.fill(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            stops: const [0.0, 0.45, 0.72, 1.0],
+                            colors: [
+                              Colors.transparent,
+                              Colors.transparent,
+                              Colors.black.withValues(alpha: 0.65),
+                              Colors.black.withValues(alpha: 0.92),
+                            ],
                           ),
-
-                          // 1. 左上角信息角标（仅真实信息时渲染；B2 已去除假兜底）
-                          if (topBadge != null)
-                            Positioned(
-                              left: 8,
-                              top: 8,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 3),
-                                decoration: BoxDecoration(
-                                  // 海报左上角标签固定半透深底 + 浅字：标签信息在文字里，
-                                  // 颜色只是装饰（skill: Color Only），压在任何海报上都要可读 → 与主题无关
-                                  color: const Color(0xCC000000),
-                                  borderRadius:
-                                      BorderRadius.circular(AppRadii.xs),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      // 海报投影固定黑色，与主题无关
-                                      color: Colors.black.withAlpha(120),
-                                      blurRadius: 4,
-                                    ),
-                                  ],
-                                ),
-                                child: Text(
-                                  topBadge,
-                                  style: const TextStyle(
-                                    color: Color(0xFFF2F4F8),
-                                    fontSize: AppType.caption,
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 0.2,
-                                  ),
-                                  maxLines: 1,
-                                ),
-                              ),
-                            ),
-
-                          // 2. 左下角评分角标（图标 + 数字；仅真实评分时渲染）
-                          if (scoreText != null)
-                            Positioned(
-                              left: 8,
-                              bottom: 8,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 2.5),
-                                decoration: BoxDecoration(
-                                  // 海报上的角标固定深底亮黄：与主题无关，保证任意海报上都可读
-                                  color: const Color(0xE616161E),
-                                  borderRadius:
-                                      BorderRadius.circular(AppRadii.xs),
-                                  border: Border.all(
-                                      color: const Color(0x66FFB300),
-                                      width: 0.8),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    // 星形图标替代 emoji「⭐」（skill: no-emoji-icons）；
-                                    // 固定暖黄与深底配套，跨主题可读
-                                    const Icon(
-                                      Icons.star_rounded,
-                                      size: 12,
-                                      color: Color(0xFFFFC107),
-                                    ),
-                                    const SizedBox(width: 3),
-                                    Text(
-                                      scoreText,
-                                      style: const TextStyle(
-                                        color: Color(0xFFFFC107),
-                                        fontSize: AppType.caption,
-                                        fontWeight: FontWeight.bold,
-                                        // 数字等宽，多卡对齐不抖动（skill: number-tabular）
-                                        fontFeatures: [
-                                          FontFeature.tabularFigures()
-                                        ],
-                                      ),
-                                      maxLines: 1,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                        ],
+                        ),
                       ),
                     ),
 
-                    // 底部影视标题名称
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 8),
-                      color: palette.panel,
-                      child: Text(
-                        widget.item.name,
-                        style: TextStyle(
-                          color:
-                              _isHovered ? palette.textTitle : palette.textBody,
-                          fontSize: AppType.body,
-                          fontWeight:
-                              _isHovered ? FontWeight.bold : FontWeight.w500,
+                    // 3. 悬停微光：底部再压一层极轻的通透流光，不参与描边
+                    if (_isHovered)
+                      Positioned.fill(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                palette.accentInk.withValues(alpha: 0.10),
+                                Colors.transparent,
+                              ],
+                            ),
+                            borderRadius:
+                                BorderRadius.circular(AppRadii.lg),
+                          ),
                         ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      ),
+
+                    // 4. 左上角信息角标（Infuse 磨砂玻璃胶囊：仅真实信息时渲染）
+                    if (topBadge != null)
+                      Positioned(
+                        left: 8,
+                        top: 8,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 7, vertical: 3.5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xB3121218),
+                            borderRadius: BorderRadius.circular(AppRadii.xs),
+                            border: Border.all(
+                              color: const Color(0x33FFFFFF),
+                              width: 0.8,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.35),
+                                blurRadius: 4,
+                                offset: const Offset(0, 1),
+                              ),
+                            ],
+                          ),
+                          child: Text(
+                            topBadge,
+                            style: const TextStyle(
+                              color: Color(0xFFF2F4F8),
+                              fontSize: AppType.caption,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.2,
+                            ),
+                            maxLines: 1,
+                          ),
+                        ),
+                      ),
+
+                    // 5. 底部信息区：标题 + 评分/备注（悬浮式融合，告别生硬色块拼接）
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // 标题
+                            Text(
+                              widget.item.name,
+                              style: TextStyle(
+                                color: _isHovered
+                                    ? Colors.white
+                                    : const Color(0xFFF0F1F5),
+                                fontSize: AppType.label,
+                                fontWeight: _isHovered
+                                    ? FontWeight.bold
+                                    : FontWeight.w600,
+                                letterSpacing: 0.2,
+                                shadows: const [
+                                  Shadow(
+                                    color: Color(0xCC000000),
+                                    blurRadius: 4,
+                                    offset: Offset(0, 1),
+                                  ),
+                                ],
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+
+                            // 评分角标（有真实评分时显示在标题下方）
+                            if (scoreText != null) ...[
+                              const SizedBox(height: 4),
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.star_rounded,
+                                    size: 13,
+                                    color: Color(0xFFFFC107),
+                                  ),
+                                  const SizedBox(width: 3),
+                                  Text(
+                                    scoreText,
+                                    style: const TextStyle(
+                                      color: Color(0xFFFFC107),
+                                      fontSize: AppType.caption,
+                                      fontWeight: FontWeight.bold,
+                                      fontFeatures: [
+                                        FontFeature.tabularFigures()
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    // 6. 描边（最上层）：必须压在内容之上——画在 decoration 上会被
+                    //    不透明海报盖住，且居中描边被圆角裁掉一半，四个角就"消失"了。
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: TweenAnimationBuilder<double>(
+                          tween: Tween<double>(end: _isHovered ? 1 : 0),
+                          duration: _hoverMotion,
+                          curve: AppMotion.ease,
+                          builder: (context, t, _) => CustomPaint(
+                            painter: _CardRingPainter(
+                              color: Color.lerp(context.glassBorder,
+                                  palette.accentInk, t)!,
+                              width: 1 + 0.6 * t,
+                              radius: AppRadii.lg,
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -340,4 +400,53 @@ class _VodCardState extends State<_VodCard> {
           ),
         ));
   }
+}
+
+/// 卡片描边：[width] 的中心线整体内缩半个线宽，整条线都落在卡片内侧。
+///
+/// 为什么不用 `Border.all`：它在圆角矩形上是**居中**描边（`deflate(width / 2)`），
+/// 一半落在盒子外；卡片又被 `Clip.antiAlias` 按同一圆角裁剪，外半被吃掉，角落只剩
+/// 亚像素混合，视觉上"四角没有描边"（2026-10-22 像素实测：四角 12×12 区域内
+/// accent 命中数为 0）。改成内缩描边后，四个角是完整圆弧。
+class _CardRingPainter extends CustomPainter {
+  const _CardRingPainter({
+    required this.color,
+    required this.width,
+    required this.radius,
+  });
+
+  final Color color;
+  final double width;
+  final double radius;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (width <= 0 || size.isEmpty) return;
+    final inset = width / 2;
+    final rect = Rect.fromLTWH(
+      inset,
+      inset,
+      size.width - width,
+      size.height - width,
+    );
+    if (rect.isEmpty) return;
+    final rrect = RRect.fromRectAndRadius(
+      rect,
+      Radius.circular((radius - inset).clamp(0.0, radius)),
+    );
+    canvas.drawRRect(
+      rrect,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = width
+        ..isAntiAlias = true,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_CardRingPainter oldDelegate) =>
+      oldDelegate.color != color ||
+      oldDelegate.width != width ||
+      oldDelegate.radius != radius;
 }

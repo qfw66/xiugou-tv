@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import '../window/desktop_window_manager.dart';
 import '../../theme/app_icon_assets.dart';
@@ -7,14 +6,23 @@ import 'focus_ring.dart';
 import '../../theme/app_tokens.dart';
 
 /// 标题栏高度：DesktopWindowFrame 顶部栏实高（窗口控制按钮与全局消息浮层定位共用）。
-const double kDesktopTitleBarHeight = 42;
+const double kDesktopTitleBarHeight = 44;
 
-/// Windows 风格自定义无边框窗口标题栏
+/// Netflix 风格自定义无边框窗口标题栏 (Desktop Title Bar)
+///
+/// 视觉特性：
+/// 1. 左侧：品牌 Logo + 站源切换胶囊；
+/// 2. 中间：可拖拽移动窗口区域；
+/// 3. 右侧：Netflix 风格紧凑型搜索框（缩小为 240~260px，不再是全屏横栏）、搜索执行按钮、刷新按钮、设置与窗口控制组；
+/// 4. 彻底移除旧版时间栏，布局极为紧凑沉浸。
 class DesktopTitleBar extends StatelessWidget {
   final DesktopWindowManager windowManager;
   final String? activeSiteName;
   final VoidCallback? onSettingsPressed;
   final VoidCallback? onSiteSelectorPressed;
+  final Widget? searchBar;
+  final VoidCallback? onRefresh;
+  final bool refreshBusy;
 
   const DesktopTitleBar({
     super.key,
@@ -22,6 +30,9 @@ class DesktopTitleBar extends StatelessWidget {
     this.activeSiteName,
     this.onSettingsPressed,
     this.onSiteSelectorPressed,
+    this.searchBar,
+    this.onRefresh,
+    this.refreshBusy = false,
   });
 
   @override
@@ -37,9 +48,9 @@ class DesktopTitleBar extends StatelessWidget {
       ),
       child: Row(
         children: [
-          const SizedBox(width: 12),
+          const SizedBox(width: 14),
 
-          // 左侧 1：应用 Logo（单版圆角图标，不再随主题切换素材）
+          // 左侧 1：应用 Logo（单版圆角图标）
           Image.asset(
             appIconAsset,
             width: 26,
@@ -64,11 +75,24 @@ class DesktopTitleBar extends StatelessWidget {
             ),
           ),
 
-          // 右侧 1：北京时间实时显示 (yyyy/MM/dd 周几 HH:mm)
-          const DesktopBeijingClock(),
-          const SizedBox(width: 6),
+          // 右侧 1：Netflix 风格紧凑型搜索框（缩小版，不再占据主内容区一行）
+          if (searchBar != null) ...[
+            searchBar!,
+            const SizedBox(width: 8),
+          ],
 
-          // 右侧 2：设置按钮 [ ⚙ ] 与窗口控制按钮组
+          // 右侧 2：刷新按钮（微透圆形图标按钮）
+          if (onRefresh != null) ...[
+            _TitleBarIconButton(
+              icon: Icons.refresh_rounded,
+              tooltip: '刷新站源内容',
+              busy: refreshBusy,
+              onPressed: onRefresh!,
+            ),
+            const SizedBox(width: 6),
+          ],
+
+          // 右侧 3：设置按钮 [ ⚙ ] 与窗口控制按钮组
           if (onSettingsPressed != null)
             _WindowButton(
               icon: Icons.settings_suggest_outlined,
@@ -119,104 +143,81 @@ class DesktopTitleBar extends StatelessWidget {
   }
 }
 
-/// 北京时间实时刷新组件 (yyyy/MM/dd 周几 HH:mm，UTC+8)
-class DesktopBeijingClock extends StatefulWidget {
-  const DesktopBeijingClock({super.key});
+/// 顶栏微透图标按钮（用于刷新等轻量操作）
+class _TitleBarIconButton extends StatefulWidget {
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+  final bool busy;
+
+  const _TitleBarIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.busy = false,
+  });
 
   @override
-  State<DesktopBeijingClock> createState() => DesktopBeijingClockState();
+  State<_TitleBarIconButton> createState() => _TitleBarIconButtonState();
 }
 
-class DesktopBeijingClockState extends State<DesktopBeijingClock> {
-  Timer? _timer;
-  String _formattedTime = '';
-
-  @override
-  void initState() {
-    super.initState();
-    _formattedTime = formatBeijingTime(DateTime.now());
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) {
-        final newTime = formatBeijingTime(DateTime.now());
-        if (newTime != _formattedTime) {
-          setState(() {
-            _formattedTime = newTime;
-          });
-        }
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
-
-  /// 格式化为北京时间字符串
-  static String formatBeijingTime(DateTime dateTime) {
-    // 换算为 UTC+8 时区
-    final beijing = dateTime.toUtc().add(const Duration(hours: 8));
-    final year = beijing.year.toString().padLeft(4, '0');
-    final month = beijing.month.toString().padLeft(2, '0');
-    final day = beijing.day.toString().padLeft(2, '0');
-    final weekdayStr = getWeekdayCn(beijing.weekday);
-    final hour = beijing.hour.toString().padLeft(2, '0');
-    final minute = beijing.minute.toString().padLeft(2, '0');
-    return '$year/$month/$day $weekdayStr $hour:$minute';
-  }
-
-  static String getWeekdayCn(int weekday) {
-    switch (weekday) {
-      case DateTime.monday:
-        return '周一';
-      case DateTime.tuesday:
-        return '周二';
-      case DateTime.wednesday:
-        return '周三';
-      case DateTime.thursday:
-        return '周四';
-      case DateTime.friday:
-        return '周五';
-      case DateTime.saturday:
-        return '周六';
-      case DateTime.sunday:
-        return '周日';
-      default:
-        return '';
-    }
-  }
+class _TitleBarIconButtonState extends State<_TitleBarIconButton> {
+  bool _isHovered = false;
 
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      margin: const EdgeInsets.symmetric(vertical: 7),
-      decoration: BoxDecoration(
-        color: palette.raised,
-        borderRadius: BorderRadius.circular(AppRadii.sm),
-        border: Border.all(color: palette.border, width: 1),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.access_time_rounded,
-            size: 13,
-            color: palette.textSub,
-          ),
-          const SizedBox(width: 6),
-          Text(
-            _formattedTime,
-            style: TextStyle(
-              fontSize: AppType.body,
-              fontWeight: FontWeight.w500,
-              color: palette.textBody,
-              letterSpacing: 0.3,
+    return Tooltip(
+      message: widget.tooltip,
+      child: FocusRing(
+        onTap: widget.busy ? () {} : widget.onPressed,
+        semanticLabel: widget.tooltip,
+        borderRadius: BorderRadius.circular(AppRadii.pill),
+        child: MouseRegion(
+          onEnter: (_) => setState(() => _isHovered = true),
+          onExit: (_) => setState(() => _isHovered = false),
+          cursor:
+              widget.busy ? SystemMouseCursors.basic : SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: widget.busy ? null : widget.onPressed,
+            child: AnimatedContainer(
+              duration: AppMotion.base,
+              width: 30,
+              height: 30,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _isHovered
+                    ? palette.hover
+                    : Colors.white.withValues(alpha: 0.05),
+                border: Border.all(
+                  color: _isHovered
+                      ? palette.accentInk
+                      : context.glassBorder,
+                  width: 0.8,
+                ),
+              ),
+              child: Center(
+                child: widget.busy
+                    ? SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.8,
+                          valueColor:
+                              AlwaysStoppedAnimation<Color>(palette.accentInk),
+                        ),
+                      )
+                    : Icon(
+                        widget.icon,
+                        size: 16,
+                        color: _isHovered
+                            ? palette.accentInk
+                            : palette.textSub,
+                      ),
+              ),
             ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -252,7 +253,7 @@ class _SiteSourcePillState extends State<_SiteSourcePill> {
         onTap: widget.onTap,
         child: AnimatedContainer(
           duration: AppMotion.base,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4.5),
           decoration: BoxDecoration(
             color: _isHovered ? palette.hover : palette.raised,
             borderRadius: BorderRadius.circular(AppRadii.sm),
@@ -324,7 +325,6 @@ class _WindowButtonState extends State<_WindowButton> {
 
     if (_isHovered) {
       if (widget.isCloseButton) {
-        // Windows 关闭键的红色与主题无关，保持不变
         backgroundColor = const Color(0xFFE81123);
         iconColor = Colors.white;
       } else {
@@ -334,32 +334,33 @@ class _WindowButtonState extends State<_WindowButton> {
     }
 
     return FocusRing(
-        onTap: widget.onPressed,
-        semanticLabel: widget.tooltip,
-        borderRadius: const BorderRadius.all(Radius.circular(AppRadii.xs)),
-        child: Tooltip(
-          message: widget.tooltip,
-          waitDuration: const Duration(milliseconds: 600),
-          child: MouseRegion(
-            onEnter: (_) => setState(() => _isHovered = true),
-            onExit: (_) => setState(() => _isHovered = false),
-            child: GestureDetector(
-              onTap: widget.onPressed,
-              behavior: HitTestBehavior.opaque,
-              child: AnimatedContainer(
-                duration: AppMotion.base,
-                width: 44,
-                height: kDesktopTitleBarHeight,
-                color: backgroundColor,
-                alignment: Alignment.center,
-                child: Icon(
-                  widget.icon,
-                  size: 16,
-                  color: iconColor,
-                ),
+      onTap: widget.onPressed,
+      semanticLabel: widget.tooltip,
+      borderRadius: const BorderRadius.all(Radius.circular(AppRadii.xs)),
+      child: Tooltip(
+        message: widget.tooltip,
+        waitDuration: const Duration(milliseconds: 600),
+        child: MouseRegion(
+          onEnter: (_) => setState(() => _isHovered = true),
+          onExit: (_) => setState(() => _isHovered = false),
+          child: GestureDetector(
+            onTap: widget.onPressed,
+            behavior: HitTestBehavior.opaque,
+            child: AnimatedContainer(
+              duration: AppMotion.base,
+              width: 44,
+              height: kDesktopTitleBarHeight,
+              color: backgroundColor,
+              alignment: Alignment.center,
+              child: Icon(
+                widget.icon,
+                size: 16,
+                color: iconColor,
               ),
             ),
           ),
-        ));
+        ),
+      ),
+    );
   }
 }

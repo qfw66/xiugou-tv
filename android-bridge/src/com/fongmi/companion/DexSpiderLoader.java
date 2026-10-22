@@ -3,6 +3,8 @@ package com.fongmi.companion;
 import android.content.Context;
 import com.github.catvod.crawler.Spider;
 import com.github.catvod.crawler.SpiderNull;
+import com.github.catvod.spider.UnsupportedGuardSpider;
+import com.fongmi.companion.guard.GuardCryptoService;
 
 import java.io.*;
 import java.lang.reflect.Method;
@@ -51,6 +53,11 @@ public class DexSpiderLoader {
         ALIAS_MAP.put("alist", "AList");
         ALIAS_MAP.put("alistguard", "AList");
 
+        // Fy 继承载荷里的 Pan，Pan.init 在 HotSpot 21 上会稳定触发
+        // EXCEPTION_ACCESS_VIOLATION（-Xint 纯解释执行同样复现，排除 JIT 误编译）。
+        // 但它走的是 Level 0「Guard 站点优先从载荷加载」，比 ALIAS_MAP 更早命中，
+        // 所以拦截必须用 BLOCKED_API 在主流程之前完成（见 isBlockedByCrash）。
+
         // DouDouGuard is an Android-native protected wrapper. It is not Douban.
         // Keep the distinction explicit so the desktop bridge does not fabricate
         // categories while silently returning an empty video list.
@@ -90,6 +97,21 @@ public class DexSpiderLoader {
         DEFAULT_EXT.put("NewCzGuard", "https://www.czzy77.com/");
     }
 
+    /**
+     * 桌面端必须在加载前拒绝的载荷：它们的 init 会让 HotSpot 直接段错误
+     * （EXCEPTION_ACCESS_VIOLATION），而 Java 层捕获不到 SIGSEGV——
+     * 放进来一个，整个 companion 连同其它站一起死。
+     *
+     * 实测：csp_FyGuard → 载荷类 Fy（继承 Pan）→ Pan.init +6 崩，-Xint 同样崩，
+     * 去掉 -noverify 也照崩，只在 Windows JDK21 复现。只能不加载。
+     */
+    private static final java.util.Set<String> BLOCKED_API = new java.util.HashSet<>();
+
+    static {
+        BLOCKED_API.add("fyguard");
+        BLOCKED_API.add("fy");
+    }
+
     public DexSpiderLoader() {
         String userHome = System.getProperty("user.home", ".");
         this.cacheDir = new File(new File(userHome, ".xiugou_tv_companion"), "jars");
@@ -118,6 +140,12 @@ public class DexSpiderLoader {
 
     public Spider getSpider(String siteKey, String api, String ext, String jar) {
         String cleanApi = normalizeApiName(api);
+        // 崩溃站必须在 Level 0（载荷加载）之前短路，否则进程直接消失。
+        if (BLOCKED_API.contains(cleanApi.toLowerCase(java.util.Locale.ROOT))) {
+            System.err.println("[DexSpiderLoader] 已禁用会在本机 JDK 上崩溃的载荷: api=" + api
+                    + " site=" + siteKey + "（加载它会触发 SIGSEGV，拖死整个 companion）");
+            return new UnsupportedGuardSpider();
+        }
         if (ext == null || ext.trim().isEmpty()) {
             String fallback = DEFAULT_EXT.get(cleanApi);
             if (fallback != null) {
@@ -173,6 +201,22 @@ public class DexSpiderLoader {
             Spider fromJar = tryLoadFromJar(siteKey, cleanApi, ext, jar, true);
             if (fromJar != null) {
                 return fromJar;
+            }
+        }
+
+        // Level 0.5: 载荷内「去 Guard 后缀」的类发现。
+        //
+        // 载荷里的类名不带 Guard 后缀（Bili / Nmyswv / DouDou …），而配置里的 api
+        // 是 csp_BiliGuard / csp_DouDouGuard，Level 0 的精确匹配必然落空。若此时
+        // 直接落到 Level 1，ALIAS_MAP 会命中 companion 内置的**简化兼容实现**
+        // （Bili 只返回硬编码分类 + B 站搜索、DouDou 直接是 UnsupportedGuardSpider），
+        // 真正的载荷爬虫永远不会被实例化——实测表现就是首页有分类、点进去列表恒空。
+        //
+        // 因此类发现必须先于内置别名执行，与 Level 0 的注释保持同一意图。
+        if (jar != null && !jar.trim().isEmpty() && !hardStop()) {
+            Spider discovered = tryDiscoverFromJar(siteKey, cleanApi, ext, jar);
+            if (discovered != null) {
+                return discovered;
             }
         }
 
@@ -431,7 +475,176 @@ public class DexSpiderLoader {
         if (!invokeStaticInit(loader, "com.github.catvod.spider.Init")) {
             invokeStaticInit(loader, "com.github.catvod.spider.InitOrigin");
             injectGuardHostClass(loader);
+            enableGuardHideUtils(loader);
         }
+    }
+
+    /**
+     * 把 ftyguard 载荷切到 {@code HideUtils} 稳定接口，绕开随版本轮换的混淆方法名。
+     *
+     * <p>反编译当前载荷 {@code merge.g8} 可见每个加解密入口都是同一个二选一：
+     * <pre>
+     *   bl = uA.yq;
+     *   ...
+     *   if (bl) return HideUtils.decrypt(s);          // 桌面端希望走这里
+     *   try { return (String) InitOrigin.i
+     *           .getDeclaredMethod(&lt;7 个随机 Unicode 字符&gt;, String.class)
+     *           .invoke(null, s); }                    // 方法名每代都变
+     *   catch (Exception e) { ... return ""; }         // 失败即静默空串
+     * </pre>
+     * 也就是说：只要 (1) 宿主能提供 {@code com.github.catvod.spider.HideUtils}，
+     * (2) 壳的开关字段为 true，载荷就完全不碰混淆名。
+     *
+     * <p>开关字段**不写死**：先扫描载荷，找出直接调用 HideUtils 的类，再收集它从
+     * 其它类读取的 {@code public static boolean}（当前代就是 {@code merge.uA.yq}）。
+     * 类名、字段名每代都可能变，但「引用 HideUtils 的类 + 它读的布尔开关」是壳的
+     * 固定结构，可以跨代复用；扫描不到时才退回已知类名。
+     *
+     * <p>先确认 HideUtils 确实可解析，再置位——否则开关为 true 会让载荷抛
+     * NoClassDefFoundError（Error 不被 catch(Exception) 捕获），比空串更糟。
+     */
+    private void enableGuardHideUtils(ClassLoader loader) {
+        // 诊断/回滚开关：-Dxiugou.guard.hideutils=off 时保留旧的反射兜底路径。
+        if ("off".equalsIgnoreCase(System.getProperty("xiugou.guard.hideutils"))) {
+            return;
+        }
+        final String hideUtils = "com.github.catvod.spider.HideUtils";
+        try {
+            Class.forName(hideUtils, false, loader);
+        } catch (Throwable missing) {
+            System.err.println("[DexSpiderLoader] HideUtils unavailable, keep guard reflection fallback: " + missing);
+            return;
+        }
+        try {
+            List<String> flipped = new ArrayList<>();
+            for (String spec : hideUtilsSwitches(loader)) {
+                int hash = spec.lastIndexOf('#');
+                String ownerName = spec.substring(0, hash).replace('/', '.');
+                String fieldName = spec.substring(hash + 1);
+                try {
+                    Class<?> owner = Class.forName(ownerName, false, loader);
+                    java.lang.reflect.Field flag = owner.getDeclaredField(fieldName);
+                    int mod = flag.getModifiers();
+                    if (!java.lang.reflect.Modifier.isStatic(mod)
+                            || !java.lang.reflect.Modifier.isPublic(mod)
+                            || flag.getType() != boolean.class) {
+                        continue;
+                    }
+                    flag.setAccessible(true);
+                    flag.setBoolean(null, true);
+                    flipped.add(spec);
+                } catch (Throwable ignored) {
+                }
+            }
+            if (!flipped.isEmpty()) {
+                System.out.println("[DexSpiderLoader] Guard branch switched to HideUtils (" + flipped + ")");
+            }
+        } catch (Throwable t) {
+            System.err.println("[DexSpiderLoader] Guard HideUtils switch failed: " + t);
+        }
+    }
+
+    /**
+     * 扫描载荷，返回「走 HideUtils」的开关字段（格式 {@code owner#field}）。
+     *
+     * <p>判定规则只有两条，全部基于字节码结构，不依赖具体类名：
+     * <ol>
+     *   <li>该类调用了 {@code com.github.catvod.spider.HideUtils} 的方法；</li>
+     *   <li>它对该类**以外**的 {@code boolean} 字段执行 GETSTATIC。</li>
+     * </ol>
+     * 当前代 {@code merge/g8.class} 命中的只有 {@code merge/uA#yq}；同一类里的
+     * {@code g8.i} 因 owner==self 被排除（那是「已提示过」的状态位，置 true 会吞提示）。
+     */
+    private List<String> hideUtilsSwitches(ClassLoader loader) {
+        final List<String> found = new ArrayList<>();
+        final File jar = jarOf(loader);
+        if (jar != null) {
+            try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(jar)) {
+                Enumeration<? extends java.util.zip.ZipEntry> entries = zip.entries();
+                while (entries.hasMoreElements()) {
+                    java.util.zip.ZipEntry entry = entries.nextElement();
+                    if (!entry.getName().endsWith(".class")) continue;
+                    byte[] bytes;
+                    try (InputStream in = zip.getInputStream(entry)) {
+                        bytes = readFully(in);
+                    }
+                    if (!referencesHideUtils(bytes)) continue;
+                    collectGuardSwitches(bytes, entry.getName(), found);
+                }
+            } catch (Throwable t) {
+                System.err.println("[DexSpiderLoader] Guard switch scan failed: " + t);
+            }
+        }
+        if (found.isEmpty()) {
+            // 兜底：本机实测的 ftyguard 42869e 代际（merge.uA.yq）。
+            try {
+                Class.forName("com.github.catvod.spider.merge.uA", false, loader).getDeclaredField("yq");
+                found.add("com/github/catvod/spider/merge/uA#yq");
+            } catch (Throwable ignored) {
+            }
+        }
+        return found;
+    }
+
+    private File jarOf(ClassLoader loader) {
+        if (!(loader instanceof URLClassLoader)) return null;
+        for (URL url : ((URLClassLoader) loader).getURLs()) {
+            if (!"file".equals(url.getProtocol())) continue;
+            try {
+                File file = new File(url.toURI());
+                if (file.isFile() && file.getName().endsWith(".jar")) return file;
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private byte[] readFully(InputStream in) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(1024, in.available()));
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = in.read(buffer)) != -1) {
+            out.write(buffer, 0, read);
+        }
+        return out.toByteArray();
+    }
+
+    private boolean referencesHideUtils(byte[] bytes) {
+        final boolean[] hit = {false};
+        new org.objectweb.asm.ClassReader(bytes).accept(
+                new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
+                    @Override
+                    public org.objectweb.asm.MethodVisitor visitMethod(int access, String name, String desc,
+                            String sig, String[] ex) {
+                        return new org.objectweb.asm.MethodVisitor(org.objectweb.asm.Opcodes.ASM9) {
+                            @Override
+                            public void visitMethodInsn(int op, String owner, String name, String desc, boolean itf) {
+                                if ("com/github/catvod/spider/HideUtils".equals(owner)) hit[0] = true;
+                            }
+                        };
+                    }
+                }, org.objectweb.asm.ClassReader.SKIP_DEBUG | org.objectweb.asm.ClassReader.SKIP_FRAMES);
+        return hit[0];
+    }
+
+    private void collectGuardSwitches(byte[] bytes, String entryName, List<String> out) {
+        final String self = entryName.substring(0, entryName.length() - ".class".length());
+        new org.objectweb.asm.ClassReader(bytes).accept(
+                new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9) {
+                    @Override
+                    public org.objectweb.asm.MethodVisitor visitMethod(int access, String name, String desc,
+                            String sig, String[] ex) {
+                        return new org.objectweb.asm.MethodVisitor(org.objectweb.asm.Opcodes.ASM9) {
+                            @Override
+                            public void visitFieldInsn(int op, String owner, String name, String desc) {
+                                if (op != org.objectweb.asm.Opcodes.GETSTATIC || !"Z".equals(desc)) return;
+                                if (self.equals(owner)) return;
+                                String spec = owner + "#" + name;
+                                if (!out.contains(spec)) out.add(spec);
+                            }
+                        };
+                    }
+                }, org.objectweb.asm.ClassReader.SKIP_DEBUG | org.objectweb.asm.ClassReader.SKIP_FRAMES);
     }
 
     /**
@@ -597,8 +810,9 @@ public class DexSpiderLoader {
 
             String base = jarFile.getName();
             if (base.endsWith(".jar")) base = base.substring(0, base.length() - 4);
-            // -jvm3：修补版后缀。旧缓存（-jvm / -jvm2）是未修补/旧规则产物，直接换名作废
-            File converted = new File(cacheDir, base + "-jvm3.jar");
+            // -jvm4：修补版后缀（新增「字符串表 arraycopy 换向」规则）。
+            // 旧缓存（-jvm / -jvm2 / -jvm3）是未修补或旧规则产物，直接换名作废。
+            File converted = new File(cacheDir, base + "-jvm4.jar");
             if (converted.exists() && converted.length() > 0
                     && converted.lastModified() >= jarFile.lastModified()) {
                 return converted;
@@ -606,7 +820,7 @@ public class DexSpiderLoader {
 
             System.out.println("[DexSpiderLoader] Converting dex jar to JVM jar: " + jarFile.getName());
             long t0 = System.currentTimeMillis();
-            File tmp = new File(cacheDir, base + "-jvm3.tmp.jar");
+            File tmp = new File(cacheDir, base + "-jvm4.tmp.jar");
             com.googlecode.d2j.dex.Dex2jar.from(jarFile).to(tmp.toPath());
             if (tmp.exists() && tmp.length() > 0) {
                 // dex2jar 会产出「NEW 抽象类」「子类构造器丢失」这类必然抛错的字节码，
@@ -655,6 +869,10 @@ public class DexSpiderLoader {
                             "payload-" + expectedMd5.toLowerCase(Locale.ROOT) + ".jar");
                     if (payloadJar.exists() && payloadJar.length() > 0) {
                         System.out.println("[DexSpiderLoader] 命中按壳 md5 缓存的载荷: " + payloadJar.getName());
+                        // 载荷命中时壳 jar 不会走到下面分支，这里按确定性文件名补记一次，
+                        // 让「表里没有的密文」仍能问壳。
+                        File shell = new File(cacheDir, md5(rawUrl) + ".jar");
+                        if (shell.isFile()) GuardCryptoService.rememberShellJar(shell);
                         return payloadJar;
                     }
                 }
@@ -672,6 +890,7 @@ public class DexSpiderLoader {
                 if (cachedFile.exists() && cachedFile.length() > 0) {
                     if (expectedMd5.isEmpty() || md5File(cachedFile).equalsIgnoreCase(expectedMd5)) {
                         // 壳已缓存但载荷还没解出来（老版本遗留 / 上次解密失败）→ 就地补解
+                        GuardCryptoService.rememberShellJar(cachedFile);
                         File provisioned = GuardPayloadProvisioner.ensure(cacheDir, cachedFile, expectedMd5, rawUrl);
                         if (provisioned != null) return provisioned;
                         return cachedFile;
@@ -700,6 +919,7 @@ public class DexSpiderLoader {
                     return null;
                 }
                 // 下载完才发现是加固壳：就地自动解密出载荷（首次约 10 s，之后按壳 md5 复用）
+                GuardCryptoService.rememberShellJar(cachedFile);
                 File provisioned = GuardPayloadProvisioner.ensure(cacheDir, cachedFile, expectedMd5, rawUrl);
                 if (provisioned != null) return provisioned;
                 return cachedFile;

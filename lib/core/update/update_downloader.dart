@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 
 import '../config/windows_config_storage.dart';
 import 'update_manifest.dart';
+import 'update_mirrors.dart';
 
 enum DownloadFailure {
   insecure,
@@ -30,9 +31,32 @@ class DownloadResult {
   final DownloadFailure? failure;
   final String? message;
 
-  const DownloadResult({this.path, this.sha256, this.failure, this.message});
+  /// 实际使用的源标签（`直连 github.com` / `镜像 gh-proxy.com`）。
+  /// 全部候选都失败时是最后一次尝试的源。
+  final String? sourceLabel;
+
+  /// 实际使用的镜像 id；直连时为 null。
+  final String? mirrorId;
+
+  const DownloadResult({
+    this.path,
+    this.sha256,
+    this.failure,
+    this.message,
+    this.sourceLabel,
+    this.mirrorId,
+  });
 
   bool get ok => failure == null && path != null;
+
+  DownloadResult withSource(DownloadCandidate candidate) => DownloadResult(
+        path: path,
+        sha256: sha256,
+        failure: failure,
+        message: message,
+        sourceLabel: candidate.label,
+        mirrorId: candidate.mirrorId,
+      );
 }
 
 /// 下载安装包：断点续传 → 计算 SHA-256 → 校验通过才交出路径。
@@ -40,7 +64,8 @@ class DownloadResult {
 /// 安全约束：
 /// - 只下载 https 资产；
 /// - 没有可校验摘要时**直接失败**，绝不交出未校验文件；
-/// - 落盘路径由本地拼装（`updates/<tag>/<basename>`），不接受远端给出的路径。
+/// - 落盘路径由本地拼装（`updates/<tag>/<basename>`），不接受远端给出的路径；
+/// - 可经内置镜像下载，但**换源不降级校验**：镜像下完摘要不符时删文件并换下一个源。
 class UpdateDownloader {
   final Dio _dio;
   final bool _ownsDio;
@@ -68,13 +93,8 @@ class UpdateDownloader {
     required CancelToken cancelToken,
     required void Function(int received, int total) onProgress,
     void Function()? onVerifying,
+    List<DownloadCandidate>? candidates,
   }) async {
-    if (!asset.isHttps) {
-      return const DownloadResult(
-        failure: DownloadFailure.insecure,
-        message: '安装包地址不是 https，已取消下载',
-      );
-    }
     final fileName = _safeSegment(p.basename(asset.name));
     if (fileName.isEmpty) {
       return const DownloadResult(
@@ -83,8 +103,21 @@ class UpdateDownloader {
       );
     }
 
+    final list = _usableCandidates(asset, candidates);
+    if (list.isEmpty) {
+      return const DownloadResult(
+        failure: DownloadFailure.insecure,
+        message: '安装包地址不是 https，已取消下载',
+      );
+    }
+
     final expected = asset.sha256 ??
-        await _checksumFromManifest(manifest, asset.name, cancelToken);
+        await _checksumFromManifest(
+          manifest,
+          asset.name,
+          cancelToken,
+          useMirror: list.any((c) => c.viaMirror),
+        );
     if (expected == null) {
       return const DownloadResult(
         failure: DownloadFailure.checksumMissing,
@@ -114,6 +147,58 @@ class UpdateDownloader {
     final target = File(p.join(directory.path, fileName));
     final part = File('${target.path}.part');
 
+    DownloadResult? last;
+    for (final candidate in list) {
+      final outcome = await _downloadFrom(
+        candidate: candidate,
+        asset: asset,
+        expected: expected,
+        part: part,
+        target: target,
+        cancelToken: cancelToken,
+        onProgress: onProgress,
+        onVerifying: onVerifying,
+      );
+      if (outcome.ok) return outcome.withSource(candidate);
+      // 与源无关的终态失败：换源没有意义，直接返回
+      if (outcome.failure == DownloadFailure.cancelled ||
+          outcome.failure == DownloadFailure.diskFull ||
+          outcome.failure == DownloadFailure.writeFailed) {
+        return outcome.withSource(candidate);
+      }
+      last = outcome.withSource(candidate);
+    }
+    return last ??
+        const DownloadResult(
+          failure: DownloadFailure.network,
+          message: '下载失败，请重试',
+        );
+  }
+
+  /// 只保留 https 候选；未显式给出候选时退回资产自身地址。
+  static List<DownloadCandidate> _usableCandidates(
+    UpdateAsset asset,
+    List<DownloadCandidate>? provided,
+  ) {
+    final raw = provided == null || provided.isEmpty
+        ? [DownloadCandidate(url: asset.url, label: '直连')]
+        : provided;
+    return raw
+        .where((c) => Uri.tryParse(c.url)?.scheme == 'https')
+        .toList(growable: false);
+  }
+
+  /// 从单个候选源下载并校验；跨源共用同一个 `.part`，实现续传。
+  Future<DownloadResult> _downloadFrom({
+    required DownloadCandidate candidate,
+    required UpdateAsset asset,
+    required String expected,
+    required File part,
+    required File target,
+    required CancelToken cancelToken,
+    required void Function(int received, int total) onProgress,
+    void Function()? onVerifying,
+  }) async {
     // 上一轮已经下完（或已改名为正式文件）但状态丢失：先校验，命中即完成
     if (!await part.exists() && await target.exists()) {
       final existing = await sha256OfFile(target);
@@ -137,6 +222,7 @@ class UpdateDownloader {
 
     for (var attempt = 0; attempt < 2; attempt++) {
       final (failure, restart) = await _transfer(
+        url: candidate.url,
         asset: asset,
         part: part,
         start: start,
@@ -175,6 +261,7 @@ class UpdateDownloader {
 
   /// 返回 `(失败, 需要从头重下)`：失败为 null 且 restart=false 表示传输完成。
   Future<(DownloadResult?, bool)> _transfer({
+    required String url,
     required UpdateAsset asset,
     required File part,
     required int start,
@@ -184,7 +271,7 @@ class UpdateDownloader {
     Response<ResponseBody> response;
     try {
       response = await _dio.get<ResponseBody>(
-        asset.url,
+        url,
         options: Options(
           responseType: ResponseType.stream,
           validateStatus: (_) => true,
@@ -297,16 +384,38 @@ class UpdateDownloader {
   }
 
   /// 从同源 `SHA256SUMS` 里取目标文件的摘要；没有则返回 null。
+  ///
+  /// 资产直连不可达时，`SHA256SUMS` 同样可能拿不到，因此允许经镜像再试一次。
   Future<String?> _checksumFromManifest(
     UpdateManifest manifest,
     String assetName,
-    CancelToken cancelToken,
-  ) async {
+    CancelToken cancelToken, {
+    bool useMirror = false,
+  }) async {
     final sums = manifest.checksums;
     if (sums == null || !sums.isHttps) return null;
+    final urls = <String>[sums.url];
+    if (useMirror) {
+      for (final mirror in kBuiltinMirrors) {
+        final resolved = mirror.resolve(sums.url);
+        if (resolved != null && !urls.contains(resolved)) urls.add(resolved);
+      }
+    }
+    for (final url in urls) {
+      final digest = await _readSums(url, assetName, cancelToken);
+      if (digest != null) return digest;
+    }
+    return null;
+  }
+
+  Future<String?> _readSums(
+    String url,
+    String assetName,
+    CancelToken cancelToken,
+  ) async {
     try {
       final response = await _dio.get<String>(
-        sums.url,
+        url,
         options: Options(
           responseType: ResponseType.plain,
           validateStatus: (_) => true,

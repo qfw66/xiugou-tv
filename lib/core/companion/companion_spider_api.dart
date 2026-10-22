@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../api/models/vod_models.dart';
+import '../api/search_cancel_token.dart';
 import '../config/models/vod_config.dart';
 import 'companion_process_manager.dart';
 import 'site_self_check_report.dart';
@@ -176,7 +177,10 @@ class CompanionSpiderApi {
 
   /// 搜索视频
   Future<VodPageResult> search(Site site,
-      {required String keyword, int page = 1, bool quick = false}) async {
+      {required String keyword,
+      int page = 1,
+      bool quick = false,
+      SearchCancelToken? cancelToken}) async {
     final rawJson = await _callSpider(
       site: site,
       method: 'searchContent',
@@ -185,6 +189,7 @@ class CompanionSpiderApi {
         'quick': quick.toString(),
         'pg': page.toString(),
       },
+      cancelToken: cancelToken,
     );
     return _parseVodPageResult(rawJson, site: site);
   }
@@ -246,9 +251,15 @@ class CompanionSpiderApi {
     required Site site,
     required String method,
     required Map<String, String> params,
+    SearchCancelToken? cancelToken,
   }) async {
     if (!processManager.isRunning) return '';
+    if (cancelToken?.isCancelled ?? false) return '';
     processManager.notifyActivity();
+
+    // 点叉后立即放弃这次 RPC：Dio 中止连接，Dart 侧不再等满 20 秒。
+    final dioCancelToken = CancelToken();
+    cancelToken?.onCancel(() => dioCancelToken.cancel('搜索已取消'));
 
     try {
       final reqBody = {
@@ -263,6 +274,7 @@ class CompanionSpiderApi {
       final res = await _dio.post<dynamic>(
         '${processManager.baseUrl}/spider/call',
         data: reqBody,
+        cancelToken: dioCancelToken,
       );
 
       if (res.statusCode == 200) {

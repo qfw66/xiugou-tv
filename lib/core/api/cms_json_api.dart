@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import '../config/models/vod_config.dart';
 import '../net/ascii_url.dart';
 import 'models/vod_models.dart';
+import 'search_cancel_token.dart';
 
 /// 标准 CMS (AppleCMS / MacCMS / XML / JSON / Direct) 站点数据接口客户端
 class CmsJsonApi {
@@ -87,6 +88,7 @@ class CmsJsonApi {
     Map<String, dynamic>? queryParams,
     Map<String, dynamic>? headers,
     String? logTag,
+    CancelToken? cancelToken,
   }) async {
     final tag = logTag ?? 'SiteApi::Http';
     final qStr = queryParams != null && queryParams.isNotEmpty
@@ -103,6 +105,7 @@ class CmsJsonApi {
       final response = await _dio.get<dynamic>(
         AsciiUrl.toAsciiHost(url),
         queryParameters: queryParams,
+        cancelToken: cancelToken,
         options: Options(
           headers: headers,
           responseType: ResponseType.plain,
@@ -392,11 +395,17 @@ class CmsJsonApi {
     String keyword, {
     int page = 1,
     Site? site,
+    SearchCancelToken? cancelToken,
   }) async {
     final siteName = site?.name ?? '未知站源';
     final siteType = site?.type ?? 0;
     final query = keyword.trim();
     if (query.isEmpty) return const VodPageResult.empty();
+
+    // 把「用户取消」桥接成 Dio 的中止信号：点叉后在途 HTTP 立即断掉，
+    // 不再白跑完 20 秒超时（§18）。
+    final dioCancelToken = CancelToken();
+    cancelToken?.onCancel(() => dioCancelToken.cancel('搜索已取消'));
 
     final effectiveEndpoint = _resolveHttpEndpoint(apiEndpoint, site);
     if (effectiveEndpoint == null) {
@@ -422,9 +431,15 @@ class CmsJsonApi {
         queryParams: queryParams,
         headers: _buildHeaders(site),
         logTag: 'SiteApi::search',
+        cancelToken: dioCancelToken,
       );
 
       var result = _parseContent(raw, type: siteType, site: site);
+
+      // 用户已取消：不再跑后续 fallback（那是纯浪费）
+      if (cancelToken?.isCancelled ?? false) {
+        return const VodPageResult.empty();
+      }
 
       // 策略 2 fallback (TVBox 标准): 如果直接 wd 检索为空，尝试带 ac 参数 (ac=detail 或 ac=videolist)
       if (result.list.isEmpty) {
@@ -442,8 +457,14 @@ class CmsJsonApi {
           queryParams: params2,
           headers: _buildHeaders(site),
           logTag: 'SiteApi::search',
+          cancelToken: dioCancelToken,
         );
         result = _parseContent(raw, type: siteType, site: site);
+      }
+
+      // 策略 2 结束后用户已取消：不再发策略 3。
+      if (cancelToken?.isCancelled ?? false) {
+        return const VodPageResult.empty();
       }
 
       // 策略 3 fallback: 如果仍为空且为 JSON，尝试 ac=videolist
@@ -462,14 +483,22 @@ class CmsJsonApi {
           queryParams: params3,
           headers: _buildHeaders(site),
           logTag: 'SiteApi::search',
+          cancelToken: dioCancelToken,
         );
         result = _parseContent(raw, type: siteType, site: site);
       }
 
       // 如果搜索结果中没有封面图，自动触发 fetchPic 批量补齐海报 (同 TVBox SiteApi.fetchPic)
-      if (result.list.isNotEmpty && result.list.any((item) => item.pic.isEmpty)) {
+      if (result.list.isNotEmpty &&
+          result.list.any((item) => item.pic.isEmpty) &&
+          !(cancelToken?.isCancelled ?? false)) {
         _log('SiteApi::search', '--> 检索结果存在缺少海报的条目，正在执行 fetchPic 补全海报...');
-        result = await _fetchPicFallback(effectiveEndpoint, result, site: site);
+        result = await _fetchPicFallback(effectiveEndpoint, result,
+            site: site, cancelToken: dioCancelToken);
+      }
+
+      if (cancelToken?.isCancelled ?? false) {
+        return const VodPageResult.empty();
       }
 
       _log('SiteApi::search', '<-- [$siteName] 搜索完成: 获得 ${result.list.length} 条结果');
@@ -479,13 +508,18 @@ class CmsJsonApi {
       }
       return result;
     } catch (e) {
+      // 取消导致的异常不必当成失败刷日志
+      if (cancelToken?.isCancelled ?? false) {
+        return const VodPageResult.empty();
+      }
       _log('SiteApi::search', '<-- [$siteName] 搜索发生异常: $e');
       return const VodPageResult.empty();
     }
   }
 
   /// 补全搜索结果海报图片 (同 TVBox 原版 SiteApi.fetchPic)
-  Future<VodPageResult> _fetchPicFallback(String apiEndpoint, VodPageResult result, {Site? site}) async {
+  Future<VodPageResult> _fetchPicFallback(String apiEndpoint, VodPageResult result,
+      {Site? site, CancelToken? cancelToken}) async {
     try {
       final needPicItems = result.list.where((i) => i.pic.isEmpty).toList();
       if (needPicItems.isEmpty) return result;
@@ -499,6 +533,7 @@ class CmsJsonApi {
         },
         headers: _buildHeaders(site),
         logTag: 'SiteApi::fetchPic',
+        cancelToken: cancelToken,
       );
 
       final detailResult = _parseContent(raw, type: site?.type ?? 1, site: site);

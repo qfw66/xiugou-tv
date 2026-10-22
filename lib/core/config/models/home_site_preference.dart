@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import 'config_snapshot.dart';
+import 'builtin_sites.dart';
 import 'vod_config.dart';
 
 /// 首页默认站源的稳定引用；名称只用于失效提示，不参与匹配。
@@ -81,6 +82,8 @@ class HomeSitePreference {
   /// 只判断是否存在已接入的请求路径，不承诺远端或扩展运行成功。
   static bool canSelect(Site site) {
     if (site.key.trim().isEmpty) return false;
+    // 内置虚拟站自带数据层（§17），不依赖配置里的请求端点
+    if (isBuiltinSite(site)) return true;
     if (site.usesCompanion && site.api.trim().isNotEmpty) return true;
     bool isHttp(String value) {
       final uri = Uri.tryParse(value.trim());

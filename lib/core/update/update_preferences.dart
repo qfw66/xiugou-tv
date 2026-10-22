@@ -3,7 +3,7 @@ import 'app_version.dart';
 /// 更新偏好（持久化于数据目录的 `update_preferences.json`，version 1）。
 ///
 /// 读取规则与其余设置项一致：版本 / 顶层结构非法视为损坏并抛出 [FormatException]
-/// （调用方保留原文件并提示），单字段类型非法同样按损坏处理——这里只有三个字段，
+/// （调用方保留原文件并提示），单字段类型非法同样按损坏处理——这里只有四个字段，
 /// 没有「丢一条不拖垮全文件」的场景。
 class UpdatePreferences {
   static const int formatVersion = 1;
@@ -17,10 +17,15 @@ class UpdatePreferences {
   /// 已跳过的版本（原始 tag，如 `v1.2.0`；null = 未跳过）。
   final String? skippedVersion;
 
+  /// 使用内置镜像（`gh-proxy.com`）作为兜底：清单在官方失败时回落，下载按
+  /// 「上次成功源 → 官方 → 镜像」尝试。默认开启。
+  final bool useMirror;
+
   const UpdatePreferences({
     this.autoCheck = true,
     this.source = '',
     this.skippedVersion,
+    this.useMirror = true,
   });
 
   static const UpdatePreferences defaults = UpdatePreferences();
@@ -51,6 +56,7 @@ class UpdatePreferences {
     bool? autoCheck,
     String? source,
     String? skippedVersion,
+    bool? useMirror,
     bool clearSkipped = false,
   }) =>
       UpdatePreferences(
@@ -58,6 +64,7 @@ class UpdatePreferences {
         source: source ?? this.source,
         skippedVersion:
             clearSkipped ? null : (skippedVersion ?? this.skippedVersion),
+        useMirror: useMirror ?? this.useMirror,
       );
 
   static UpdatePreferences fromJson(Map<String, dynamic> json) {
@@ -76,6 +83,10 @@ class UpdatePreferences {
     if (rawSkipped != null && rawSkipped is! String) {
       throw const FormatException('更新偏好格式无效');
     }
+    final rawUseMirror = json['useMirror'];
+    if (rawUseMirror != null && rawUseMirror is! bool) {
+      throw const FormatException('更新偏好格式无效');
+    }
     final source = (rawSource as String? ?? '').trim();
     if (!isValidSource(source)) {
       throw const FormatException('更新偏好格式无效');
@@ -86,6 +97,7 @@ class UpdatePreferences {
       source: source,
       skippedVersion:
           (skippedText == null || skippedText.isEmpty) ? null : skippedText,
+      useMirror: rawUseMirror as bool? ?? true,
     );
   }
 
@@ -94,6 +106,7 @@ class UpdatePreferences {
         'autoCheck': autoCheck,
         'source': source,
         'skippedVersion': skippedVersion,
+        'useMirror': useMirror,
       };
 
   @override
@@ -101,13 +114,14 @@ class UpdatePreferences {
       other is UpdatePreferences &&
       other.autoCheck == autoCheck &&
       other.source == source &&
-      other.skippedVersion == skippedVersion;
+      other.skippedVersion == skippedVersion &&
+      other.useMirror == useMirror;
 
   @override
-  int get hashCode => Object.hash(autoCheck, source, skippedVersion);
+  int get hashCode => Object.hash(autoCheck, source, skippedVersion, useMirror);
 
   @override
   String toString() =>
       'UpdatePreferences(autoCheck: $autoCheck, source: $source, '
-      'skippedVersion: $skippedVersion)';
+      'skippedVersion: $skippedVersion, useMirror: $useMirror)';
 }

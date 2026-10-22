@@ -5,12 +5,15 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/api/cms_json_api.dart';
+import 'core/api/douban_repository.dart';
 import 'core/api/models/vod_models.dart';
 import 'core/api/parse_engine.dart';
+import 'core/api/search_cancel_token.dart';
 import 'core/api/search_engine.dart';
 import 'core/app_info.dart';
 import 'core/api/site_api.dart';
 import 'core/config/config_repository.dart';
+import 'core/config/models/builtin_sites.dart';
 import 'core/config/models/history_record.dart';
 import 'core/config/models/home_site_preference.dart';
 import 'core/config/models/vod_config.dart';
@@ -21,6 +24,7 @@ import 'core/player/models/player_settings.dart';
 import 'core/player/models/player_state.dart';
 import 'core/player/mpv_player_engine.dart';
 import 'core/player/playback_history_tracker.dart';
+import 'core/player/playback_intent.dart';
 import 'core/player/auto_line_switch_controller.dart';
 import 'core/player/line_switch_planner.dart';
 import 'core/player/player_data_reset.dart';
@@ -40,10 +44,12 @@ import 'core/update/update_preferences.dart';
 import 'core/update/update_preferences_notifier.dart';
 import 'core/update/update_preferences_store.dart';
 import 'core/update/update_service.dart';
+import 'ui/desktop/catalog/douban_poster_image.dart';
 import 'ui/desktop/catalog/vod_detail_dialog.dart';
 import 'ui/desktop/catalog/vod_grid_view.dart';
 import 'ui/desktop/catalog/vod_grid_skeleton.dart';
 import 'ui/desktop/catalog/vod_list_view.dart';
+import 'ui/desktop/home/netflix_home_view.dart';
 import 'ui/desktop/catalog/search_site_groups.dart';
 import 'ui/desktop/dialogs/depot_selection_dialog.dart';
 import 'ui/desktop/dialogs/favorites_dialog.dart';
@@ -55,10 +61,13 @@ import 'ui/desktop/dialogs/site_selector_dialog.dart';
 import 'ui/desktop/dialogs/update_dialog.dart';
 import 'ui/desktop/dialogs/update_source_dialog.dart';
 import 'ui/desktop/player/desktop_video_player.dart';
+import 'ui/desktop/player/episode_drawer.dart';
 import 'ui/desktop/settings/about_update_section.dart';
 import 'ui/desktop/settings/settings_page.dart';
+import 'ui/desktop/shell/desktop_sidebar.dart';
 import 'ui/desktop/widgets/app_message.dart';
 import 'ui/desktop/widgets/desktop_window_frame.dart';
+import 'ui/desktop/widgets/home_search_bar_host.dart';
 import 'ui/desktop/window/desktop_window_manager.dart';
 import 'ui/theme/app_palette.dart';
 import 'ui/desktop/widgets/focus_ring.dart';
@@ -179,6 +188,10 @@ final siteApiProvider = Provider<SiteApi>((ref) => SiteApi(
 final parseEngineProvider = Provider<ParseEngine>((ref) => ParseEngine());
 final searchEngineProvider = Provider<SearchEngine>(
     (ref) => SearchEngine(siteApi: ref.watch(siteApiProvider)));
+
+/// 豆瓣「热播」数据源（§17）：内存缓存 8 分钟，失败不缓存。
+final doubanRepositoryProvider =
+    Provider<DoubanRepository>((ref) => DoubanRepository());
 
 final liveRepositoryProvider = Provider<LiveRepository>((ref) {
   final repository = LiveRepository();
@@ -367,9 +380,92 @@ final favoritesProvider =
 
 final activePlaySpecProvider = StateProvider<MediaPlaySpec?>((ref) => null);
 
+/// §16 起播准备态：非空时立刻把播放页亮出来（解析仍在原链路里跑）。
+///
+/// 只用它决定「播放页是否出现」与「页内骨架/失败面板显示什么」，
+/// 不参与会话、换线与历史——那些仍由 `activePlaySpec` / `PlaybackSession` 负责。
+final playbackIntentProvider = StateProvider<PlaybackIntent?>((ref) => null);
+
+/// 最近一次「点选集」的入参，供准备态「重试」复用（只存数据，不存闭包）。
+final pendingPlayProvider =
+    StateProvider<({VodItem item, EpisodeSelection selection, Site? site})?>(
+        (ref) => null);
+
+/// 准备态的作废计数：每次发起/取消都自增，迟到的解析结果直接丢弃。
+int _playPreparationEpoch = 0;
+
+/// §16 带准备态的起播：立意图 → 播放页先出现 → 解析 → 成功接管 / 失败留在页内。
+///
+/// 顶层函数（而非某个 State 的方法）是因为「播放页」与「详情/选集弹窗」分属两个类，
+/// 两边都要能触发同一套逻辑。
+Future<void> startEpisodePlaybackWithIntent(
+  WidgetRef ref,
+  VodItem item,
+  EpisodeSelection selection, {
+  Site? targetSite,
+}) async {
+  final epoch = ++_playPreparationEpoch;
+  final episode = selection.episodes[selection.index];
+  final intent = PlaybackIntent(
+    title: item.name,
+    subtitle: '${episode.name} · ${selection.sourceName}',
+    cover: item.pic,
+  );
+  ref.read(pendingPlayProvider.notifier).state =
+      (item: item, selection: selection, site: targetSite);
+  ref.read(playbackIntentProvider.notifier).state = intent;
+
+  final result = await () async {
+    try {
+      return await _startEpisodePlayback(
+        ref,
+        item: item,
+        sourceName: selection.sourceName,
+        episodes: selection.episodes,
+        index: selection.index,
+        targetSite: targetSite,
+        sources: selection.sources,
+        sourceIndex: selection.sourceIndex,
+      );
+    } catch (error) {
+      // 骨架不能永远转：异常也收敛成失败态（可重试）。
+      return (error: '播放解析异常：$error', resumeMatch: null);
+    }
+  }();
+  // 期间用户点了「返回」或又发起新一次播放：本次结果作废。
+  if (epoch != _playPreparationEpoch) return;
+  if (result.error != null) {
+    // 留在播放页：失败态可重试，不再弹回列表。
+    ref.read(playbackIntentProvider.notifier).state = intent.copyWith(
+      status: PlaybackPrepareStatus.failed,
+      error: result.error,
+    );
+    return;
+  }
+  // 成功：真实播放规格已就位，撤掉准备态。
+  ref.read(playbackIntentProvider.notifier).state = null;
+  ref.read(pendingPlayProvider.notifier).state = null;
+  _showResumeHint(ref, result.resumeMatch);
+}
+
+/// 准备态「重试」：用同一份待播数据再跑一次。
+Future<void> retryPlayPreparation(WidgetRef ref) async {
+  final pending = ref.read(pendingPlayProvider);
+  if (pending == null) return;
+  await startEpisodePlaybackWithIntent(ref, pending.item, pending.selection,
+      targetSite: pending.site);
+}
+
+/// 准备态「返回」：作废在途结果并回到列表。
+void cancelPlayPreparation(WidgetRef ref) {
+  _playPreparationEpoch++;
+  ref.read(pendingPlayProvider.notifier).state = null;
+  ref.read(playbackIntentProvider.notifier).state = null;
+}
+
 /// 播放会话（点播剧集上下文，仅内存）：供播放器内「上一集 / 下一集」使用。
 ///
-/// 只在详情页选集播放时建立；直播 / 推送直链 / 历史续播 / 单集播放不建立会话。
+/// 详情页选集、播放内切集、历史续播都会建立；直播 / 推送直链不建立会话。
 class PlaybackSession {
   final VodItem item;
   final String sourceName;
@@ -384,7 +480,16 @@ class PlaybackSession {
   final int sourceIndex;
 
   /// 已尝试过的线路键（`lineSwitchKey`）；每个会话只增不减。
+  ///
+  /// 语义是「用过」（含当前线路、含手动切换成功的线路），**不是「失败」**；
+  /// 只服务自动换线候选过滤，不能拿来判断 UI 是否可点。
   final Set<String> triedLines;
+
+  /// 本会话里**确认失败**的线路键（解析为空 / 启动抛错）；切集时清空。
+  ///
+  /// 抽屉与线路面板的「不可点」只认这个集合：否则从 A 切到 B 后，
+  /// A 因为「已试过」被永久禁用，用户再也换不回来。
+  final Set<String> failedLines;
 
   /// 切换进行中：两个切集按钮一并禁用，防止重复触发。
   final bool switching;
@@ -398,6 +503,7 @@ class PlaybackSession {
     this.sources = const [],
     this.sourceIndex = 0,
     this.triedLines = const {},
+    this.failedLines = const {},
     this.switching = false,
   });
 
@@ -413,6 +519,7 @@ class PlaybackSession {
     List<PlayFrom>? sources,
     int? sourceIndex,
     Set<String>? triedLines,
+    Set<String>? failedLines,
   }) =>
       PlaybackSession(
         item: item,
@@ -423,12 +530,34 @@ class PlaybackSession {
         sources: sources ?? this.sources,
         sourceIndex: sourceIndex ?? this.sourceIndex,
         triedLines: triedLines ?? this.triedLines,
+        failedLines: failedLines ?? this.failedLines,
         switching: switching ?? this.switching,
       );
 }
 
 final activePlaybackSessionProvider =
     StateProvider<PlaybackSession?>((ref) => null);
+
+/// §15 详情弹窗「当前集」：仅同站同片且有播放会话时返回快照，否则 `null`。
+///
+/// 只看会话、不看 `activePlaySpec`：关闭播放器会先清空规格，随后才恢复详情弹窗，
+/// 用规格会把「播放中返回选集」这条主路径判成没有当前集。
+CurrentEpisode? currentEpisodeForDetail({
+  required PlaybackSession? session,
+  required String vodId,
+  required String? siteKey,
+}) {
+  if (session == null) return null;
+  if (session.item.id != vodId) return null;
+  if (session.site?.key != siteKey) return null;
+  final index = session.index;
+  if (index < 0 || index >= session.episodes.length) return null;
+  return CurrentEpisode(
+    sourceName: session.sourceName,
+    index: index,
+    episodeName: session.episodes[index].name,
+  );
+}
 
 /// 片头 / 片尾偏好（响应式）：播放器按钮回显与设置页共用同一来源。
 final playSkipPreferencesProvider = StreamProvider<PlaySkipPreferences>((ref) {
@@ -709,6 +838,7 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})>
   ];
 
   final epoch = _playbackSessionEpoch;
+  final failed = <String>{};
   for (final candidate in attempts) {
     if (epoch != _playbackSessionEpoch) {
       return (error: null, resumeMatch: null);
@@ -721,7 +851,10 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})>
       episodeUrl: candidate.episode.url,
       timeout: attempts.length > 1 ? const Duration(seconds: 20) : null,
     );
-    if (resolved == null) continue;
+    if (resolved == null) {
+      failed.add(candidate.key);
+      continue;
+    }
     if (epoch != _playbackSessionEpoch) {
       return (error: null, resumeMatch: null);
     }
@@ -743,6 +876,7 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})>
         isStale: () => epoch != _playbackSessionEpoch,
       );
     } catch (_) {
+      failed.add(candidate.key);
       continue;
     }
     if (epoch != _playbackSessionEpoch) {
@@ -760,6 +894,7 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})>
       sources: allSources,
       sourceIndex: candidate.sourceIndex,
       triedLines: Set.unmodifiable(tried),
+      failedLines: Set.unmodifiable(failed),
     );
     ref.read(activePlaybackSessionProvider.notifier).state = session;
     ref.read(autoLineSwitchProvider).arm(
@@ -838,6 +973,18 @@ Future<void> _restartCurrentFromStart(WidgetRef ref) async {
   }
 }
 
+/// 记录 / 清除「线路确认失败」标记：只影响抽屉与线路面板的可点态，
+/// 不参与自动换线的候选过滤（那套仍用 `triedLines`）。
+void _markLineFailed(Ref ref, String key, {bool failed = true}) {
+  final session = ref.read(activePlaybackSessionProvider);
+  if (session == null) return;
+  final next = {...session.failedLines};
+  final changed = failed ? next.add(key) : next.remove(key);
+  if (!changed) return;
+  ref.read(activePlaybackSessionProvider.notifier).state =
+      session.copyWith(failedLines: Set.unmodifiable(next));
+}
+
 /// 自动换线实际执行：解析候选线路 → 启动 → 保留位置与历史记录 → 更新会话。
 ///
 /// 返回 true 表示已成功切换；false 表示该候选不可用 / 已作废。
@@ -869,7 +1016,11 @@ Future<bool> _autoSwitchToLine(
           parseEngine: ref.read(parseEngineProvider),
         )
         .timeout(const Duration(seconds: 20));
-    if (resolved.url.isEmpty || epoch != _playbackSessionEpoch) return false;
+    if (resolved.url.isEmpty) {
+      _markLineFailed(ref, candidate.key);
+      return false;
+    }
+    if (epoch != _playbackSessionEpoch) return false;
 
     final spec = MediaPlaySpec(
       url: resolved.url,
@@ -888,6 +1039,7 @@ Future<bool> _autoSwitchToLine(
       await engine.play(spec);
     } catch (_) {
       tracker.track(recordId, flushPrevious: false);
+      _markLineFailed(ref, candidate.key);
       return false;
     }
     if (epoch != _playbackSessionEpoch) {
@@ -928,6 +1080,11 @@ Future<bool> _autoSwitchToLine(
         episodes: candidate.source.episodes,
         index: candidate.episodeIndex,
         triedLines: {...current.triedLines, candidate.key},
+        // 切换成功：该线路不再算失败（失败可能只是暂时性）。
+        failedLines: {
+          for (final key in current.failedLines)
+            if (key != candidate.key) key,
+        },
       );
     }
     ref.read(lineSwitchNoticeProvider.notifier).state =
@@ -1051,6 +1208,7 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})> _switchEpisode(
       index: targetIndex,
       switching: false,
       triedLines: resetTried,
+      failedLines: const {},
     );
     ref.read(autoLineSwitchProvider).arm(
           sources: latest.sources,
@@ -1428,6 +1586,45 @@ PlayerEpisodeNav? _buildEpisodeNav(
   );
 }
 
+/// §20 播放页右侧选集抽屉：由播放会话装配（集列表 + 线路胶囊）。
+///
+/// 只在多集会话里出现；线路切换沿用 SET-12 的手动换线（保留当前集与位置），
+/// 抽屉不关闭、列表随会话更新。
+PlayerEpisodeListNav? _buildEpisodeListNav(
+    WidgetRef ref, PlaybackSession? session, BuildContext playerContext,
+    {bool busy = false}) {
+  if (session == null || session.episodes.length <= 1) return null;
+  final episodes = <PlayerEpisodeOption>[
+    for (var i = 0; i < session.episodes.length; i++)
+      PlayerEpisodeOption(
+        index: i,
+        name: session.episodes[i].name,
+        current: i == session.index,
+      ),
+  ];
+  final lines = <PlayerLineChoice>[
+    if (session.sources.length > 1)
+      for (var i = 0; i < session.sources.length; i++)
+        PlayerLineChoice(
+          index: i,
+          name: session.sources[i].name,
+          current: i == session.sourceIndex,
+          unavailable: session.failedLines
+              .contains(lineSwitchKey(i, session.sources[i].name)),
+        ),
+  ];
+  return PlayerEpisodeListNav(
+    episodes: episodes,
+    lines: lines,
+    lineName: session.sourceName,
+    switching: session.switching || busy,
+    onSelectEpisode: (index) =>
+        unawaited(_handleEpisodeSwitch(playerContext, ref, index)),
+    onSelectLine: (index) =>
+        unawaited(ref.read(manualLineSwitchProvider)(session, index)),
+  );
+}
+
 /// 播放器内线路视图模型（SET-12 重做）：只列「本片这一集确实存在」的线路。
 ///
 /// 当前线路打勾、已失败灰显、缺集线路不出现；只剩当前线路时不显示整个分组。
@@ -1443,7 +1640,7 @@ PlayerLineNav? _buildLineNav(WidgetRef ref, PlaybackSession? session,
       index: i,
       name: source.name,
       current: i == session.sourceIndex,
-      tried: session.triedLines.contains(lineSwitchKey(i, source.name)),
+      unavailable: session.failedLines.contains(lineSwitchKey(i, source.name)),
     ));
   }
   if (options.length <= 1) return null;
@@ -1530,7 +1727,8 @@ void showSiteSelectorDialog(BuildContext context, WidgetRef ref) {
   showDialog<void>(
     context: context,
     builder: (_) => SiteSelectorDialog(
-      sites: config.sites,
+      // 内置虚拟站排首位：选中即首页切到豆瓣热播（§17）
+      sites: <Site>[builtinDoubanSite, ...config.sites],
       currentSite: currentSite,
       onSiteSelected: (site) {
         repo.selectSite(site);
@@ -1962,6 +2160,8 @@ class AboutUpdateSectionHost extends ConsumerWidget {
       onEditSource: () => unawaited(showUpdateSourceDialog(context)),
       onAutoCheckChanged: (value) => unawaited(
           ref.read(updatePreferencesProvider.notifier).setAutoCheck(value)),
+      onUseMirrorChanged: (value) => unawaited(
+          ref.read(updatePreferencesProvider.notifier).setUseMirror(value)),
       onClearSkipped: () => unawaited(controller.clearSkipped()),
       onOpenResult: () => unawaited(showUpdateDialog(context)),
     );
@@ -2046,6 +2246,7 @@ class XiugouTvApp extends ConsumerWidget {
     final activeSiteName = currentSite?.name;
     final activePlaySpec = ref.watch(activePlaySpecProvider);
     final liveEntryLoading = ref.watch(liveEntryLoadingProvider);
+    final prepareIntent = ref.watch(playbackIntentProvider);
     final activeSession = ref.watch(activePlaybackSessionProvider);
     // ⑤-2/⑤-3 直播运行态：仅直播播放时下发给抽屉层与切台快捷键
     final liveRuntime = ref.watch(liveRuntimeProvider);
@@ -2084,14 +2285,22 @@ class XiugouTvApp extends ConsumerWidget {
       ),
       home: Builder(
         builder: (innerContext) => UpdateCheckHost(
-          child: DesktopWindowFrame(
-            windowManager: windowMgr,
-            activeSiteName: activeSiteName,
-            onSettingsPressed: () => openSettingsPage(ref),
-            onSiteSelectorPressed: () =>
-                showSiteSelectorDialog(innerContext, ref),
-            child: DesktopShell(
-              showPlayer: activePlaySpec != null || liveEntryLoading,
+          child: Builder(
+            builder: (ctx) {
+              final searchBridge = ref.watch(homeSearchBridgeProvider);
+              return DesktopWindowFrame(
+                windowManager: windowMgr,
+                activeSiteName: activeSiteName,
+                onSettingsPressed: () => openSettingsPage(ref),
+                onSiteSelectorPressed: () =>
+                    showSiteSelectorDialog(innerContext, ref),
+                searchBar: const HomeSearchBarHost(),
+                onRefresh: searchBridge.visible ? searchBridge.onRefresh : null,
+                refreshBusy: searchBridge.refreshBusy,
+                child: DesktopShell(
+              showPlayer: activePlaySpec != null ||
+                  liveEntryLoading ||
+                  prepareIntent != null,
               showSettings: showSettings,
               settingsView: showSettings
                   ? SettingsPage(
@@ -2121,7 +2330,9 @@ class XiugouTvApp extends ConsumerWidget {
                 store: ref.read(wallpaperStoreProvider),
                 child: const DesktopMainView(),
               ),
-              playerView: activePlaySpec == null && !liveEntryLoading
+              playerView: activePlaySpec == null &&
+                      !liveEntryLoading &&
+                      prepareIntent == null
                   ? null
                   : Stack(
                       fit: StackFit.expand,
@@ -2140,6 +2351,9 @@ class XiugouTvApp extends ConsumerWidget {
                                 episodeNav: _buildEpisodeNav(
                                     ref, activeSession, playerContext,
                                     refreshBusy: refreshBusy || autoSwitchBusy),
+                                episodeListNav: _buildEpisodeListNav(
+                                    ref, activeSession, playerContext,
+                                    busy: refreshBusy || autoSwitchBusy),
                                 lineNav: _buildLineNav(ref, activeSession,
                                     busy: refreshBusy || autoSwitchBusy),
                                 onLivePrev: liveChannels.isEmpty
@@ -2166,6 +2380,15 @@ class XiugouTvApp extends ConsumerWidget {
                                 ),
                                 skipNav: _buildSkipNav(ref, activeSession,
                                     playerContext, playSkipPreferences),
+                                // §16 起播准备态：解析期间页内骨架 / 失败可重试
+                                preparing: prepareIntent,
+                                onRetryPrepare: prepareIntent?.isFailed == true
+                                    ? () => unawaited(
+                                        retryPlayPreparation(ref))
+                                    : null,
+                                onCancelPrepare: prepareIntent == null
+                                    ? null
+                                    : () => cancelPlayPreparation(ref),
                                 replayNav: PlayerReplayNav(
                                   busy: refreshBusy ||
                                       autoSwitchBusy ||
@@ -2215,10 +2438,12 @@ class XiugouTvApp extends ConsumerWidget {
                         if (liveEntryLoading) const _LiveEntryLoadingOverlay(),
                       ],
                     ),
-            ),
-          ),
+                  ),
+                );
+          },
         ),
       ),
+    ),
     );
   }
 }
@@ -2447,6 +2672,9 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   final ScrollController _categoryScrollController = ScrollController();
   final ScrollController _searchSiteScrollController = ScrollController();
 
+  /// 海报网格的滚动控制器：豆瓣首页据此判断「内容有没有撑满一屏」（§19）
+  final ScrollController _gridScrollController = ScrollController();
+
   List<VodItem> _items = [];
   List<VodCategory> _categories = [];
   VodCategory? _selectedCategory;
@@ -2463,12 +2691,33 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   /// 聚合搜索进行中：结果边到边显示，结束前不显示「未找到」
   bool _searchPending = false;
   StreamSubscription<SearchBatch>? _searchSub;
+
+  /// 本次聚合搜索的取消令牌：点叉 / 换站 / 发起新搜索 / 销毁时取消，
+  /// 把「取消」一直传到站源请求，真正停掉在途 HTTP（§18）。
+  SearchCancelToken? _searchCancelToken;
   final Set<String> _searchSeenKeys = <String>{};
   int _searchCompleted = 0;
   int _searchTotal = 0;
 
   String? _loadedSiteIdentity;
   int _contentGeneration = 0;
+
+  /// 豆瓣首页每页条数（24 ≈ 宽窗口 3 行，滚动时再续）
+  static const int _doubanPageSize = 24;
+
+  /// 豆瓣首页分页游标（§19 无限滚动）
+  int _doubanNextStart = 0;
+  bool _doubanHasMore = false;
+  bool _doubanLoadingMore = false;
+
+  /// 当前正在翻页的豆瓣集合 id：换分类后旧页结果按它丢弃
+  String? _doubanCollection;
+
+  /// 豆瓣全分类数据池（用于仿 Netflix 首页各分类横滑画报流）
+  final Map<String, List<VodItem>> _doubanCategoryItems = {};
+
+  /// 是否在豆瓣虚拟站中处于单一分类网格查看态（点击横滑流中“查看全部”后）
+  bool _doubanViewingSingleCategory = false;
 
   /// 冷启动直播入口：在直播弹窗关闭前推迟主视图初始加载
   bool _startupLiveEntryPending = false;
@@ -2482,6 +2731,12 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   /// 从「详情/选集弹窗」起播时记住来源：退出播放器后要回到这个弹窗，而不是首页。
   VodDetail? _playbackOriginDetail;
   Site? _playbackOriginSite;
+  /// §15：最近一次播放会话的只读副本。
+  ///
+  /// 播放会话在 `onBack` 里会被清空（作废在途切换），而恢复详情弹窗要等下一帧、
+  /// 用户也可能从首页重新打开同一部片——两条路径都要知道「上次播到第几集」。
+  /// 副本只供详情弹窗判定当前集，不参与播放器逻辑。
+  PlaybackSession? _lastPlayedSession;
   bool _restoringDetailDialog = false;
 
   String? _currentSiteIdentity() {
@@ -2497,10 +2752,13 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       generation == _contentGeneration &&
       identity == _currentSiteIdentity();
 
-  /// 取消在途的增量搜索：停止接收后续批次并退出「搜索中」状态。
+  /// 取消在途的增量搜索：停止接收后续批次，并**取消站源请求**（否则用户点叉
+  /// 之后几十个站源仍会在后台跑完，纯属浪费——§18）。
   void _cancelSearchStream() {
     _searchSub?.cancel();
     _searchSub = null;
+    _searchCancelToken?.cancel();
+    _searchCancelToken = null;
     _searchPending = false;
   }
 
@@ -2540,24 +2798,209 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     });
     // 搜索框聚焦时高亮外框（B3）
     _searchFocusNode.addListener(_onSearchFocusChanged);
+    _syncSearchBridge();
+  }
+
+  void _syncSearchBridge() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final searchPrefs = ref.read(searchPreferencesProvider).valueOrNull ??
+          const SearchPreferences();
+      ref.read(homeSearchBridgeProvider.notifier).state = HomeSearchBridge(
+        searchController: _searchController,
+        searchFocusNode: _searchFocusNode,
+        isSearching: _isSearching,
+        searchBusy: _searchBusy,
+        isAggregate: searchPrefs.aggregate,
+        onSearch: _handleSearch,
+        onClear: _clearSearchToHome,
+        onRefresh: () => loadSiteData(
+          category: _selectedCategory,
+          preserveCategories: true,
+          forceRefresh: true,
+        ),
+        refreshBusy: _isLoading,
+        visible: true,
+      );
+    });
   }
 
   @override
   void dispose() {
+    // 刻意不在 dispose 里复位 homeSearchBridgeProvider：主视图在整个应用
+    // 生命周期内只会随 ProviderScope 一起销毁（播放页 / 设置页都是 Offstage，
+    // 不卸载它），那一刻标题栏也不在了；而在 dispose 之后再碰 ref 会抛
+    // `Cannot use "ref" after the widget was disposed`（旧实现用 post-frame
+    // 复位正好踩中）。新实例挂载时 initState → _syncSearchBridge 会覆盖旧值。
     _cancelSearchStream();
     _searchController.dispose();
     _searchFocusNode.removeListener(_onSearchFocusChanged);
     _searchFocusNode.dispose();
     _categoryScrollController.dispose();
     _searchSiteScrollController.dispose();
+    _gridScrollController.dispose();
     super.dispose();
+  }
+
+  /// 当前首页是否为内置「豆瓣热播」虚拟站（§17）。
+  bool get _isDoubanHome {
+    final site = ref.read(configRepositoryProvider).selectedSite;
+    return site != null && isBuiltinSite(site);
+  }
+
+  /// 豆瓣首页加载（第一页）：分类固定 5 类，内容来自 [DoubanRepository]。
+  ///
+  /// 刻意复用普通站源那套界面状态（`_categories` / `_items` / `_errorMessage`），
+  /// 于是骨架、空态、错误重试、分类胶囊都不需要另写一份。
+  Future<void> _loadDouban({
+    required int generation,
+    required String? identity,
+    VodCategory? category,
+    bool forceRefresh = false,
+  }) async {
+    final repository = ref.read(doubanRepositoryProvider);
+    final categories = <VodCategory>[
+      for (final entry in doubanCategories)
+        VodCategory(id: entry.id, name: entry.name),
+    ];
+    final target = category ?? categories.first;
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+      _isSearching = false;
+      _searchSiteGroupKey = null;
+      _searchNotice = null;
+      _categories = categories;
+      _selectedCategory = target;
+      // 换分类 = 重新从第 0 条开始（§19 无限滚动的游标）
+      _doubanCollection = target.id;
+      _doubanNextStart = 0;
+      _doubanHasMore = false;
+      _doubanLoadingMore = false;
+    });
+
+    try {
+      final page = await repository.fetchPage(target.id,
+          start: 0, count: _doubanPageSize, forceRefresh: forceRefresh);
+      if (!_acceptContent(generation, identity) || !mounted) return;
+      if (_doubanCollection != target.id) return;
+      setState(() {
+        _items = [for (final item in page.items) item.toVodItem()];
+        _doubanCategoryItems[target.id] = _items;
+        _doubanNextStart = page.nextStart;
+        _doubanHasMore = page.hasMore;
+        _isLoading = false;
+      });
+      _maybeFillDoubanPage();
+
+      // 并发预加载其余豆瓣分类（构建仿 Netflix 首页完整横滑画报轨道）
+      for (final cat in categories) {
+        if (cat.id == target.id) continue;
+        repository
+            .fetchPage(cat.id, start: 0, count: _doubanPageSize)
+            .then((p) {
+          if (!mounted || !_isDoubanHome) return;
+          setState(() {
+            _doubanCategoryItems[cat.id] = [
+              for (final it in p.items) it.toVodItem()
+            ];
+          });
+        }).catchError((_) {});
+      }
+    } on DoubanException catch (error) {
+      if (!_acceptContent(generation, identity) || !mounted) return;
+      setState(() {
+        _items = [];
+        _errorMessage = '豆瓣数据加载失败：${error.message}';
+        _isLoading = false;
+      });
+    } catch (error) {
+      if (!_acceptContent(generation, identity) || !mounted) return;
+      setState(() {
+        _items = [];
+        _errorMessage = '豆瓣数据加载失败：$error';
+        _isLoading = false;
+      });
+    }
+  }
+
+  /// 豆瓣首页触底续页（§19 无限滚动）。
+  ///
+  /// 只在「豆瓣首页 + 非搜索态 + 没有正在加载」时追加；按 `nextStart` 继续，
+  /// 已加载条目按 id 去重（翻页期间豆瓣榜单可能轻微换位），到底后不再请求。
+  Future<void> _loadMoreDouban() async {
+    if (!_isDoubanHome || _isSearching || _isLoading) return;
+    if (_doubanLoadingMore || !_doubanHasMore) return;
+    final collection = _doubanCollection;
+    if (collection == null) return;
+
+    final generation = _contentGeneration;
+    final identity = _currentSiteIdentity();
+    setState(() => _doubanLoadingMore = true);
+
+    try {
+      final page = await ref
+          .read(doubanRepositoryProvider)
+          .fetchPage(collection, start: _doubanNextStart, count: _doubanPageSize);
+      if (!_acceptContent(generation, identity) || !mounted) return;
+      if (_doubanCollection != collection) return; // 期间换了分类：丢弃
+      final known = <String>{for (final item in _items) item.id};
+      final fresh = <VodItem>[
+        for (final item in page.items)
+          if (known.add(item.id)) item.toVodItem(),
+      ];
+      setState(() {
+        _items = [..._items, ...fresh];
+        _doubanNextStart = page.nextStart;
+        _doubanHasMore = page.hasMore;
+        _doubanLoadingMore = false;
+      });
+      _maybeFillDoubanPage();
+    } on DoubanException catch (error) {
+      if (!_acceptContent(generation, identity) || !mounted) return;
+      setState(() => _doubanLoadingMore = false);
+      showAppMessage('加载更多失败：${error.message}',
+          type: AppMessageType.error);
+    } catch (error) {
+      if (!_acceptContent(generation, identity) || !mounted) return;
+      setState(() => _doubanLoadingMore = false);
+      showAppMessage('加载更多失败：$error', type: AppMessageType.error);
+    }
+  }
+
+  /// 内容没撑满一屏（宽窗口 + 每页 24 条很常见）时自动续一页，
+  /// 否则用户连"滚到底"的机会都没有，无限滚动形同不存在。
+  void _maybeFillDoubanPage() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_isDoubanHome || !_doubanHasMore || _doubanLoadingMore) {
+        return;
+      }
+      if (!_gridScrollController.hasClients) return;
+      final position = _gridScrollController.position;
+      if (position.maxScrollExtent <= position.viewportDimension * 0.15) {
+        unawaited(_loadMoreDouban());
+      }
+    });
+  }
+
+  /// 网格滚动到接近底部时续页；`ScrollNotification` 从内部 GridView 冒泡上来。
+  bool _onGridScroll(ScrollNotification notification) {
+    if (notification.metrics.axis != Axis.vertical) return false;
+    if (!_isDoubanHome || _isSearching) return false;
+    // 剩余可滚高度不足两屏时提前取，滚动不会「顿一下」
+    if (notification.metrics.extentAfter < 600) {
+      unawaited(_loadMoreDouban());
+    }
+    return false;
   }
 
   /// 加载当前站源数据：
   /// - 当 category 为 null 时：拉取该站源的首页信息动态填充分类滚动条，并默认选中第一个分类，展示该分类下的视频数据；
   /// - 当指定 category 时：拉取对应分类的视频数据并刷新瀑布流。
   Future<void> loadSiteData(
-      {VodCategory? category, bool preserveCategories = false}) async {
+      {VodCategory? category,
+      bool preserveCategories = false,
+      bool forceRefresh = false}) async {
     // 冷启动直播入口期间推迟主视图加载，避免因页面偏好发起站源请求
     if (_startupLiveEntryPending) return;
     if (!mounted) return;
@@ -2582,6 +3025,16 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       return;
     }
     if (changed) _items = [];
+
+    // 内置「豆瓣热播」：走独立数据源，不碰 SiteApi（§17）
+    if (isBuiltinSite(site)) {
+      await _loadDouban(
+          generation: generation,
+          identity: identity,
+          category: category,
+          forceRefresh: forceRefresh);
+      return;
+    }
 
     // 格式化输出切换/加载站源的清晰调试信息
     // ignore: avoid_print
@@ -2720,7 +3173,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     final config = ref.read(configRepositoryProvider);
     final generation = ++_contentGeneration;
     final identity = _currentSiteIdentity();
-    final isAggregate = settings.searchPreferences.aggregate;
+    // 豆瓣首页本身不可检索：点片拿到的片名必须在已启用站源里聚合一圈（§17）
+    final isAggregate = _isDoubanHome || settings.searchPreferences.aggregate;
     _cancelSearchStream();
     _searchSeenKeys.clear();
     _searchCompleted = 0;
@@ -2740,9 +3194,12 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     try {
       final searchEngine = ref.read(searchEngineProvider);
       if (isAggregate) {
+        final cancelToken = SearchCancelToken();
+        _searchCancelToken = cancelToken;
         _listenToSearch(
           searchEngine.searchAllIncremental(
-              config.currentVodConfig.sites, query),
+              config.currentVodConfig.sites, query,
+              cancelToken: cancelToken),
           generation: generation,
           identity: identity,
         );
@@ -2769,7 +3226,10 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
         }
         return;
       }
-      final results = await searchEngine.searchSite(site, query);
+      final cancelToken = SearchCancelToken();
+      _searchCancelToken = cancelToken;
+      final results =
+          await searchEngine.searchSite(site, query, cancelToken: cancelToken);
       if (_acceptContent(generation, identity)) {
         setState(() {
           _items = results;
@@ -2839,6 +3299,14 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   }
 
   Future<void> _onItemClicked(VodItem item) async {
+    // 豆瓣首页是导航层：点片不进详情，直接拿片名去已启用站源全局搜索（§17）
+    if (_isDoubanHome && !_isSearching) {
+      final keyword = DoubanRepository.searchKeyword(item.name);
+      _searchController.text = keyword;
+      FocusScope.of(context).unfocus();
+      await _handleSearch(keyword);
+      return;
+    }
     final repo = ref.read(configRepositoryProvider);
     // 优先使用条目自带的 siteKey (跨站聚合搜索条目)，其次回退为当前选定站源
     Site? targetSite;
@@ -2884,12 +3352,29 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   /// 同时记住起播来源：用户从选集里点某一集后，弹窗会先关闭、进入播放器；
   /// 退出播放器时应回到这个弹窗继续选集，而不是掉回首页。
   void _showDetailDialog(VodDetail detail, Site? site) {
+    _showDetailDialogWithCurrentEpisode(
+      detail,
+      site,
+      currentEpisodeForDetail(
+        // 关播后会话已清空：优先用保留副本，同站同片才命中。
+        session: _lastPlayedSession ??
+            ref.read(activePlaybackSessionProvider),
+        vodId: detail.item.id,
+        siteKey: site?.key,
+      ),
+    );
+  }
+
+  /// 打开弹窗并**显式**指定当前集：`null` 即零高亮，不再回落推断。
+  void _showDetailDialogWithCurrentEpisode(
+      VodDetail detail, Site? site, CurrentEpisode? currentEpisode) {
     final repo = ref.read(configRepositoryProvider);
     showDialog<void>(
       context: context,
       builder: (_) => VodDetailDialog(
         detail: detail,
         isFavorite: repo.isFavorite(detail.item.id),
+        currentEpisode: currentEpisode,
         onToggleFavorite: () async {
           try {
             await repo.toggleFavorite(detail.item);
@@ -2929,29 +3414,71 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     }
   }
 
-  /// 详情页选集播放（薄封装）：解析 → 记录 → 启动 → 建立播放会话。
+  /// 详情页选集播放（薄封装）：立意图 → 解析 → 启动，见 [startEpisodePlaybackWithIntent]。
   /// 管线与播放内切集共用（顶层 `_startEpisodePlayback` / `_switchEpisode`）。
   Future<void> _startPlayEpisode(VodItem item, EpisodeSelection selection,
-      {Site? targetSite}) async {
-    final result = await _startEpisodePlayback(
-      ref,
-      item: item,
-      sourceName: selection.sourceName,
-      episodes: selection.episodes,
-      index: selection.index,
-      targetSite: targetSite,
-      sources: selection.sources,
-      sourceIndex: selection.sourceIndex,
-    );
-    if (!mounted) return;
-    if (result.error != null) {
-      showAppMessage(result.error!, type: AppMessageType.error);
-      return;
-    }
-    _showResumeHint(ref, result.resumeMatch);
-  }
+          {Site? targetSite}) =>
+      startEpisodePlaybackWithIntent(ref, item, selection,
+          targetSite: targetSite);
 
   /// 续播时重新解析选集；Spider 失败明确报错，CMS 保留历史直链兜底。
+  /// 历史续播用：拉取影片详情（失败 / 超时返回 null，不打断旧兜底路径）。
+  Future<VodDetail?> _loadDetailForHistory(
+      HistoryRecord record, Site site) async {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => Center(
+        child: CircularProgressIndicator(color: context.palette.accentInk),
+      ),
+    );
+    try {
+      return await ref
+          .read(siteApiProvider)
+          .fetchDetail(site, vodId: record.vodId)
+          .timeout(const Duration(seconds: 20));
+    } catch (_) {
+      return null;
+    } finally {
+      if (mounted) Navigator.of(context).pop();
+    }
+  }
+
+  /// 历史续播用：在详情里定位「记录里的那一条线路 + 那一集」。
+  ///
+  /// 优先按线路名匹配；线路改名了就找包含该集（直链优先、集名兜底）的线路；
+  /// 都没有返回 null（调用方退回单集直链续播）。
+  EpisodeSelection? _locateHistorySelection(
+      VodDetail detail, HistoryRecord record) {
+    if (detail.sources.isEmpty) return null;
+    var sourceIndex =
+        detail.sources.indexWhere((s) => s.name == record.sourceName);
+    if (sourceIndex < 0) {
+      bool hasEpisode(PlayFrom source) => source.episodes.any((e) =>
+          (record.episodeUrl.isNotEmpty && e.url == record.episodeUrl) ||
+          e.name == record.episodeName);
+      sourceIndex = detail.sources.indexWhere(hasEpisode);
+    }
+    if (sourceIndex < 0) return null;
+    final source = detail.sources[sourceIndex];
+    var episodeIndex = record.episodeUrl.isEmpty
+        ? -1
+        : source.episodes.indexWhere((e) => e.url == record.episodeUrl);
+    if (episodeIndex < 0) {
+      episodeIndex =
+          source.episodes.indexWhere((e) => e.name == record.episodeName);
+    }
+    if (episodeIndex < 0) return null;
+    return EpisodeSelection(
+      episode: source.episodes[episodeIndex],
+      sourceName: source.name,
+      episodes: source.episodes,
+      index: episodeIndex,
+      sources: detail.sources,
+      sourceIndex: sourceIndex,
+    );
+  }
+
   Future<void> _resumeHistoryRecord(HistoryRecord record) async {
     final repo = ref.read(configRepositoryProvider);
     Site? site;
@@ -2967,6 +3494,31 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       showAppMessage('原站源已不可用，请重新导入配置后续播', type: AppMessageType.error);
       return;
     }
+
+    // 先按「详情 + 选集」续播：历史记录只存了单集信息，走直链会没有播放会话——
+    // 播放页没有上一集 / 下一集 / 选集抽屉，退出后也回不到详情页（2026-10-22 反馈）。
+    // 详情拿不到（站源已删 / 只剩直链）时再退回下面的单集直链续播。
+    if (site != null && record.vodId.isNotEmpty) {
+      final detail = await _loadDetailForHistory(record, site);
+      if (!mounted) return;
+      if (detail != null) {
+        final selection = _locateHistorySelection(detail, record);
+        if (selection != null) {
+          // 退出播放器后回到「选集详情」而不是首页。
+          _playbackOriginDetail = detail;
+          _playbackOriginSite = site;
+          await startEpisodePlaybackWithIntent(
+            ref,
+            detail.item,
+            selection,
+            targetSite: site,
+          );
+          return;
+        }
+      }
+    }
+    _playbackOriginDetail = null;
+    _playbackOriginSite = null;
 
     var playUrl = record.playUrl;
     Map<String, String>? headers;
@@ -3164,8 +3716,13 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.palette;
     ref.listen<Site?>(currentSiteProvider, (_, __) => _synchronizeSite());
     ref.listen<VodConfig>(vodConfigProvider, (_, __) => _synchronizeSite());
+    // §15：保留最近一次播放会话，供关播后 / 重新打开详情时判定当前集。
+    ref.listen<PlaybackSession?>(activePlaybackSessionProvider, (_, next) {
+      if (next != null) _lastPlayedSession = next;
+    });
     ref.listen<MediaPlaySpec?>(activePlaySpecProvider, (previous, next) {
       // 播放器关闭（返回主视图）：「上次入口」回到点播
       if (previous != null && next == null) {
@@ -3182,6 +3739,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     final config = ref.watch(vodConfigProvider);
     final searchPrefs = ref.watch(searchPreferencesProvider).valueOrNull ??
         const SearchPreferences();
+    _syncSearchBridge();
 
     // 搜索态：由结果本地派生站点分组与筛选；非搜索态保持原分类内容。
     final searchSiteGroups = _isSearching
@@ -3199,67 +3757,116 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
 
     if (config.sites.isEmpty && config.lives.isEmpty) {
       return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                color: context.palette.panel,
-                borderRadius: BorderRadius.circular(AppRadii.pill),
-                border: Border.all(color: context.palette.border, width: 1.5),
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 460),
+          padding: const EdgeInsets.symmetric(horizontal: 36, vertical: 32),
+          decoration: BoxDecoration(
+            color: context.palette.panel,
+            borderRadius: BorderRadius.circular(AppRadii.lg),
+            border: Border.all(color: context.glassBorder, width: 1.0),
+            boxShadow: AppShadows.subtleDepth(),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 84,
+                height: 84,
+                decoration: BoxDecoration(
+                  color: context.palette.accentWash,
+                  borderRadius: BorderRadius.circular(AppRadii.pill),
+                  border: Border.all(
+                    color: context.palette.accentInk.withValues(alpha: 0.35),
+                    width: 1.2,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: context.palette.accentInk.withValues(alpha: 0.15),
+                      blurRadius: 16,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Icon(Icons.tv_rounded,
+                    size: 42, color: context.palette.accentInk),
               ),
-              child: Icon(Icons.tv_rounded,
-                  size: 42, color: context.palette.accentInk),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              '修狗TV',
-              style: TextStyle(
+              const SizedBox(height: 18),
+              Text(
+                '修狗TV',
+                style: TextStyle(
                   fontSize: AppType.h1,
                   fontWeight: FontWeight.bold,
                   color: context.palette.textTitle,
-                  letterSpacing: 0.5),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '尚未加载影视配置，请添加 TVBox 影视配置订阅源',
-              style: TextStyle(
-                  fontSize: AppType.label, color: context.palette.textSub),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: context.palette.accent,
-                // 品牌底上必须显式前景 onPrimary：M3 默认前景是 primary=品牌色，会同色不可见
-                foregroundColor: Theme.of(context).colorScheme.onPrimary,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(AppRadii.sm)),
+                  letterSpacing: 0.8,
+                ),
               ),
-              icon: const Icon(Icons.settings_outlined, size: 18),
-              label: const Text('立即配置影视源',
-                  style: TextStyle(
-                      fontSize: AppType.title, fontWeight: FontWeight.w600)),
-              onPressed: () {
-                showConfigDialog(context, ref);
-              },
-            ),
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: _enterLive,
-              icon: const Icon(Icons.live_tv_outlined, size: 18),
-              label: const Text('打开电视直播'),
-            ),
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: _showPushDialog,
-              icon: const Icon(Icons.send_outlined, size: 18),
-              label: const Text('打开直链推送'),
-            ),
-          ],
+              const SizedBox(height: 8),
+              Text(
+                '尚未加载影视配置，请添加 TVBox 影视配置订阅源',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: AppType.body,
+                  color: context.palette.textSub,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: context.palette.accent,
+                  // 品牌底上必须显式前景 onPrimary：M3 默认前景是 primary=品牌色，会同色不可见
+                  foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 26, vertical: 13),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(AppRadii.pill)),
+                  elevation: 2,
+                  shadowColor:
+                      context.palette.accentInk.withValues(alpha: 0.3),
+                ),
+                icon: const Icon(Icons.settings_outlined, size: 18),
+                label: const Text('立即配置影视源',
+                    style: TextStyle(
+                        fontSize: AppType.title, fontWeight: FontWeight.bold)),
+                onPressed: () {
+                  showConfigDialog(context, ref);
+                },
+              ),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: context.glassBorder, width: 1.0),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(AppRadii.pill)),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 10),
+                    ),
+                    onPressed: _enterLive,
+                    icon: const Icon(Icons.live_tv_outlined, size: 16),
+                    label: const Text('打开电视直播',
+                        style: TextStyle(fontSize: AppType.caption)),
+                  ),
+                  const SizedBox(width: 10),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: context.glassBorder, width: 1.0),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(AppRadii.pill)),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 10),
+                    ),
+                    onPressed: _showPushDialog,
+                    icon: const Icon(Icons.send_outlined, size: 16),
+                    label: const Text('打开直链推送',
+                        style: TextStyle(fontSize: AppType.caption)),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       );
     }
@@ -3269,84 +3876,13 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ==================== 左侧导航面板 (历史 / 直播 / 推送 / 收藏) ====================
-          Container(
-            width: 140,
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
-            decoration: BoxDecoration(
-              color: context.palette.panel,
-              borderRadius: BorderRadius.circular(AppRadii.lg),
-              border: Border.all(color: context.palette.border, width: 1.2),
-            ),
-            child: Column(
-              children: [
-                // 1. [ 历史 ] 按钮
-                _NavButton(
-                  title: '历史',
-                  icon: Icons.history_rounded,
-                  onTap: _showHistoryDialog,
-                ),
-                const SizedBox(height: 14),
-
-                // 2. [ 直播 ] 按钮（⑤-2：直连播放上次频道，无频道回退管理弹窗）
-                _NavButton(
-                  title: '直播',
-                  icon: Icons.live_tv_rounded,
-                  onTap: _enterLive,
-                ),
-                const SizedBox(height: 14),
-
-                // 3. [ 推送 ] 按钮
-                _NavButton(
-                  title: '推送',
-                  icon: Icons.send_rounded,
-                  onTap: _showPushDialog,
-                ),
-                const SizedBox(height: 14),
-
-                // 4. [ 收藏 ] 按钮
-                _NavButton(
-                  title: '收藏',
-                  icon: Icons.star_rounded,
-                  onTap: _showFavoritesDialog,
-                ),
-
-                const Spacer(),
-
-                // 底部设置中心入口
-                FocusRing(
-                    onTap: () => openSettingsPage(ref),
-                    semanticLabel: '设置中心',
-                    borderRadius:
-                        const BorderRadius.all(Radius.circular(AppRadii.sm)),
-                    child: MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: GestureDetector(
-                        onTap: () => openSettingsPage(ref),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              vertical: 8, horizontal: 10),
-                          decoration: BoxDecoration(
-                            color: context.palette.card,
-                            borderRadius: BorderRadius.circular(AppRadii.sm),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.settings_outlined,
-                                  size: 14, color: context.palette.textSub),
-                              const SizedBox(width: 4),
-                              Text('设置中心',
-                                  style: TextStyle(
-                                      fontSize: AppType.caption,
-                                      color: context.palette.textSub)),
-                            ],
-                          ),
-                        ),
-                      ),
-                    )),
-              ],
-            ),
+          // ==================== 左侧导航面板 (历史 / 直播 / 推送 / 收藏 / 设置) ====================
+          DesktopSidebar(
+            onHistoryTap: _showHistoryDialog,
+            onLiveTap: _enterLive,
+            onPushTap: _showPushDialog,
+            onFavoritesTap: _showFavoritesDialog,
+            onSettingsTap: () => openSettingsPage(ref),
           ),
 
           const SizedBox(width: 14),
@@ -3356,89 +3892,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // 1. 顶部全宽搜索栏 [ 搜索 ] (支持全站聚合搜索)
-                Row(
-                  children: [
-                    Expanded(
-                      child: AnimatedContainer(
-                        duration: _searchFocusNode.hasFocus
-                            ? AppMotion.enter
-                            : AppMotion.exit,
-                        height: 44,
-                        decoration: BoxDecoration(
-                          color: context.palette.raised,
-                          borderRadius: BorderRadius.circular(AppRadii.md),
-                          // 聚焦高亮外框（skill: focus-states；B3）
-                          border: Border.all(
-                              color: _searchFocusNode.hasFocus
-                                  ? context.palette.accentInk
-                                  : context.palette.borderStrong,
-                              width: _searchFocusNode.hasFocus ? 1.5 : 1.0),
-                        ),
-                        child: TextField(
-                          controller: _searchController,
-                          focusNode: _searchFocusNode,
-                          style: TextStyle(
-                              fontSize: AppType.label,
-                              color: context.palette.textMain),
-                          textAlignVertical: TextAlignVertical.center,
-                          decoration: InputDecoration(
-                            isDense: true,
-                            hintText: searchPrefs.aggregate
-                                ? '搜索全网影片 (回车聚合检索所有站源)'
-                                : '搜索当前站源影片 (回车检索当前站源)',
-                            hintStyle: TextStyle(
-                                fontSize: AppType.label,
-                                color: context.palette.textDim),
-                            prefixIcon: Icon(Icons.search_rounded,
-                                size: 20, color: context.palette.textDim),
-                            suffixIcon: _searchController.text.isNotEmpty
-                                ? IconButton(
-                                    icon: Icon(Icons.clear_rounded,
-                                        size: 18,
-                                        color: context.palette.textDim),
-                                    onPressed: _clearSearchToHome,
-                                  )
-                                : null,
-                            border: InputBorder.none,
-                            contentPadding:
-                                const EdgeInsets.symmetric(horizontal: 14),
-                          ),
-                          onSubmitted: _handleSearch,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    // 搜索执行按钮（进行中禁用 + 小转圈：skill: loading-buttons；B3）
-                    IconButton(
-                      icon: _searchBusy
-                          ? SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: context.palette.accentInk,
-                              ),
-                            )
-                          : Icon(Icons.search_rounded,
-                              size: 22, color: context.palette.accentInk),
-                      tooltip: searchPrefs.aggregate ? '聚合搜索' : '搜索当前站源',
-                      onPressed: _searchBusy
-                          ? null
-                          : () => _handleSearch(_searchController.text),
-                    ),
-                    // 刷新按钮
-                    IconButton(
-                      icon: Icon(Icons.refresh_rounded,
-                          size: 22, color: context.palette.textDim),
-                      tooltip: '刷新内容',
-                      onPressed: () => loadSiteData(
-                          category: _selectedCategory,
-                          preserveCategories: true),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
+                // 原全宽大搜索栏已全面迁移至顶部标题栏 (Netflix 风格紧凑栏)，主内容区直接呈现内容
 
                 // 2. 搜索态：命中站点胶囊（站点名 + 数量）；否则：站源动态分类滚动条
                 if (_isSearching) ...[
@@ -3497,31 +3951,61 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                     const SizedBox(height: 10),
                   ],
                 ] else if (_categories.isNotEmpty) ...[
-                  Container(
-                    height: 38,
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: ListView.separated(
-                      controller: _categoryScrollController,
-                      scrollDirection: Axis.horizontal,
-                      itemCount: _categories.length,
-                      separatorBuilder: (_, __) => const SizedBox(width: 8),
-                      itemBuilder: (context, index) {
-                        final cat = _categories[index];
-                        final isSelected = _selectedCategory?.id == cat.id;
+                  if (!_isDoubanHome || _isSearching || _doubanViewingSingleCategory) ...[
+                    Container(
+                      height: 38,
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: ListView.separated(
+                        controller: _categoryScrollController,
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _categories.length +
+                            (_isDoubanHome && _doubanViewingSingleCategory ? 1 : 0),
+                        separatorBuilder: (_, __) => const SizedBox(width: 8),
+                        itemBuilder: (context, index) {
+                          if (_isDoubanHome && _doubanViewingSingleCategory) {
+                            if (index == 0) {
+                              return _FilterPill(
+                                label: '◀ 返回推荐大厅',
+                                isSelected: false,
+                                onTap: () {
+                                  setState(() {
+                                    _doubanViewingSingleCategory = false;
+                                  });
+                                },
+                              );
+                            }
+                            index -= 1;
+                          }
+                          final cat = _categories[index];
+                          final isSelected = _selectedCategory?.id == cat.id;
 
-                        return _FilterPill(
-                          label: cat.name,
-                          isSelected: isSelected,
-                          onTap: () {
-                            _searchController.clear();
-                            loadSiteData(
-                                category: cat, preserveCategories: true);
-                          },
-                        );
-                      },
+                          return _FilterPill(
+                            label: cat.name,
+                            isSelected: isSelected,
+                            onTap: () {
+                              _searchController.clear();
+                              loadSiteData(
+                                  category: cat, preserveCategories: true);
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                ],
+
+                // 豆瓣单一分类网格提示：明确「点片=搜索」，避免被当成进豆瓣详情（§17）
+                if (_isDoubanHome && !_isSearching && _doubanViewingSingleCategory) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(left: 2, bottom: 8),
+                    child: Text(
+                      '点海报即在已启用站源里搜索该片，不进豆瓣详情',
+                      style: TextStyle(
+                          fontSize: AppType.caption,
+                          color: context.palette.textSub),
                     ),
                   ),
-                  const SizedBox(height: 10),
                 ],
 
                 // 3. 影视海报瀑布流网格容器 (已按要求彻底删除 '豆瓣电影排行' 副标题，直接显示分类内容)
@@ -3531,7 +4015,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                       color: context.palette.panel,
                       borderRadius: BorderRadius.circular(AppRadii.lg),
                       border: Border.all(
-                          color: context.palette.divider, width: 1.0),
+                          color: context.glassBorder, width: 1.0),
+                      boxShadow: AppShadows.subtleDepth(),
                     ),
                     clipBehavior: Clip.antiAlias,
                     child: _isLoading
@@ -3559,30 +4044,54 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                 child: Column(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    Icon(Icons.error_outline_rounded,
-                                        size: 36,
-                                        color: context.palette.danger),
-                                    const SizedBox(height: 10),
+                                    Container(
+                                      width: 64,
+                                      height: 64,
+                                      decoration: BoxDecoration(
+                                        color: palette.danger
+                                            .withValues(alpha: 0.12),
+                                        borderRadius:
+                                            BorderRadius.circular(AppRadii.pill),
+                                        border: Border.all(
+                                          color: palette.danger
+                                              .withValues(alpha: 0.35),
+                                          width: 1.0,
+                                        ),
+                                      ),
+                                      child: Icon(Icons.error_outline_rounded,
+                                          size: 32, color: palette.danger),
+                                    ),
+                                    const SizedBox(height: 14),
                                     Text(_errorMessage!,
                                         style: TextStyle(
-                                            color: context.palette.danger,
-                                            fontSize: AppType.label)),
-                                    const SizedBox(height: 16),
-                                    ElevatedButton(
+                                            color: palette.danger,
+                                            fontSize: AppType.label,
+                                            fontWeight: FontWeight.w500)),
+                                    const SizedBox(height: 18),
+                                    ElevatedButton.icon(
                                       style: ElevatedButton.styleFrom(
-                                          backgroundColor:
-                                              context.palette.accent,
-                                          // 品牌底上必须显式前景 onPrimary：M3 默认前景是 primary=品牌色，会同色不可见
-                                          foregroundColor: Theme.of(context)
-                                              .colorScheme
-                                              .onPrimary),
+                                        backgroundColor: palette.accent,
+                                        foregroundColor: Theme.of(context)
+                                            .colorScheme
+                                            .onPrimary,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 22, vertical: 10),
+                                        shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(
+                                                AppRadii.pill)),
+                                      ),
+                                      icon: const Icon(Icons.refresh_rounded,
+                                          size: 16),
+                                      label: const Text('重试',
+                                          style: TextStyle(
+                                              fontSize: AppType.body,
+                                              fontWeight: FontWeight.bold)),
                                       onPressed: () => _isSearching
                                           ? _handleSearch(
                                               _searchController.text)
                                           : loadSiteData(
                                               category: _selectedCategory,
                                               preserveCategories: true),
-                                      child: const Text('重试'),
                                     ),
                                   ],
                                 ),
@@ -3592,14 +4101,29 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                     child: Column(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        Icon(
-                                          _isSearching
-                                              ? Icons.search_off_rounded
-                                              : Icons.inbox_rounded,
-                                          size: 40,
-                                          color: context.palette.textDim,
+                                        Container(
+                                          width: 72,
+                                          height: 72,
+                                          decoration: BoxDecoration(
+                                            color: palette.raised,
+                                            borderRadius:
+                                                BorderRadius.circular(
+                                                    AppRadii.pill),
+                                            border: Border.all(
+                                                color: context.glassBorder,
+                                                width: 1.0),
+                                            boxShadow:
+                                                AppShadows.subtleDepth(),
+                                          ),
+                                          child: Icon(
+                                            _isSearching
+                                                ? Icons.search_off_rounded
+                                                : Icons.inbox_rounded,
+                                            size: 36,
+                                            color: palette.accentInk,
+                                          ),
                                         ),
-                                        const SizedBox(height: 10),
+                                        const SizedBox(height: 16),
                                         Text(
                                           _searchNotice ??
                                               (_isSearching
@@ -3613,8 +4137,9 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                                           : '未找到相关搜索结果'))
                                                   : '当前分类下暂无内容'),
                                           style: TextStyle(
-                                              color: context.palette.textSub,
-                                              fontSize: AppType.label),
+                                              color: palette.textTitle,
+                                              fontSize: AppType.label,
+                                              fontWeight: FontWeight.w600),
                                         ),
                                         // 搜索 0 结果时给弱建议（skill: No Results；B3）
                                         if (_isSearching &&
@@ -3624,26 +4149,40 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                           Text('可尝试更换关键词，或切换站源',
                                               style: TextStyle(
                                                   fontSize: AppType.caption,
-                                                  color:
-                                                      context.palette.textDim)),
+                                                  color: palette.textSub)),
                                         ],
-                                        const SizedBox(height: 16),
+                                        const SizedBox(height: 18),
                                         // B2 空态行动化（skill: Empty States：说明 + 行动）
-                                        ElevatedButton(
+                                        ElevatedButton.icon(
                                           style: ElevatedButton.styleFrom(
-                                              backgroundColor:
-                                                  context.palette.accent,
-                                              // 品牌底上必须显式前景 onPrimary：M3 默认前景是 primary=品牌色，会同色不可见
-                                              foregroundColor: Theme.of(context)
-                                                  .colorScheme
-                                                  .onPrimary),
+                                            backgroundColor: palette.accent,
+                                            foregroundColor: Theme.of(context)
+                                                .colorScheme
+                                                .onPrimary,
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 20, vertical: 10),
+                                            shape: RoundedRectangleBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(
+                                                        AppRadii.pill)),
+                                          ),
+                                          icon: Icon(
+                                            _isSearching
+                                                ? Icons.clear_rounded
+                                                : Icons.refresh_rounded,
+                                            size: 16,
+                                          ),
+                                          label: Text(
+                                            _isSearching ? '清空搜索' : '刷新',
+                                            style: const TextStyle(
+                                                fontSize: AppType.body,
+                                                fontWeight: FontWeight.bold),
+                                          ),
                                           onPressed: _isSearching
                                               ? _clearSearchToHome
                                               : () => loadSiteData(
                                                   category: _selectedCategory,
                                                   preserveCategories: true),
-                                          child: Text(
-                                              _isSearching ? '清空搜索' : '刷新'),
                                         ),
                                       ],
                                     ),
@@ -3655,9 +4194,130 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                         items: visibleItems,
                                         onItemTap: _onItemClicked,
                                       )
-                                    : VodGridView(
-                                        items: visibleItems,
-                                        onItemTap: _onItemClicked,
+                                    : (_isDoubanHome &&
+                                            !_isSearching &&
+                                            !_doubanViewingSingleCategory)
+                                        ? NetflixHomeView(
+                                            scrollController:
+                                                _gridScrollController,
+                                            onScrollNotification: _onGridScroll,
+                                            categoryItemsMap:
+                                                _doubanCategoryItems,
+                                            categories: _categories,
+                                            isLoading: _isLoading,
+                                            onItemTap: _onItemClicked,
+                                            onCategoryTap: (category) {
+                                              setState(() {
+                                                _doubanViewingSingleCategory =
+                                                    true;
+                                                _selectedCategory = category;
+                                                _items = _doubanCategoryItems[
+                                                        category.id] ??
+                                                    [];
+                                              });
+                                              loadSiteData(
+                                                  category: category,
+                                                  preserveCategories: true);
+                                            },
+                                            imageProviderFor: (item, spec) {
+                                              if (!DoubanRepository
+                                                  .isDoubanPoster(item.pic)) {
+                                                return null;
+                                              }
+                                              return DoubanPosterImage(
+                                                // 大屏要原图（m_ratio_poster →
+                                                // raw），轨道要 512 小图。
+                                                spec.highRes
+                                                    ? DoubanRepository
+                                                        .highResPosterUrl(
+                                                            item.pic)
+                                                    : item.pic,
+                                                fallbackUrl: spec.highRes
+                                                    ? item.pic
+                                                    : null,
+                                                targetWidth: spec.targetWidth,
+                                              );
+                                            },
+                                          )
+                                        : Stack(
+                                            children: [
+                                              // §19 无限滚动：滚动通知从内部 GridView
+                                              // 冒泡上来，接近底部时续页
+                                              NotificationListener<ScrollNotification>(
+                                                onNotification: _onGridScroll,
+                                                child: VodGridView(
+                                                  items: visibleItems,
+                                                  onItemTap: _onItemClicked,
+                                                  controller:
+                                                      _gridScrollController,
+                                                  // 豆瓣图床要自己发请求（NetworkImage 的
+                                                  // headers.add 会叠两条 UA → 403），
+                                                  // 顺带走 webp 优先 / jpg 回落（§17）
+                                                  imageProviderFor: (item) =>
+                                                      DoubanRepository
+                                                              .isDoubanPoster(
+                                                                  item.pic)
+                                                          ? DoubanPosterImage(
+                                                              item.pic,
+                                                              targetWidth: 512)
+                                                          : null,
+                                                ),
+                                              ),
+                                          if (_doubanLoadingMore &&
+                                              _isDoubanHome &&
+                                              !_isSearching)
+                                            Positioned(
+                                              left: 0,
+                                              right: 0,
+                                              bottom: 14,
+                                              child: Center(
+                                                child: Container(
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                          horizontal: 14,
+                                                          vertical: 8),
+                                                  decoration: BoxDecoration(
+                                                    color: context
+                                                        .palette.raised
+                                                        .withValues(alpha: 0.92),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            AppRadii.pill),
+                                                    border: Border.all(
+                                                        color: context
+                                                            .palette.border),
+                                                  ),
+                                                  child: Row(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    children: [
+                                                      SizedBox(
+                                                        width: 12,
+                                                        height: 12,
+                                                        child:
+                                                            CircularProgressIndicator(
+                                                          strokeWidth: 2,
+                                                          color: context
+                                                              .palette
+                                                              .accentInk,
+                                                        ),
+                                                      ),
+                                                      const SizedBox(width: 8),
+                                                      Text(
+                                                        '正在加载更多…',
+                                                        style: TextStyle(
+                                                          fontSize:
+                                                              AppType.caption,
+                                                          color: context
+                                                              .palette.textSub,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                        ],
                                       ),
                   ),
                 ),
@@ -3670,97 +4330,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   }
 }
 
-/// 左侧垂直导航按钮组件 [ 历史 / 直播 / 推送 / 收藏 ]
-class _NavButton extends StatefulWidget {
-  final String title;
-  final IconData icon;
-  final VoidCallback onTap;
 
-  const _NavButton({
-    required this.title,
-    required this.icon,
-    required this.onTap,
-  });
-
-  @override
-  State<_NavButton> createState() => _NavButtonState();
-}
-
-class _NavButtonState extends State<_NavButton> {
-  bool _isHovered = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return FocusRing(
-        onTap: widget.onTap,
-        semanticLabel: widget.title,
-        borderRadius: const BorderRadius.all(Radius.circular(AppRadii.lg)),
-        child: MouseRegion(
-          onEnter: (_) => setState(() => _isHovered = true),
-          onExit: (_) => setState(() => _isHovered = false),
-          cursor: SystemMouseCursors.click,
-          child: GestureDetector(
-            onTap: widget.onTap,
-            child: AnimatedScale(
-              scale: _isHovered ? 1.03 : 1.0,
-              duration: AppMotion.base,
-              curve: Curves.easeOutCubic,
-              child: AnimatedContainer(
-                duration: AppMotion.base,
-                width: double.infinity,
-                height: 72,
-                decoration: BoxDecoration(
-                  color:
-                      _isHovered ? context.palette.hover : context.palette.card,
-                  borderRadius: BorderRadius.circular(AppRadii.lg),
-                  border: Border.all(
-                    color: _isHovered
-                        ? context.palette.accentInk
-                        : context.palette.borderStrong,
-                    width: _isHovered ? 1.5 : 1.0,
-                  ),
-                  boxShadow: _isHovered
-                      ? [
-                          BoxShadow(
-                            color: context.palette.accentInk.withAlpha(35),
-                            blurRadius: 10,
-                            offset: const Offset(0, 3),
-                          ),
-                        ]
-                      : null,
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      widget.icon,
-                      size: 24,
-                      color: _isHovered
-                          ? context.palette.accentInk
-                          : context.palette.textMain,
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      widget.title,
-                      style: TextStyle(
-                        fontSize: AppType.label,
-                        fontWeight: FontWeight.bold,
-                        color: _isHovered
-                            ? context.palette.textTitle
-                            : context.palette.textMain,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ));
-  }
-}
-
-/// 筛选胶囊按钮 [ xxx ] / [ xxx 3 ]
+/// 筛选胶囊按钮 [ xxx ] / [ xxx 3 ]（Infuse × Netflix 风格流媒体药丸）
 ///
 /// 站源分类栏与搜索结果站点栏共用；[count] 非空时在名称右侧显示数量徽标。
 /// 搜索进行中的尾部进度胶囊（不可点，完成后自动消失）
@@ -3773,13 +4344,18 @@ class _SearchProgressPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final label = total > 0 ? '搜索中 $completed/$total' : '搜索中…';
+    final palette = context.palette;
+
     return Container(
       key: const ValueKey('search-progress-pill'),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
       decoration: BoxDecoration(
-        color: context.palette.card,
-        borderRadius: BorderRadius.circular(AppRadii.md),
-        border: Border.all(color: context.palette.border, width: 1),
+        color: palette.card,
+        borderRadius: BorderRadius.circular(AppRadii.pill),
+        border: Border.all(
+          color: palette.accentInk.withValues(alpha: 0.35),
+          width: 1,
+        ),
       ),
       alignment: Alignment.center,
       child: Row(
@@ -3790,7 +4366,7 @@ class _SearchProgressPill extends StatelessWidget {
             height: 12,
             child: CircularProgressIndicator(
               strokeWidth: 2,
-              color: context.palette.textSub,
+              color: palette.accentInk,
               // 有总数时给确定性进度（skill: Progress Indicators）；无总数保持动画
               value: total > 0 ? (completed / total).clamp(0.0, 1.0) : null,
             ),
@@ -3799,9 +4375,10 @@ class _SearchProgressPill extends StatelessWidget {
           Text(
             label,
             style: TextStyle(
-              fontSize: AppType.body,
-              fontWeight: FontWeight.w500,
-              color: context.palette.textBody,
+              fontSize: AppType.caption,
+              fontWeight: FontWeight.w600,
+              color: palette.accentInk,
+              fontFeatures: const [FontFeature.tabularFigures()],
             ),
           ),
         ],
@@ -3834,87 +4411,98 @@ class _FilterPillState extends State<_FilterPill> {
   @override
   Widget build(BuildContext context) {
     final isSelected = widget.isSelected;
-    // 选中态底色是品牌色，文字用 onPrimary（近黑）保证对比度。
+    final palette = context.palette;
+    // 选中态底色是品牌色，文字用 onPrimary（随明暗反转）保证对比度。
     final onAccent = Theme.of(context).colorScheme.onPrimary;
 
     return FocusRing(
-        onTap: widget.onTap,
-        semanticLabel: widget.label,
-        borderRadius: const BorderRadius.all(Radius.circular(AppRadii.md)),
-        child: MouseRegion(
-          onEnter: (_) => setState(() => _isHovered = true),
-          onExit: (_) => setState(() => _isHovered = false),
-          cursor: SystemMouseCursors.click,
-          child: GestureDetector(
-            onTap: widget.onTap,
-            child: AnimatedContainer(
-              // 进 200 / 出 140：与海报网格卡同一节奏（D2；B3）
-              duration: _isHovered ? AppMotion.enter : AppMotion.exit,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-              decoration: BoxDecoration(
+      onTap: widget.onTap,
+      semanticLabel: widget.label,
+      borderRadius: const BorderRadius.all(Radius.circular(AppRadii.pill)),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _isHovered = true),
+        onExit: (_) => setState(() => _isHovered = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: _isHovered ? AppMotion.enter : AppMotion.exit,
+            curve: AppMotion.ease,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            decoration: BoxDecoration(
+              color: isSelected
+                  ? palette.accent
+                  : _isHovered
+                      ? palette.accentWash
+                      : palette.card,
+              borderRadius: BorderRadius.circular(AppRadii.pill),
+              border: Border.all(
                 color: isSelected
-                    ? context.palette.accent
+                    ? palette.accentInk.withValues(alpha: 0.6)
                     : _isHovered
-                        ? context.palette.borderStrong
-                        : context.palette.card,
-                borderRadius: BorderRadius.circular(AppRadii.md),
-                border: Border.all(
-                  color: isSelected
-                      ? context.palette.accent
-                      : _isHovered
-                          ? context.palette.borderStrong
-                          : context.palette.border,
-                  width: 1,
-                ),
+                        ? palette.accentInk.withValues(alpha: 0.35)
+                        : context.glassBorder,
+                width: 1.0,
               ),
-              alignment: Alignment.center,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 220),
+              boxShadow: isSelected
+                  ? [
+                      BoxShadow(
+                        color: palette.accentInk.withValues(alpha: 0.20),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ]
+                  : null,
+            ),
+            alignment: Alignment.center,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 220),
+                  child: Text(
+                    widget.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: AppType.body,
+                      fontWeight:
+                          isSelected ? FontWeight.bold : FontWeight.w500,
+                      color: isSelected
+                          ? onAccent
+                          : _isHovered
+                              ? palette.textTitle
+                              : palette.textBody,
+                    ),
+                  ),
+                ),
+                if (widget.count != null) ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 1.5),
+                    decoration: BoxDecoration(
+                      color: isSelected
+                          ? onAccent.withValues(alpha: 0.18)
+                          : palette.border,
+                      borderRadius: BorderRadius.circular(AppRadii.pill),
+                    ),
                     child: Text(
-                      widget.label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      '${widget.count}',
                       style: TextStyle(
-                        fontSize: AppType.body,
-                        fontWeight:
-                            isSelected ? FontWeight.bold : FontWeight.w500,
-                        color: isSelected
-                            ? onAccent
-                            : _isHovered
-                                ? context.palette.textTitle
-                                : context.palette.textBody,
+                        fontSize: AppType.caption,
+                        fontWeight: FontWeight.bold,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                        color: isSelected ? onAccent : palette.textDim,
                       ),
                     ),
                   ),
-                  if (widget.count != null) ...[
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 5, vertical: 1),
-                      decoration: BoxDecoration(
-                        color: isSelected
-                            ? onAccent.withAlpha(46)
-                            : context.palette.border,
-                        borderRadius: BorderRadius.circular(AppRadii.sm),
-                      ),
-                      child: Text(
-                        '${widget.count}',
-                        style: TextStyle(
-                          fontSize: AppType.caption,
-                          fontWeight: FontWeight.w600,
-                          color:
-                              isSelected ? onAccent : context.palette.textDim,
-                        ),
-                      ),
-                    ),
-                  ],
                 ],
-              ),
+              ],
             ),
           ),
-        ));
+        ),
+      ),
+    );
   }
 }

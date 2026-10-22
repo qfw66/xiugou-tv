@@ -12,9 +12,8 @@ package android.content.pm;
  * <p>字段与 Android 保持一致（都是 public），取值指向桌面端的真实路径，
  * 让壳至少能完成"文件定位"这一步。
  */
-public class ApplicationInfo {
+public class ApplicationInfo extends PackageItemInfo {
 
-    public String packageName = "com.fongmi.android.tv";
     public String processName = "com.fongmi.android.tv";
 
     /** APK 路径；桌面端用 jar 的位置兜底。 */
@@ -38,6 +37,8 @@ public class ApplicationInfo {
     public String[] sharedLibraryFiles;
 
     public ApplicationInfo() {
+        packageName = "com.fongmi.android.tv";
+        name = packageName;
         String home = System.getProperty("user.home", ".");
         dataDir = home + "/.xiugou_tv_companion";
         nativeLibraryDir = dataDir + "/lib";

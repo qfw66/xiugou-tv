@@ -10,7 +10,7 @@ import java.util.List;
  * Diagnostic placeholder for Android-native guarded spiders that cannot run on JVM.
  */
 public class UnsupportedGuardSpider extends Spider {
-    private String message = "该 Android Guard 爬虫依赖 Android/Dex/native 运行时，当前 Windows JVM 伴随服务无法执行";
+    private String message = "该站源依赖 Android/Dex/native 能力，或会在当前 JVM 上触发进程级崩溃（SIGSEGV），桌面端已禁用；请改用其他线路";
 
     @Override
     public void init(Context context, String extend) {

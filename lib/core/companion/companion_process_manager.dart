@@ -2,7 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
+
+import 'companion_stderr_filter.dart';
 
 /// 伴随服务运行状态枚举
 enum CompanionStatus {
@@ -29,6 +32,19 @@ class CompanionProcessManager {
     '-XX:MaxMetaspaceSize=128m',
     '-XX:+UseSerialGC',
   ];
+
+  /// 调试开关：
+  /// - 编译期：`flutter run --dart-define=XIUGOU_DEBUG=true`
+  /// - 运行期：启动前设置环境变量 `XIUGOU_DEBUG=1`（已打包的 exe 也能用）
+  ///
+  /// 打开后 companion 会输出 [DBG] 明细（RPC 参数、HTTP 请求/响应），
+  /// 并且把 companion 的 stdout/stderr 转发到 Flutter 控制台。
+  static const bool _debugFromDefine =
+      bool.fromEnvironment('XIUGOU_DEBUG', defaultValue: false);
+
+  static bool get debugCompanion =>
+      _debugFromDefine ||
+      (Platform.environment['XIUGOU_DEBUG'] ?? '') == '1';
 
   /// 独立生命周期的实例；默认构造仍共享应用级实例。
   /// applicationDirectory 默认取应用可执行文件目录，测试可注入隔离安装布局。
@@ -70,6 +86,7 @@ class CompanionProcessManager {
   Completer<void>? _cancelStartup;
   StreamSubscription<String>? _stdoutSubscription;
   StreamSubscription<String>? _stderrSubscription;
+  CompanionStderrFilter _stderrFilter = CompanionStderrFilter();
   bool _closed = false;
   Timer? _idleWatch;
   DateTime _lastActivity = DateTime.now();
@@ -238,16 +255,25 @@ class CompanionProcessManager {
       final process = await _processStarter(javaCmd, [
         '-noverify',
         ...companionJvmTuningArgs,
+        if (debugCompanion) '-Dxiugou.debug=true',
+        // 只改控制台输出编码，不动 file.encoding：后者会影响载荷里 new String(bytes) 的语义。
+        if (debugCompanion) '-Dsun.stdout.encoding=UTF-8',
+        if (debugCompanion) '-Dsun.stderr.encoding=UTF-8',
         '-jar',
         resolvedJar,
         '--port=$targetPort',
         '--stdin-watch=on',
+        // pid 看门狗：父进程（本应用）消失即自行退出。比 stdin EOF 更可靠——
+        // PATH 上的 java 可能是「再 exec 一个真 JVM」的包装器，或有进程继承了管道句柄，
+        // 那些情况下 EOF 可能永远不来。
+        '--parent-pid=$pid',
       ]);
       _process = process;
       _stdoutSubscription = process.stdout
           .transform(const Utf8Decoder(allowMalformed: true))
           .transform(const LineSplitter())
           .listen((line) {
+        if (debugCompanion) debugPrint('[companion] $line');
         final match =
             RegExp(r'^\[COMPANION_READY\] PORT=(\d+)$').firstMatch(line.trim());
         final port = int.tryParse(match?.group(1) ?? '');
@@ -259,11 +285,25 @@ class CompanionProcessManager {
       }, onDone: () {
         if (!ready.isCompleted) ready.complete(null);
       });
+      _stderrFilter = CompanionStderrFilter();
       _stderrSubscription = process.stderr
           .transform(const Utf8Decoder(allowMalformed: true))
           .transform(const LineSplitter())
-          .listen((line) => _lastError = line, onError: (Object error) {
+          .listen((line) {
+        // 载荷（加固壳）大量 `catch { printStackTrace() }`，一条异常十几行；
+        // 这里折叠成一行再转发，避免 debug 控制台被「看起来像崩了」的堆栈刷满。
+        for (final folded in _stderrFilter.feed(line)) {
+          if (debugCompanion) debugPrint('[companion:err] $folded');
+        }
+        final meaningful = _stderrFilter.lastMeaningfulLine;
+        if (meaningful != null) _lastError = meaningful;
+      }, onError: (Object error) {
         _lastError = '$error';
+        if (debugCompanion) debugPrint('[companion:err] $error');
+      }, onDone: () {
+        for (final folded in _stderrFilter.flush()) {
+          if (debugCompanion) debugPrint('[companion:err] $folded');
+        }
       });
       unawaited(process.exitCode.then((_) {
         if (!ready.isCompleted) ready.complete(null);
@@ -378,12 +418,12 @@ class CompanionProcessManager {
       try {
         await process.exitCode.timeout(exitTimeout);
       } on TimeoutException {
-        process.kill();
-        await process.exitCode.timeout(exitTimeout);
+        await _killProcessTree(process);
+        await _awaitExitOrWarn(process);
       }
     } else {
-      process.kill();
-      await process.exitCode.timeout(exitTimeout);
+      await _killProcessTree(process);
+      await _awaitExitOrWarn(process);
     }
     await _stdoutSubscription?.cancel();
     await _stderrSubscription?.cancel();
@@ -391,6 +431,42 @@ class CompanionProcessManager {
     _stderrSubscription = null;
     if (identical(_process, process)) _process = null;
     _port = null;
+  }
+
+  /// 结束整棵子进程树。
+  ///
+  /// 只 kill 直接子进程是不够的：PATH 上的 `java` 可能是「再 exec 一个真 JVM」的包装器，
+  /// companion 还会派生 `GuardCryptoService`（-Xmx1g）长驻子进程。Windows 上用
+  /// `taskkill /F /T` 才能一次收干净，否则就会留下「关掉软件还有 java 在跑」。
+  /// taskkill 之后仍无条件 `kill()` 一次：非零退出码不会抛异常，不能靠它判断成败。
+  Future<void> _killProcessTree(Process process) async {
+    if (Platform.isWindows) {
+      try {
+        await Process.run(
+          'taskkill',
+          ['/F', '/T', '/PID', '${process.pid}'],
+          runInShell: true,
+        );
+      } catch (_) {
+        // taskkill 不可用时下面的 kill 仍然生效。
+      }
+    }
+    try {
+      process.kill();
+    } catch (_) {
+      // 进程已消失时 kill 可能抛错，忽略即可。
+    }
+  }
+
+  /// 等待退出；仍未退出则记录告警（不再抛异常，避免把「已尽力清理」升级成关闭失败）。
+  Future<void> _awaitExitOrWarn(Process process) async {
+    try {
+      await process.exitCode.timeout(exitTimeout);
+    } on TimeoutException {
+      _lastError = 'companion 进程在 ${exitTimeout.inMilliseconds}ms 内未退出'
+          '（pid=${process.pid}），已尝试终止进程树';
+      debugPrint('[companion] $_lastError');
+    }
   }
 
   /// 进入 running 后启动空闲监视；重挂时取消旧计时器，避免重复。
