@@ -24,11 +24,18 @@ public class Main {
     public static void main(String[] args) {
         int port = 0; // 0 = 由系统分配空闲端口
         boolean stdinWatch = false; // --stdin-watch=on 启用，默认关闭（见类注释）
+        long parentPid = -1L; // --parent-pid=<n>：父进程 pid 看门狗
         for (String arg : args) {
             if (arg.startsWith("--port=")) {
                 try {
                     port = Integer.parseInt(arg.substring(7).trim());
                 } catch (NumberFormatException ignored) {}
+            } else if (arg.startsWith("--parent-pid=")) {
+                try {
+                    parentPid = Long.parseLong(arg.substring("--parent-pid=".length()).trim());
+                } catch (NumberFormatException ignored) {
+                    parentPid = -1L;
+                }
             } else if (arg.startsWith("--self-check=")) {
                 // 自检初始状态：只有显式 on/true/1 才算开启，其余（含缺省）一律关闭。
                 String value = arg.substring("--self-check=".length()).trim();
@@ -61,8 +68,15 @@ public class Main {
             if (stdinWatch) {
                 startStdinWatchdog();
             }
+            if (parentPid > 0) {
+                startParentWatchdog(parentPid);
+            }
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                // 兜底：清理链（loader/代理/HTTP 线程）一旦卡住，2s 后强制终止 JVM。
+                // 没有这一层时，钩子里的阻塞会让 System.exit 永远不返回，
+                // 表现就是「软件已关闭，java 进程还在」。
+                startHaltFailsafe();
                 System.out.println("[COMPANION_STOPPING]");
                 AndroidBridge.shutdown();
             }));
@@ -96,5 +110,57 @@ public class Main {
         }, "companion-stdin-watch");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    /**
+     * 父进程看门狗：每秒确认一次 {@code --parent-pid} 还活着，父进程不在即自行退出。
+     *
+     * <p>为什么不能只靠 stdin EOF：桌面端的启动方式不止一种（PATH 上的 {@code java}
+     * 可能是“再 exec 一个真 JVM”的包装器、子进程可能继承管道句柄、调试器可能重定向
+     * stdin），任一情况都可能让本进程读不到 EOF。pid 存活性与这些细节无关，是**最后一道**
+     * 保险，确保「软件关了，java 还在」不会发生。
+     */
+    private static void startParentWatchdog(long parentPid) {
+        Thread thread = new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(1000L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                boolean alive;
+                try {
+                    alive = ProcessHandle.of(parentPid).map(ProcessHandle::isAlive).orElse(false);
+                } catch (Throwable t) {
+                    // ProcessHandle 不可用（极旧 JRE）：放弃看门狗，交给 stdin watch。
+                    return;
+                }
+                if (!alive) {
+                    System.out.println("[COMPANION_PARENT_GONE] pid=" + parentPid);
+                    System.out.flush();
+                    System.exit(0);
+                    return;
+                }
+            }
+        }, "companion-parent-watch");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /** 停机钩子里的强制退出保险：2s 内没走完清理就直接 halt。 */
+    private static void startHaltFailsafe() {
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(2000L);
+            } catch (InterruptedException ignored) {
+                return;
+            }
+            System.out.println("[COMPANION_HALT_TIMEOUT]");
+            System.out.flush();
+            Runtime.getRuntime().halt(0);
+        }, "companion-halt-failsafe");
+        t.setDaemon(true);
+        t.start();
     }
 }

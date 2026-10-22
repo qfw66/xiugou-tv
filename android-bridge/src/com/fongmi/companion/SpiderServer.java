@@ -2,6 +2,7 @@ package com.fongmi.companion;
 
 import com.github.catvod.crawler.Spider;
 import com.github.catvod.crawler.SpiderNull;
+import com.github.catvod.utils.DebugLog;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -24,6 +25,7 @@ public class SpiderServer {
     private final int requestedPort;
     private final ThreadPoolExecutor callPool;
     private HttpServer server;
+    private java.util.concurrent.ExecutorService httpExecutor;
     private int boundPort;
 
     public SpiderServer(int port) {
@@ -42,7 +44,13 @@ public class SpiderServer {
 
     public int start() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", requestedPort), 0);
-        server.setExecutor(Executors.newCachedThreadPool());
+        // 守护线程 + 显式 shutdown：HttpServer 自己不会关闭外部传入的 executor，
+        // 非守护线程会让 JVM 在「主逻辑已结束」后仍被吊住。
+        server.setExecutor(httpExecutor = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "spider-http");
+            t.setDaemon(true);
+            return t;
+        }));
 
         server.createContext("/health", new HealthHandler());
         server.createContext("/spider/load", new LoadHandler());
@@ -59,6 +67,10 @@ public class SpiderServer {
             loader.clear();
             server.stop(1);
             server = null;
+        }
+        if (httpExecutor != null) {
+            httpExecutor.shutdownNow();
+            httpExecutor = null;
         }
         callPool.shutdownNow();
     }
@@ -167,11 +179,14 @@ public class SpiderServer {
 
             long timeoutMs = resolveTimeoutMs(map);
             final String callTag = method + "@" + siteKey;
+            long dbg = DebugLog.rpcEnabled() ? DebugLog.nextId() : 0;
+            DebugLog.rpcStart(dbg, method, siteKey, api, ext, jar, map);
             String result = runWithWatchdog(exchange, callTag, timeoutMs,
                     () -> invokeSpiderCall(siteKey, api, ext, jar, method, map, callTag));
             if (result == null) {
                 return;
             }
+            DebugLog.rpcResult(dbg, method, result);
 
             String resp = "{\"code\":0,\"data\":" + (isJsonValue(result) ? result : "\"" + escapeJson(result) + "\"") + "}";
             sendJsonResponse(exchange, 200, resp);
@@ -200,12 +215,14 @@ public class SpiderServer {
             boolean cancelled = future.cancel(true);
             System.err.println("[SpiderServer] watchdog timeout " + timeoutMs + "ms tag=" + tag
                     + " (cancel=" + cancelled + "; worker may still be blocked on network I/O)");
+            DebugLog.line("RPC", "watchdog timeout " + timeoutMs + "ms tag=" + tag);
             sendJsonResponse(exchange, 504, "{\"code\":-2,\"error\":\"timeout\",\"tag\":\"" + escapeJson(tag)
                     + "\",\"timeoutMs\":" + timeoutMs + "}");
             return null;
         } catch (ExecutionException ee) {
             Throwable cause = ee.getCause() != null ? ee.getCause() : ee;
             cause.printStackTrace();
+            DebugLog.line("RPC", "error " + tag + ": " + cause);
             // 响应分三层：error=面向用户的人话；stage=内部阶段；detail=技术细节（只在日志/探针用）
             ParseStage.Failure failure = ParseStage.forTag(tag);
             String stage = failure != null ? failure.stage : ParseStage.CALL;

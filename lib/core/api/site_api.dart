@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../player/models/player_state.dart';
 import 'parse_engine.dart';
+import 'search_cancel_token.dart';
 import '../companion/companion_process_manager.dart';
 import '../companion/companion_spider_api.dart';
 import '../config/models/vod_config.dart';
@@ -94,18 +95,37 @@ class SiteApi {
   }
 
   /// 站源搜索
-  Future<VodPageResult> search(Site site, {required String keyword, int page = 1, bool quick = false}) async {
+  Future<VodPageResult> search(Site site,
+      {required String keyword,
+      int page = 1,
+      bool quick = false,
+      SearchCancelToken? cancelToken}) async {
+    if (cancelToken?.isCancelled ?? false) {
+      return const VodPageResult.empty();
+    }
     if (site.usesCompanion) {
       final ready = await _ensureCompanionReady(site);
+      if (cancelToken?.isCancelled ?? false) {
+        return const VodPageResult.empty();
+      }
       if (ready) {
         try {
-          return await companionSpiderApi.search(site, keyword: keyword, page: page, quick: quick);
+          // 伴随（Spider）请求把取消桥接成 Dio CancelToken：客户端立即停止等待；
+          // Java 侧已开跑的 spider 无法强制中断（并发上限见 SearchEngine）。
+          return await companionSpiderApi.search(
+            site,
+            keyword: keyword,
+            page: page,
+            quick: quick,
+            cancelToken: cancelToken,
+          );
         } catch (_) {
           return const VodPageResult.empty();
         }
       }
     }
-    return cmsApi.search(site.api, keyword, page: page, site: site);
+    return cmsApi.search(site.api, keyword, page: page, site: site,
+        cancelToken: cancelToken);
   }
 
   /// 统一点播解析入口：Spider 先解析选集标识，CMS 沿用通用解析策略。

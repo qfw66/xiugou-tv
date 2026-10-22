@@ -5,6 +5,7 @@ import 'app.dart';
 import 'core/app_info.dart';
 import 'core/companion/companion_process_manager.dart';
 import 'core/config/config_repository.dart';
+import 'core/config/models/builtin_sites.dart';
 import 'core/player/mpv_player_engine.dart';
 import 'core/settings/models/appearance_preferences.dart';
 import 'core/settings/settings_repository.dart';
@@ -28,7 +29,7 @@ Future<void> main() async {
       debugPrint('[xiugou-tv] data directory init failed: $error');
     }
 
-    final configRepository = ConfigRepository();
+    final configRepository = ConfigRepository(fallbackHomeSite: builtinDoubanSite);
     await configRepository.initialize();
 
     final settingsRepository = SettingsRepository();

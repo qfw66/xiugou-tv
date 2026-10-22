@@ -1,5 +1,7 @@
 package com.fongmi.companion;
 
+import com.fongmi.companion.guard.GuardCryptoService;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Map;
@@ -85,7 +87,12 @@ public class GuardHost {
     }
 
     public static String encrypt(String s) {
-        return s;
+        if (s == null) {
+            return null;
+        }
+        // 手机端 encrypt 由壳 so 实现；桌面端优先问常驻服务，不可用时退回恒等。
+        String viaShell = GuardCryptoService.encrypt(s);
+        return viaShell != null ? viaShell : s;
     }
 
     public static String decrypt(String s) {
@@ -93,12 +100,46 @@ public class GuardHost {
             return null;
         }
         String mapped = EXT_MAP.get(s);
-        return mapped != null ? mapped : s;
+        // -Dxiugou.guard.crypto=service 时优先问壳，用来核对「so 结果 vs 离线表」是否一致。
+        if ("service".equals(GuardCryptoService.mode())) {
+            String viaShell = GuardCryptoService.decrypt(s);
+            if (viaShell != null) {
+                return viaShell;
+            }
+            return mapped != null ? mapped : s;
+        }
+        // 默认 auto：表里有的直接返回（零成本），表里没有的才启动壳服务现解。
+        if (mapped != null) {
+            return mapped;
+        }
+        String viaShell = GuardCryptoService.decrypt(s);
+        return viaShell != null ? viaShell : s;
+    }
+
+    /**
+     * 载荷并不是按名字 decrypt 来找宿主解密，而是拿它自己混淆过的名字反射问
+     * InitOrigin.i（即本类）要方法：反编译载荷 g8.KJ 可见
+     * {@code InitOrigin.i.getDeclaredMethod(<7 个 U+0AB5>, String.class).invoke(null, s)}，
+     * 失败则 catch 掉并返回空串。名字对不上时，带加密 ext 的站点就表现为
+     * 「homeContent 有分类、categoryContent 0 部」，日志里只有一条 NoSuchMethodException。
+     *
+     * 方法名是载荷自带的混淆名，只能用同名字符串对齐；语义就是本类的 decrypt。
+     * 用 \u0AB5 转义书写，避免源码编码在不同机器上把标识符弄坏。
+     */
+    @SuppressWarnings("checkstyle:MethodName")
+    public static String \u0AB5\u0AB5\u0AB5\u0AB5\u0AB5\u0AB5\u0AB5(String s) {
+        return decrypt(s);
     }
 
     public static String native_ting_md5(String s) {
         if (s == null) {
             return null;
+        }
+        // 壳里的 native_ting_md5 不是标准 MD5（实测 "hello" -> 01def1de…），
+        // 优先用 so 的真实实现；服务不可用时才退回标准 MD5 近似。
+        String viaShell = GuardCryptoService.tingMd5(s);
+        if (viaShell != null) {
+            return viaShell;
         }
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
@@ -114,6 +155,8 @@ public class GuardHost {
     }
 
     public static int[] calcResult(int[] arr) {
-        return arr;
+        // 原始实现是 so 里的位运算，Java 恒等只是占位；能问到壳就用真值。
+        int[] viaShell = GuardCryptoService.calcResult(arr);
+        return viaShell != null ? viaShell : arr;
     }
 }

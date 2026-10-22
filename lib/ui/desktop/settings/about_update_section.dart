@@ -15,6 +15,7 @@ class AboutUpdateSection extends StatelessWidget {
   final VoidCallback onCheck;
   final VoidCallback onEditSource;
   final ValueChanged<bool> onAutoCheckChanged;
+  final ValueChanged<bool> onUseMirrorChanged;
   final VoidCallback onClearSkipped;
   final VoidCallback onOpenResult;
 
@@ -26,6 +27,7 @@ class AboutUpdateSection extends StatelessWidget {
     required this.onCheck,
     required this.onEditSource,
     required this.onAutoCheckChanged,
+    required this.onUseMirrorChanged,
     required this.onClearSkipped,
     required this.onOpenResult,
   });
@@ -119,7 +121,9 @@ class AboutUpdateSection extends StatelessWidget {
           Expanded(
             child: Text(
               preferences.source.isEmpty
-                  ? '官方（GitHub Releases）'
+                  ? (preferences.useMirror
+                      ? '官方（GitHub Releases）+ 镜像兜底'
+                      : '官方（GitHub Releases）')
                   : '自定义：${Uri.tryParse(preferences.source)?.host ?? preferences.source}',
               style: TextStyle(
                   fontSize: AppType.label, color: context.palette.textMain),
@@ -135,6 +139,25 @@ class AboutUpdateSection extends StatelessWidget {
             ),
           ),
         ]),
+        if (result?.sourceLabel != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: Row(children: [
+              const SizedBox(width: 88),
+              Icon(Icons.cloud_outlined,
+                  size: 14, color: context.palette.textSub),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  '上次来源：${result!.sourceLabel}'
+                  '${result.viaMirror ? '（摘要同源，仅供参考）' : ''}',
+                  style: TextStyle(
+                      fontSize: AppType.body, color: context.palette.textSub),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ]),
+          ),
         Row(children: [
           SizedBox(
               width: 88,
@@ -151,6 +174,29 @@ class AboutUpdateSection extends StatelessWidget {
             key: const ValueKey('about-auto-check'),
             value: preferences.autoCheck,
             onChanged: onAutoCheckChanged,
+          ),
+        ]),
+        Row(children: [
+          SizedBox(
+              width: 88,
+              child: Text('镜像加速',
+                  style: TextStyle(
+                      fontSize: AppType.label,
+                      color: context.palette.textSub))),
+          Expanded(
+            child: Text(
+              preferences.useMirror
+                  ? '官方不通时改用镜像下载'
+                  : '只用官方直连',
+              style: TextStyle(
+                  fontSize: AppType.body, color: context.palette.textSub),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          Switch(
+            key: const ValueKey('about-mirror-enabled'),
+            value: preferences.useMirror,
+            onChanged: onUseMirrorChanged,
           ),
         ]),
         if (skipped != null)

@@ -85,6 +85,9 @@ doc/
 .atom/
 .history/
 *.iml
+
+# 外部工具生成的工程文件（Lithe 工作区）
+/.lithe/
 *.ipr
 *.iws
 *.suo

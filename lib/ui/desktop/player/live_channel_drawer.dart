@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,20 +9,13 @@ import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../widgets/focus_ring.dart';
 
-/// ⑤-3 直播频道抽屉层：包在播放器外层，处理「左缘热区 + 抽屉 + 键盘导航」。
+/// ⑤-3 直播频道抽屉层（Infuse × Netflix 融合质感）：
 ///
-/// - 热区：鼠标进入窗口左缘 `min(220px, 宽 16%)` 区域即拉出抽屉；指针离开
-///   热区与抽屉后收起。用**祖先 MouseRegion** 跟踪悬停（不叠透明挡板），
-///   不拦截任何点击——热区不能吃掉播放器左区的播放 / 双击全屏手势。
-/// - 抽屉：半透明频道面板，按分组呈现；当前频道高亮 + 左侧 accent 条
-///   （skill `Active State`）、打开与切台后自动滚动到当前项
-///   （skill `Smooth Scroll`）、顶部管理入口。
-/// - 键盘：抽屉打开即请求焦点——↑/↓ 移动高亮、Enter 切台、Esc 收起
-///   （skill `Keyboard Navigation`，High）；←/→ 由播放器层路由为切台。
-/// - 半透明只做单色 alpha，不用背景模糊（skill `blur-purpose`：模糊只用于
-///   指示可关闭的背景，不做装饰）。
-///
-/// 仅直播播放时宿主传入非空 [channels]；点播恒为空、整层透明直通。
+/// 特性：
+/// 1. 微透磨砂玻璃抽屉（BackdropFilter 24px + 1px 细微高光右边框 + 柔和环境光晕）。
+/// 2. 交互逻辑：左缘热区自动滑出，Esc / 选台收起防回弹，↑/↓ 键盘焦点平滑滚动。
+/// 3. 精致频道行项：三位等宽台号微胶囊、正在播出动态红点、活跃态品牌色流光指示。
+/// 4. 完美避开顶底播放器控制条带（顶 54px，底 96px 留白）。
 class LiveChannelLayer extends StatefulWidget {
   final List<Live> channels;
   final int currentIndex;
@@ -43,7 +37,7 @@ class LiveChannelLayer extends StatefulWidget {
 }
 
 class _LiveChannelLayerState extends State<LiveChannelLayer> {
-  static const double _drawerWidth = 280;
+  static const double _drawerWidth = 290;
   static const double _hotzoneMax = 220;
   static const double _hotzoneRatio = 0.16;
 
@@ -69,9 +63,6 @@ class _LiveChannelLayerState extends State<LiveChannelLayer> {
   void _onHover(PointerHoverEvent event) {
     if (widget.channels.isEmpty) return;
     final dx = event.localPosition.dx;
-    // 收起边界 = 抽屉右缘（修复：此前误用热区宽 220，指针还在 280 宽的
-    // 抽屉内就会被判「离开」而提前收起——祖先 MouseRegion 能收到子区域事件，
-    // 原注释「抽屉上层、本层收不到」的假设不成立）；开启边界仍是热区宽。
     final inZone = dx <= (_open ? _drawerWidth : _hotzoneWidth);
     if (_open) {
       if (!inZone) _close();
@@ -89,15 +80,12 @@ class _LiveChannelLayerState extends State<LiveChannelLayer> {
     if (_open) setState(() => _open = false);
   }
 
-  /// 选台（鼠标点击 / 键盘 Enter 共用）：收起抽屉；本次收起不因指针仍在
-  /// 热区内而立刻重开——指针需先移出热区一次才允许再次自动拉出。
   void _handleSelect(int index) {
     widget.onSelect(index);
     _suppressReopen = true;
     _close();
   }
 
-  /// Esc 等显式收起（指针可能仍停在内侧，同样避免「关掉又弹回」）。
   void _dismiss() {
     _suppressReopen = true;
     _close();
@@ -112,8 +100,6 @@ class _LiveChannelLayerState extends State<LiveChannelLayer> {
         return MouseRegion(
           onHover: _onHover,
           onExit: (_) => _close(),
-          // 层须覆盖整块播放区域：显式 expand，不依赖子树自带尺寸
-          // （子项若是无固有尺寸的占位盒也能成立）。
           child: Stack(
             fit: StackFit.expand,
             children: [
@@ -181,11 +167,9 @@ class _LiveChannelDrawer extends StatefulWidget {
 }
 
 class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
-  static const double _headerHeight = 30;
-  static const double _itemHeight = 42;
+  static const double _headerHeight = 34;
+  static const double _itemHeight = 44;
 
-  /// 控制条带高度（顶栏 54；底栏 8+20+2+44+8 ≈ 96）：抽屉头部与列表避开，
-  /// 返回按钮 / 播放按钮 / 时间轴不被遮挡（skill `Sticky Navigation` 补白）。
   static const double _topBarInset = 54;
   static const double _bottomBarInset = 96;
 
@@ -193,15 +177,31 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
   final ScrollController _scrollController = ScrollController();
   int _cursor = 0;
 
+  /// 分组行 / 「频道下标 → 行下标」/「行下标 → 顶部偏移」缓存。
+  ///
+  /// 频道上千时 `_buildEntries()` 每次 build 都要全量遍历，而鼠标在列表上悬停
+  /// 会不断 setState（`_cursor` 变化）——相当于每移动一次鼠标 O(n) 扫两遍，
+  /// 表现为「数据多时下滑特别卡」。改为按通道列表身份缓存，滚动与悬停都走 O(1)。
+  List<_DrawerEntry> _entries = const [];
+  List<int> _channelEntryIndex = const [];
+  List<double> _entryTops = const [];
+
   @override
   void initState() {
     super.initState();
     _cursor = widget.currentIndex;
+    _rebuildEntryCache();
   }
 
   @override
   void didUpdateWidget(covariant _LiveChannelDrawer oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.channels, widget.channels)) {
+      _rebuildEntryCache();
+      if (_cursor >= widget.channels.length) {
+        _cursor = widget.channels.isEmpty ? 0 : widget.channels.length - 1;
+      }
+    }
     if (widget.open && !oldWidget.open) {
       _cursor = widget.currentIndex;
       _afterFrame(() {
@@ -211,7 +211,6 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
     } else if (!widget.open && oldWidget.open) {
       _focusNode.unfocus();
     } else if (widget.open && widget.currentIndex != oldWidget.currentIndex) {
-      // 切台（←/→ 或选台）后高亮跟随新当前项并滚动居中。
       _cursor = widget.currentIndex;
       _afterFrame(_scrollToCursor);
     }
@@ -263,109 +262,171 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
     _scrollToCursor();
   }
 
-  List<_DrawerEntry> _buildEntries() {
+  void _rebuildEntryCache() {
     final entries = <_DrawerEntry>[];
+    final channelEntryIndex = List<int>.filled(widget.channels.length, 0);
+    final tops = <double>[];
+    var offset = 0.0;
     String? lastGroup;
     for (var i = 0; i < widget.channels.length; i++) {
       final channel = widget.channels[i];
       final group = channel.groupName;
       if (group != lastGroup) {
+        tops.add(offset);
         entries.add(_DrawerEntry.header(group));
+        offset += _headerHeight;
         lastGroup = group;
       }
+      tops.add(offset);
+      channelEntryIndex[i] = entries.length;
       entries.add(_DrawerEntry.channel(i, channel));
+      offset += _itemHeight;
     }
-    return entries;
+    _entries = entries;
+    _channelEntryIndex = channelEntryIndex;
+    _entryTops = tops;
   }
 
-  /// 用固定行高累计目标偏移（不依赖 itemBuilder 的运行时上下文），
-  /// 平滑滚动让高亮项尽量落在视口中部（skill `Smooth Scroll`）。
   void _scrollToCursor() {
     if (!_scrollController.hasClients) return;
-    var offset = 0.0;
-    for (final entry in _buildEntries()) {
-      if (entry.channelIndex == _cursor) break;
-      offset += entry.isHeader ? _headerHeight : _itemHeight;
-    }
+    if (_cursor < 0 || _cursor >= _channelEntryIndex.length) return;
+    final offset = _entryTops[_channelEntryIndex[_cursor]];
     final position = _scrollController.position;
     final target = (offset - position.viewportDimension / 2 + _itemHeight)
         .clamp(0.0, position.maxScrollExtent)
         .toDouble();
-    _scrollController.animateTo(target,
-        duration: AppMotion.enter, curve: AppMotion.ease);
+    _scrollController.animateTo(
+      target,
+      duration: AppMotion.enter,
+      curve: AppMotion.ease,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
-    final entries = _buildEntries();
+    final entries = _entries;
+
     return Focus(
       focusNode: _focusNode,
       onKeyEvent: _onKey,
-      child: Container(
-        decoration: BoxDecoration(
-          color: palette.playerChrome.withValues(alpha: 0.92),
-          border: Border(
-              right: BorderSide(
-                  color: palette.playerText.withValues(alpha: 0.12))),
-          boxShadow: const [
-            BoxShadow(
-              // 面板投影固定黑色，与主题无关（同 OSD 浮层惯例）
-              color: Color(0x66000000),
-              blurRadius: 16,
-              offset: Offset(4, 0),
+      child: ClipRect(
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+          child: Container(
+            decoration: BoxDecoration(
+              color: const Color(0xE0101014),
+              border: Border(
+                right: BorderSide(
+                  color: Colors.white.withValues(alpha: 0.12),
+                  width: 1,
+                ),
+              ),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x66000000),
+                  blurRadius: 24,
+                  offset: Offset(8, 0),
+                ),
+              ],
             ),
-          ],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // 顶部控制条带留白：顶栏（返回按钮 / 标题）浮在抽屉之上，
-            // 抽屉头部下沉到其下方，避免叠字与遮挡。
-            const SizedBox(height: _topBarInset),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 12, 6, 8),
-              child: Row(
-                children: [
-                  Icon(Icons.live_tv_rounded,
-                      size: 16, color: palette.accentInk),
-                  const SizedBox(width: AppSpacing.sm),
-                  Expanded(
-                    child: Text(
-                      '直播频道',
-                      style: TextStyle(
-                        color: palette.playerText,
-                        fontSize: AppType.title,
-                        fontWeight: FontWeight.w600,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // 顶部控制条带留白（避开播放器顶栏返回与标题）
+                const SizedBox(height: _topBarInset),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 12, 10),
+                  child: Row(
+                    children: [
+                      // 微型图标胶囊底座
+                      Container(
+                        width: 30,
+                        height: 30,
+                        decoration: BoxDecoration(
+                          color: palette.accentWash,
+                          borderRadius: BorderRadius.circular(AppRadii.sm),
+                          border: Border.all(
+                            color: palette.accentInk.withValues(alpha: 0.3),
+                            width: 0.8,
+                          ),
+                        ),
+                        child: Center(
+                          child: Icon(
+                            Icons.live_tv_rounded,
+                            size: 16,
+                            color: palette.accentInk,
+                          ),
+                        ),
                       ),
-                    ),
+                      const SizedBox(width: AppSpacing.sm),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '直播频道',
+                              style: TextStyle(
+                                color: palette.playerText,
+                                fontSize: AppType.title,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: -0.2,
+                              ),
+                            ),
+                            Text(
+                              '共 ${widget.channels.length} 个电台',
+                              style: TextStyle(
+                                color: palette.playerText.withValues(alpha: 0.55),
+                                fontSize: AppType.caption,
+                                fontFeatures: const [
+                                  FontFeature.tabularFigures(),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      FocusOutline(
+                        radius: AppRadii.pill,
+                        child: IconButton(
+                          icon: Icon(
+                            Icons.tune_rounded,
+                            size: 18,
+                            color: palette.playerText.withValues(alpha: 0.85),
+                          ),
+                          tooltip: '管理直播频道',
+                          onPressed: widget.onManage,
+                        ),
+                      ),
+                    ],
                   ),
-                  FocusOutline(
-                    radius: AppRadii.pill,
-                    child: IconButton(
-                      icon: Icon(Icons.tune_rounded,
-                          size: 18,
-                          color: palette.playerText.withValues(alpha: 0.85)),
-                      tooltip: '管理直播频道',
-                      onPressed: widget.onManage,
+                ),
+                Divider(
+                  height: 1,
+                  thickness: 1,
+                  color: Colors.white.withValues(alpha: 0.08),
+                ),
+                Expanded(
+                  child: ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.only(
+                      top: 8,
+                      bottom: 8 + _bottomBarInset,
                     ),
+                    itemCount: entries.length,
+                    // 行高只有两档（分组头 34 / 频道行 44）。不给固定 extent 时，
+                    // 拖动滚动条跳到列表深处会让 SliverList 逐个 child 布局去估算
+                    // 偏移，频道上千就是一次长卡顿；给出 extent 后跳转是 O(1)。
+                    itemExtentBuilder: (index, _) => entries[index].isHeader
+                        ? _headerHeight
+                        : _itemHeight,
+                    itemBuilder: (context, index) =>
+                        _buildEntry(palette, entries[index]),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-            Divider(
-                height: 1, color: palette.playerText.withValues(alpha: 0.08)),
-            Expanded(
-              child: ListView.builder(
-                controller: _scrollController,
-                padding:
-                    const EdgeInsets.only(top: 6, bottom: 6 + _bottomBarInset),
-                itemCount: entries.length,
-                itemBuilder: (context, index) =>
-                    _buildEntry(palette, entries[index]),
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -375,16 +436,32 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
     if (entry.isHeader) {
       return Container(
         height: _headerHeight,
-        padding: const EdgeInsets.fromLTRB(15, 10, 14, 4),
-        child: Text(
-          entry.group!,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: palette.playerText.withValues(alpha: 0.55),
-            fontSize: AppType.caption,
-            fontWeight: FontWeight.w600,
-          ),
+        padding: const EdgeInsets.fromLTRB(16, 12, 14, 4),
+        child: Row(
+          children: [
+            Container(
+              width: 3,
+              height: 10,
+              decoration: BoxDecoration(
+                color: palette.accentInk.withValues(alpha: 0.6),
+                borderRadius: BorderRadius.circular(AppRadii.hairline),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                entry.group!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: palette.playerText.withValues(alpha: 0.65),
+                  fontSize: AppType.caption,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ),
+          ],
         ),
       );
     }
@@ -392,73 +469,115 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
     final channel = entry.channel!;
     final isCurrent = i == widget.currentIndex;
     final isCursor = i == _cursor;
+
+    // 台号格式化：三位对齐
+    final channelNumber = (i + 1).toString().padLeft(3, '0');
+
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
       child: FocusRing(
         onTap: () => widget.onSelect(i),
-        borderRadius: BorderRadius.circular(AppRadii.xs),
+        borderRadius: BorderRadius.circular(AppRadii.sm),
         semanticLabel: channel.name,
         child: MouseRegion(
           cursor: SystemMouseCursors.click,
-          // 鼠标悬停与键盘光标共用同一高亮（skill `Hover States`：
-          // 可点元素必须有 hover 视觉反馈）。
           onEnter: (_) {
             if (i != _cursor) setState(() => _cursor = i);
           },
           child: GestureDetector(
-            // 整行可点：行容器可能无底色，必须 opaque 才保空白区也命中
-            // （此前只有 FocusRing 的键盘激活，鼠标点击无效）。
             behavior: HitTestBehavior.opaque,
             onTap: () => widget.onSelect(i),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(AppRadii.xs),
-              child: Container(
-                height: _itemHeight - 2,
+            child: AnimatedContainer(
+              duration: isCursor || isCurrent ? AppMotion.enter : AppMotion.exit,
+              height: _itemHeight - 4,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
                 color: isCurrent
-                    ? palette.accentInk.withValues(alpha: 0.18)
+                    ? palette.accentInk.withValues(alpha: 0.22)
                     : (isCursor
-                        ? palette.playerText.withValues(alpha: 0.08)
-                        : null),
-                child: Row(
-                  children: [
-                    if (isCurrent)
-                      Container(width: 3, color: palette.accentInk),
-                    const SizedBox(width: 7),
-                    Expanded(
-                      child: Text(
-                        channel.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: isCurrent
-                              ? palette.playerText
-                              : palette.playerText.withValues(alpha: 0.85),
-                          fontSize: AppType.body,
-                          fontWeight:
-                              isCurrent ? FontWeight.w600 : FontWeight.w400,
-                        ),
+                        ? Colors.white.withValues(alpha: 0.08)
+                        : Colors.transparent),
+                borderRadius: BorderRadius.circular(AppRadii.sm),
+                border: Border.all(
+                  color: isCurrent
+                      ? palette.accentInk.withValues(alpha: 0.45)
+                      : (isCursor
+                          ? Colors.white.withValues(alpha: 0.12)
+                          : Colors.transparent),
+                  width: 1,
+                ),
+              ),
+              child: Row(
+                children: [
+                  // 三位台号微胶囊
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: isCurrent
+                          ? palette.accentInk.withValues(alpha: 0.25)
+                          : Colors.white.withValues(alpha: 0.06),
+                      borderRadius: BorderRadius.circular(AppRadii.xs),
+                    ),
+                    child: Text(
+                      channelNumber,
+                      style: TextStyle(
+                        color: isCurrent
+                            ? palette.accentInk
+                            : palette.playerText.withValues(alpha: 0.45),
+                        fontSize: AppType.caption,
+                        fontWeight: FontWeight.w600,
+                        fontFeatures: const [
+                          FontFeature.tabularFigures(),
+                        ],
                       ),
                     ),
-                    if (isCurrent) ...[
-                      // 当前频道热标（与 B6 直播弹窗同一视觉语言）
-                      Container(
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                            color: palette.danger, shape: BoxShape.circle),
+                  ),
+                  const SizedBox(width: 8),
+                  // 频道名称
+                  Expanded(
+                    child: Text(
+                      channel.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: isCurrent
+                            ? Colors.white
+                            : palette.playerText.withValues(alpha: 0.85),
+                        fontSize: AppType.body,
+                        fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
                       ),
-                      const SizedBox(width: 6),
-                      Text(
-                        '正在播出',
-                        style: TextStyle(
-                          color: palette.playerText.withValues(alpha: 0.7),
-                          fontSize: AppType.caption,
-                        ),
+                    ),
+                  ),
+                  // 当前播放热标
+                  if (isCurrent) ...[
+                    Container(
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: palette.danger,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: palette.danger.withValues(alpha: 0.6),
+                            blurRadius: 4,
+                          ),
+                        ],
                       ),
-                    ],
-                    const SizedBox(width: 12),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      '正在播出',
+                      style: TextStyle(
+                        color: palette.danger,
+                        fontSize: AppType.caption,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ],
-                ),
+                ],
               ),
             ),
           ),
