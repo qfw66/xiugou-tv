@@ -6,7 +6,7 @@
     runtime dependencies (including MPV and Flutter plugins), and packages the output
     into a portable ZIP archive and an Inno Setup installer executable.
 .PARAMETER Version
-    Product release version string (Default: 1.0.0).
+    Product release version string (Default: read from pubspec.yaml).
 .PARAMETER FlutterPath
     Custom path to Flutter SDK bin directory (e.g. 'D:\flutter\bin').
 .PARAMETER SkipZip
@@ -16,8 +16,7 @@
 #>
 
 param (
-    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$')]
-    [string]$Version = "1.0.0",
+    [string]$Version = "",
     [string]$FlutterPath = "",
     [switch]$SkipZip = $false,
     [switch]$SkipInstaller = $false
@@ -28,6 +27,22 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path "$ScriptDir/..").Path
 $BuildOutputDir = "$ProjectRoot/build/windows/x64/runner/Release"
 $DistDir = "$ProjectRoot/dist"
+
+# 版本号默认跟随 pubspec.yaml（开发版本真源）；显式传 -Version 时以参数为准。
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $pubspecPath = Join-Path $ProjectRoot "pubspec.yaml"
+    $versionLine = Get-Content -LiteralPath $pubspecPath |
+        Where-Object { $_ -match '^\s*version:\s*\S+' } |
+        Select-Object -First 1
+    if ($versionLine -match '^\s*version:\s*(\d+\.\d+\.\d+)') {
+        $Version = $Matches[1]
+    } else {
+        throw "无法从 pubspec.yaml 解析版本号，请显式传 -Version x.y.z"
+    }
+}
+if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {
+    throw "版本号格式不合法：$Version（期望 x.y.z）"
+}
 
 Write-Host "======================================================" -ForegroundColor Cyan
 Write-Host "  修狗TV Build & Packaging System" -ForegroundColor Cyan

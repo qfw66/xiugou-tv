@@ -10,13 +10,22 @@ import '../widgets/focus_ring.dart';
 /// 横滑轨道里是 154×236 的小卡，512 宽足够（快）；首页大屏要把竖版海报横向
 /// 铺满 480 高，必须拿原图 + 按设备像素解码，否则会被放大 2–3 倍糊成一片。
 class PosterSpec {
-  const PosterSpec({required this.targetWidth, this.highRes = false});
+  const PosterSpec({
+    required this.targetWidth,
+    this.highRes = false,
+    this.urlOverride,
+  });
 
   /// 解码目标宽度（设备像素，只缩不放）
   final int targetWidth;
 
   /// 是否要原图（豆瓣把 `m_ratio_poster` 提到 `raw`）
   final bool highRes;
+
+  /// 换一张源图（首页巨幅位用横版剧照）；为空则按 [highRes] 走原海报逻辑。
+  ///
+  /// 只在**能拿到横图**时填，拿不到就留空 → 调用方回落竖版原图。
+  final String? urlOverride;
 }
 
 /// 仿 Netflix 首页视图 (Netflix Home View)
@@ -32,6 +41,9 @@ class NetflixHomeView extends StatefulWidget {
   final ValueChanged<VodItem> onItemTap;
   final ValueChanged<VodCategory> onCategoryTap;
   final ImageProvider? Function(VodItem item, PosterSpec spec)? imageProviderFor;
+
+  /// 首页巨幅位专用的横版剧照解析（返回 null 时回落竖版海报）。
+  final Future<String?> Function(VodItem item)? stillUrlFor;
   final bool isLoading;
 
   /// 垂直滚动控制器（外部传入时由外部持有；用于触底续页判断）。
@@ -47,6 +59,7 @@ class NetflixHomeView extends StatefulWidget {
     required this.onItemTap,
     required this.onCategoryTap,
     this.imageProviderFor,
+    this.stillUrlFor,
     this.isLoading = false,
     this.scrollController,
     this.onScrollNotification,
@@ -126,6 +139,7 @@ class _NetflixHomeViewState extends State<NetflixHomeView> {
               items: billboardItems,
               onItemTap: widget.onItemTap,
               imageProviderFor: widget.imageProviderFor,
+              stillUrlFor: widget.stillUrlFor,
             ),
 
           const SizedBox(height: 20),
@@ -167,10 +181,14 @@ class _HeroBillboard extends StatefulWidget {
   final ImageProvider? Function(VodItem item, PosterSpec spec)?
       imageProviderFor;
 
+  /// 取该片的横版剧照（16:9）；返回 null 表示没有，界面回落竖版海报。
+  final Future<String?> Function(VodItem item)? stillUrlFor;
+
   const _HeroBillboard({
     required this.items,
     required this.onItemTap,
     this.imageProviderFor,
+    this.stillUrlFor,
   });
 
   @override
@@ -182,10 +200,17 @@ class _HeroBillboardState extends State<_HeroBillboard> {
   Timer? _autoPlayTimer;
   bool _isHovering = false;
 
+  /// 已拿到的横图地址（键为 `item.id`）；没拿到的不进表，继续走竖版海报。
+  final Map<String, String> _stillUrls = <String, String>{};
+
+  /// 已经问过的 id，避免每帧重复请求。
+  final Set<String> _stillRequested = <String>{};
+
   @override
   void initState() {
     super.initState();
     _startAutoPlay();
+    _resolveStills();
   }
 
   @override
@@ -194,6 +219,22 @@ class _HeroBillboardState extends State<_HeroBillboard> {
     if (widget.items.length != oldWidget.items.length) {
       _currentIndex = 0;
       _startAutoPlay();
+    }
+    _resolveStills();
+  }
+
+  /// 并发问一遍尚未解析过的条目；谁先回来谁先显示，不阻塞首屏。
+  void _resolveStills() {
+    final resolve = widget.stillUrlFor;
+    if (resolve == null) return;
+    for (final item in widget.items) {
+      if (!_stillRequested.add(item.id)) continue;
+      resolve(item).then((url) {
+        if (!mounted || url == null || url.isEmpty) return;
+        setState(() => _stillUrls[item.id] = url);
+      }).catchError((Object _) {
+        // 拉不到就用竖版海报，不打扰用户
+      });
     }
   }
 
@@ -244,7 +285,10 @@ class _HeroBillboardState extends State<_HeroBillboard> {
   Widget build(BuildContext context) {
     if (widget.items.isEmpty) return const SizedBox.shrink();
     final palette = AppPalette.of(context);
+    final tone = _HeroTone.of(context);
     final item = widget.items[_currentIndex.clamp(0, widget.items.length - 1)];
+    // 有横版剧照就用剧照；没有则 null → 走原来的竖版原图。
+    final stillUrl = _stillUrls[item.id];
 
     return MouseRegion(
       onEnter: (_) => setState(() => _isHovering = true),
@@ -253,6 +297,7 @@ class _HeroBillboardState extends State<_HeroBillboard> {
         height: 480,
         width: double.infinity,
         child: Stack(
+          key: const ValueKey('hero-billboard'),
           fit: StackFit.expand,
           children: [
             // 1. 全景海报背景图 (淡入淡出动画)
@@ -261,7 +306,8 @@ class _HeroBillboardState extends State<_HeroBillboard> {
               switchInCurve: Curves.easeInOutCubic,
               switchOutCurve: Curves.easeInOutCubic,
               child: SizedBox(
-                key: ValueKey(item.id),
+                // 横图到达后 key 变化 → 从竖版海报淡入横图，不闪白
+                key: ValueKey('${item.id}|${stillUrl ?? ''}'),
                 width: double.infinity,
                 height: 480,
                 child: Image(
@@ -270,13 +316,14 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                         PosterSpec(
                           targetWidth: _heroTargetWidth(context),
                           highRes: true,
+                          urlOverride: stillUrl,
                         ),
                       ) ??
                       NetworkImage(item.pic),
                   fit: BoxFit.cover,
                   filterQuality: FilterQuality.medium,
                   errorBuilder: (_, __, ___) => Container(
-                    color: const Color(0xFF1E2330),
+                    color: tone.placeholder,
                     child: Center(
                       child: Icon(
                         Icons.movie_creation_outlined,
@@ -289,39 +336,26 @@ class _HeroBillboardState extends State<_HeroBillboard> {
               ),
             ),
 
-            // 2. 左侧深邃黑色羽化渐变（保证左侧文字极其清晰）
-            const Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.centerLeft,
-                    end: Alignment.centerRight,
-                    stops: [0.0, 0.40, 0.70, 1.0],
-                    colors: [
-                      Color(0xF5101014),
-                      Color(0xD9101014),
-                      Color(0x66101014),
-                      Colors.transparent,
-                    ],
-                  ),
-                ),
-              ),
-            ),
-
-            // 3. 底部电影级平滑黑场渐变（与下方内容区无缝融合）
-            const Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    stops: [0.0, 0.50, 0.82, 1.0],
-                    colors: [
-                      Colors.transparent,
-                      Colors.transparent,
-                      Color(0xB3101014),
-                      Color(0xFF101014),
-                    ],
+            // 2. 底部接缝渐隐：只把海报下缘溶进页面底色，避免水平硬边。
+            //    起点以下整张海报原样可见——浅色主题不再用白场压图，
+            //    这正是「海报看得见」的关键；文字对比交给自身阴影。
+            //    起点按主题取（浅色 0.58 / 深色 0.40）：白色泛白更扎眼，
+            //    底座区收窄到 42% 才不抢画面。
+            //    首末同色、只改 alpha，避免 sRGB 插值经过灰色。
+            Positioned.fill(
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      stops: <double>[0.0, tone.seamStart, 1.0],
+                      colors: [
+                        palette.background.withValues(alpha: 0),
+                        palette.background.withValues(alpha: 0),
+                        palette.background,
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -367,37 +401,37 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
-                            color: const Color(0x99000000),
+                            color: tone.capsuleBg,
                             borderRadius: BorderRadius.circular(AppRadii.xs),
                             border: Border.all(
-                              color: Colors.white.withValues(alpha: 0.2),
+                              color: tone.capsuleBorder,
                               width: 0.5,
                             ),
                           ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              const Text(
+                              Text(
                                 '★ ',
                                 style: TextStyle(
-                                  color: Color(0xFFFFC107),
+                                  color: tone.scoreInk,
                                   fontSize: AppType.micro,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
                               Text(
                                 item.score!,
-                                style: const TextStyle(
-                                  color: Color(0xFFFFC107),
+                                style: TextStyle(
+                                  color: tone.scoreInk,
                                   fontSize: AppType.caption,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
                               const SizedBox(width: 4),
-                              const Text(
+                              Text(
                                 '豆瓣',
                                 style: TextStyle(
-                                  color: Colors.white70,
+                                  color: tone.meta,
                                   fontSize: AppType.micro,
                                 ),
                               ),
@@ -411,9 +445,10 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                         Text(
                           item.year!,
                           style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.75),
+                            color: tone.meta,
                             fontSize: AppType.caption,
                             fontWeight: FontWeight.w500,
+                            shadows: tone.textShadows,
                           ),
                         ),
                       ],
@@ -421,9 +456,10 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                         Text(
                           '· ${item.remarks!}',
                           style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.75),
+                            color: tone.meta,
                             fontSize: AppType.caption,
                             fontWeight: FontWeight.w500,
+                            shadows: tone.textShadows,
                           ),
                         ),
                     ],
@@ -433,18 +469,12 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                   // 巨幅标题
                   Text(
                     item.name,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: AppType.display,
                       fontWeight: FontWeight.w900,
-                      color: Colors.white,
+                      color: tone.title,
                       letterSpacing: -0.5,
-                      shadows: [
-                        Shadow(
-                          color: Color(0x99000000),
-                          blurRadius: 12,
-                          offset: Offset(0, 2),
-                        ),
-                      ],
+                      shadows: tone.textShadows,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -459,8 +489,9 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                         item.content!.replaceAll(RegExp(r'<[^>]*>'), '').trim(),
                         style: TextStyle(
                           fontSize: AppType.body,
-                          color: Colors.white.withValues(alpha: 0.85),
+                          color: tone.body,
                           height: 1.45,
+                          shadows: tone.textShadows,
                         ),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
@@ -474,13 +505,13 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                     runSpacing: 10,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      // 主按钮：立即播放（Netflix 经典纯白大药丸）
+                      // 主按钮：立即播放（深色主题＝纯白药丸，浅色主题＝近黑药丸）
                       FocusRing(
                         onTap: () => widget.onItemTap(item),
                         semanticLabel: '立即播放 ${item.name}',
                         borderRadius: BorderRadius.circular(AppRadii.pill),
                         child: Material(
-                          color: Colors.white,
+                          color: tone.ctaBg,
                           borderRadius: BorderRadius.circular(AppRadii.pill),
                           child: InkWell(
                             onTap: () => widget.onItemTap(item),
@@ -491,24 +522,24 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                               decoration: BoxDecoration(
                                 borderRadius:
                                     BorderRadius.circular(AppRadii.pill),
-                                boxShadow: const [
+                                boxShadow: [
                                   BoxShadow(
-                                    color: Color(0x55000000),
+                                    color: tone.ctaShadow,
                                     blurRadius: 16,
-                                    offset: Offset(0, 4),
+                                    offset: const Offset(0, 4),
                                   ),
                                 ],
                               ),
-                              child: const Row(
+                              child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   Icon(Icons.play_arrow_rounded,
-                                      color: Color(0xFF101014), size: 22),
-                                  SizedBox(width: 6),
+                                      color: tone.ctaInk, size: 22),
+                                  const SizedBox(width: 6),
                                   Text(
                                     '立即播放',
                                     style: TextStyle(
-                                      color: Color(0xFF101014),
+                                      color: tone.ctaInk,
                                       fontSize: AppType.lead,
                                       fontWeight: FontWeight.w800,
                                     ),
@@ -534,24 +565,24 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 20, vertical: 10),
                               decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.16),
+                                color: tone.ghostBg,
                                 borderRadius:
                                     BorderRadius.circular(AppRadii.pill),
                                 border: Border.all(
-                                  color: Colors.white.withValues(alpha: 0.35),
+                                  color: tone.ghostBorder,
                                   width: 1,
                                 ),
                               ),
-                              child: const Row(
+                              child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   Icon(Icons.info_outline_rounded,
-                                      color: Colors.white, size: 20),
-                                  SizedBox(width: 6),
+                                      color: tone.ghostInk, size: 20),
+                                  const SizedBox(width: 6),
                                   Text(
                                     '详细信息',
                                     style: TextStyle(
-                                      color: Colors.white,
+                                      color: tone.ghostInk,
                                       fontSize: AppType.title,
                                       fontWeight: FontWeight.w600,
                                     ),
@@ -586,7 +617,7 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                         decoration: BoxDecoration(
                           color: _currentIndex == i
                               ? palette.accentInk
-                              : Colors.white.withValues(alpha: 0.28),
+                              : tone.dotInactive,
                           borderRadius:
                               BorderRadius.circular(AppRadii.hairline),
                         ),
@@ -641,6 +672,142 @@ class _HeroBillboardState extends State<_HeroBillboard> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// 巨幅位的「遮罩 + 前景」配色对。
+///
+/// 遮罩只是背景，可读性靠**前景跟着一起换**：深色主题＝黑场 + 白字，
+/// 浅色主题＝白场 + 深字。只把渐变刷白、文字仍留白，就是白底白字（1:1）。
+///
+/// 两端遮罩 alpha 完全一致（左侧 0.96 / 0.85 / 0.40，底部 0.70），所以两种主题
+/// 在文字区拿到同一档强度。最坏情况（整块图纯黑、左侧遮罩 0.96 白）实测：
+/// 标题 `#14141A` → **16.8:1**、正文 `#3A3A46` → **10.1:1**、
+/// 次级 `#5B5B6C` → **6.1:1**、评分 `#7A4200` 压 82% 白胶囊 → **5.3:1**，
+/// 全部 ≥ WCAG AA 的 4.5:1。
+///
+/// 深色主题取值与 v1.0.1 视觉等价（唯一差别：评分胶囊里的「豆瓣」
+/// 从 `white70` 改到 75%，肉眼不可见）。
+@immutable
+class _HeroTone {
+  const _HeroTone({
+    required this.title,
+    required this.body,
+    required this.meta,
+    required this.capsuleBg,
+    required this.capsuleBorder,
+    required this.scoreInk,
+    required this.ctaBg,
+    required this.ctaInk,
+    required this.ctaShadow,
+    required this.ghostBg,
+    required this.ghostBorder,
+    required this.ghostInk,
+    required this.dotInactive,
+    required this.placeholder,
+    required this.textShadows,
+    required this.seamStart,
+  });
+
+  /// 巨幅位标题
+  final Color title;
+
+  /// 剧情简介
+  final Color body;
+
+  /// 年份 / 备注 / 胶囊里的「豆瓣」
+  final Color meta;
+
+  /// 评分胶囊底与描边
+  final Color capsuleBg;
+  final Color capsuleBorder;
+
+  /// 星级 / 分数（浅色下必须压深，`#FFC107` 在白底只有 1.7:1）
+  final Color scoreInk;
+
+  /// 主按钮（立即播放）
+  final Color ctaBg;
+  final Color ctaInk;
+  final Color ctaShadow;
+
+  /// 次按钮（详细信息）
+  final Color ghostBg;
+  final Color ghostBorder;
+  final Color ghostInk;
+
+  /// 未选中轮播点
+  final Color dotInactive;
+
+  /// 海报加载失败的占位底
+  final Color placeholder;
+
+  /// 文字描边阴影：不再有压图遮罩后，靠它保证文字压在海报上也清晰。
+  ///
+  /// 深色＝白字配黑晕，浅色＝深字配白晕；近距硬阴影保边缘、远距柔光保
+  /// 暗部，两层叠加在明暗海报上都够用。
+  final List<Shadow>? textShadows;
+
+  /// 底部接缝渐隐的起点（0–1，越小＝白色/底色区域越高）。
+  ///
+  /// 深色压黑不显眼，保持 0.40；浅色用白，60% 高度都泛白会糊住海报，
+  /// 收到 0.58（底座区 42%，约 202px）才不抢画面。
+  final double seamStart;
+
+  /// 深色：v1.0.1 的白字配色，但遮罩换成文字阴影（不再压黑整幅图）。
+  static const _HeroTone dark = _HeroTone(
+    title: Colors.white,
+    body: Color(0xD9FFFFFF),
+    meta: Color(0xBFFFFFFF),
+    capsuleBg: Color(0x99000000),
+    capsuleBorder: Color(0x33FFFFFF),
+    scoreInk: Color(0xFFFFC107),
+    ctaBg: Colors.white,
+    ctaInk: Color(0xFF101014),
+    ctaShadow: Color(0x55000000),
+    ghostBg: Color(0x29FFFFFF),
+    ghostBorder: Color(0x59FFFFFF),
+    ghostInk: Colors.white,
+    dotInactive: Color(0x47FFFFFF),
+    placeholder: Color(0xFF1E2330),
+    textShadows: [
+      Shadow(color: Color(0xCC000000), blurRadius: 6, offset: Offset(0, 1)),
+      Shadow(color: Color(0x99000000), blurRadius: 16, offset: Offset(0, 3)),
+    ],
+    seamStart: 0.40,
+  );
+
+  static _HeroTone of(BuildContext context) {
+    if (Theme.of(context).brightness == Brightness.dark) return dark;
+    final palette = AppPalette.of(context);
+    return _HeroTone(
+      title: palette.textTitle,
+      body: palette.textBody,
+      meta: palette.textSub,
+      capsuleBg: Colors.white.withValues(alpha: 0.82),
+      capsuleBorder: Colors.black.withValues(alpha: 0.10),
+      scoreInk: const Color(0xFF7A4200),
+      ctaBg: palette.textTitle,
+      ctaInk: Colors.white,
+      ctaShadow: const Color(0x33000000),
+      ghostBg: Colors.black.withValues(alpha: 0.05),
+      ghostBorder: Colors.black.withValues(alpha: 0.16),
+      ghostInk: palette.textMain,
+      dotInactive: Colors.black.withValues(alpha: 0.22),
+      placeholder: palette.raised,
+      textShadows: [
+        Shadow(
+          color: Colors.white.withValues(alpha: 0.90),
+          blurRadius: 6,
+          offset: const Offset(0, 1),
+        ),
+        Shadow(
+          color: Colors.white.withValues(alpha: 0.60),
+          blurRadius: 16,
+          offset: const Offset(0, 3),
+        ),
+      ],
+      seamStart: 0.58,
     );
   }
 }

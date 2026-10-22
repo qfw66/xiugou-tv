@@ -4219,19 +4219,25 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                                   category: category,
                                                   preserveCategories: true);
                                             },
+                                            stillUrlFor: (item) => ref
+                                                .read(doubanRepositoryProvider)
+                                                .stillUrlFor(item.id),
                                             imageProviderFor: (item, spec) {
                                               if (!DoubanRepository
                                                   .isDoubanPoster(item.pic)) {
                                                 return null;
                                               }
+                                              // 巨幅位优先横版剧照（16:9）；
+                                              // 拉不到时 urlOverride 为空，
+                                              // 回落竖版原图（现状口径）。
+                                              final url = spec.urlOverride ??
+                                                  (spec.highRes
+                                                      ? DoubanRepository
+                                                          .highResPosterUrl(
+                                                              item.pic)
+                                                      : item.pic);
                                               return DoubanPosterImage(
-                                                // 大屏要原图（m_ratio_poster →
-                                                // raw），轨道要 512 小图。
-                                                spec.highRes
-                                                    ? DoubanRepository
-                                                        .highResPosterUrl(
-                                                            item.pic)
-                                                    : item.pic,
+                                                url,
                                                 fallbackUrl: spec.highRes
                                                     ? item.pic
                                                     : null,

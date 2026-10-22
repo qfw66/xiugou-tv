@@ -110,6 +110,9 @@ class DoubanRepository {
   static const String collectionBase =
       'https://m.douban.com/rexxar/api/v2/subject_collection';
 
+  /// 单片接口前缀（剧照在这里：`<base>/movie/<id>/photos?type=S`）。
+  static const String subjectBase = 'https://m.douban.com/rexxar/api/v2';
+
   /// 豆瓣接口与图床共用的浏览器 UA。
   ///
   /// 图床实测（2026-10-22，Flutter 同款 HttpClient）：**UA + Referer 必须同时带**，
@@ -164,6 +167,9 @@ class DoubanRepository {
   final DoubanHttpGet _httpGet;
   final Duration cacheTtl;
 
+  /// 剧照（横图）缓存时长：比列表长得多——剧照不随榜单变动，30 分钟足够。
+  final Duration stillCacheTtl;
+
   /// 键为 `集合:起始:数量`
   final Map<String, _CacheEntry> _cache = <String, _CacheEntry>{};
 
@@ -171,9 +177,17 @@ class DoubanRepository {
   final Map<String, Future<DoubanPage>> _inflight =
       <String, Future<DoubanPage>>{};
 
+  /// subject id → 剧照地址（null 表示确认没有横图，避免反复重试）。
+  final Map<String, _StillEntry> _stills = <String, _StillEntry>{};
+
+  /// 同一部片的剧照请求只发一次（hero 轮播会反复问同一批 id）。
+  final Map<String, Future<String?>> _stillInflight =
+      <String, Future<String?>>{};
+
   DoubanRepository({
     DoubanHttpGet? httpGet,
     this.cacheTtl = const Duration(minutes: 8),
+    this.stillCacheTtl = const Duration(minutes: 30),
   }) : _httpGet = httpGet ?? _dioGet;
 
   /// 一页分类内容：带上 `total` 才能判断「还有没有下一页」（§19 无限滚动）。
@@ -212,7 +226,82 @@ class DoubanRepository {
     return cached != null && !cached.isExpired;
   }
 
-  void clearCache() => _cache.clear();
+  void clearCache() {
+    _cache.clear();
+    _stills.clear();
+  }
+
+  /// 取一部片的**横版剧照**（16:9）；拉不到返回 null，由调用方回落竖版海报。
+  ///
+  /// 为什么不在合集接口里拿：`subject_collection_items` 每条只有一个竖版
+  /// `cover`（实测 4400×5500），在 480 高的巨幅位里只能横切一条再放大，看着糊；
+  /// 剧照接口给的是原生 1600×900 横图（2026-10-23 实测：电影 20/20 横图、
+  /// 剧集 3/20、综艺 10/10）。
+  ///
+  /// 路径固定走 `/movie/`：对剧集 / 综艺 id 它会 301 到 `/tv/`，Dio 默认跟随
+  /// 重定向；真被关掉跟随再退 `/tv/` 试一次。
+  Future<String?> stillUrlFor(String id, {bool forceRefresh = false}) {
+    if (id.isEmpty) return Future<String?>.value(null);
+    final cached = _stills[id];
+    if (!forceRefresh && cached != null && !cached.isExpired) {
+      return Future<String?>.value(cached.url);
+    }
+    final pending = _stillInflight[id];
+    if (pending != null) return pending;
+    final future = _fetchStill(id);
+    _stillInflight[id] = future;
+    return future.whenComplete(() => _stillInflight.remove(id));
+  }
+
+  Future<String?> _fetchStill(String id) async {
+    for (final kind in const <String>['movie', 'tv']) {
+      final uri = Uri.parse('$subjectBase/$kind/$id/photos'
+          '?type=S&start=0&count=20&items_only=1');
+      try {
+        final body = await _httpGet(uri);
+        final url = pickLandscapeStill(body);
+        // 解析成功就落缓存（含 null），免得每次都重打接口。
+        _stills[id] = _StillEntry(url, DateTime.now().add(stillCacheTtl));
+        return url;
+      } catch (_) {
+        // 该 id 不属于这个类型 / 重定向没被跟随：换下一条路径再试
+      }
+    }
+    return null; // 全失败不缓存，下次进首页再试
+  }
+
+  /// 从 `photos` 响应里挑一张横图：宽 > 高，取宽度最大者；没有则返回 null。
+  ///
+  /// 剧集剧照里混着竖版（实测 20 张里 17 张竖版），不筛会挑到竖图。
+  static String? pickLandscapeStill(String body) {
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(body);
+    } on FormatException {
+      return null;
+    }
+    if (decoded is! Map) return null;
+    final photos = decoded['photos'];
+    if (photos is! List) return null;
+    String? best;
+    var bestWidth = 0;
+    for (final entry in photos) {
+      if (entry is! Map) continue;
+      final image = entry['image'];
+      if (image is! Map) continue;
+      final large = image['large'];
+      if (large is! Map) continue;
+      final width = (large['width'] as num?)?.toInt() ?? 0;
+      final height = (large['height'] as num?)?.toInt() ?? 0;
+      final url = (large['url'] ?? '').toString();
+      if (url.isEmpty || width <= height) continue;
+      if (width > bestWidth) {
+        best = url;
+        bestWidth = width;
+      }
+    }
+    return best;
+  }
 
   Future<DoubanPage> _fetch(
       String collection, int start, int count, String key) async {
@@ -357,6 +446,16 @@ class DoubanRepository {
     }
     return body;
   }
+}
+
+/// 剧照缓存条目：`url == null` 也缓存，表示「确认这部剧没有横图」。
+class _StillEntry {
+  final String? url;
+  final DateTime expiresAt;
+
+  const _StillEntry(this.url, this.expiresAt);
+
+  bool get isExpired => DateTime.now().isAfter(expiresAt);
 }
 
 class _CacheEntry {
