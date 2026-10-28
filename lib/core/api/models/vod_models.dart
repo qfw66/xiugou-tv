@@ -15,6 +15,10 @@ class VodItem {
   final String? siteKey;
   final String? siteName;
 
+  /// FongMi 的 `vod.action`：非空时点击条目不进详情，而是调用站源的 `action()`
+  /// （配置中心的扫码登录 / 填写 cookie 等设置项就是这种条目）。
+  final String? action;
+
   const VodItem({
     required this.id,
     required this.name,
@@ -30,6 +34,7 @@ class VodItem {
     this.tag,
     this.siteKey,
     this.siteName,
+    this.action,
   });
 
   VodItem copyWith({
@@ -47,6 +52,7 @@ class VodItem {
     String? tag,
     String? siteKey,
     String? siteName,
+    String? action,
   }) {
     return VodItem(
       id: id ?? this.id,
@@ -63,6 +69,7 @@ class VodItem {
       tag: tag ?? this.tag,
       siteKey: siteKey ?? this.siteKey,
       siteName: siteName ?? this.siteName,
+      action: action ?? this.action,
     );
   }
 
@@ -75,6 +82,8 @@ class VodItem {
     final rawTag = json['vod_tag']?.toString() ??
         json['tag']?.toString() ??
         json['vod_class']?.toString();
+
+    final rawAction = json['action']?.toString().trim();
 
     return VodItem(
       id: json['vod_id']?.toString() ?? json['id']?.toString() ?? '',
@@ -91,6 +100,7 @@ class VodItem {
       tag: (rawTag != null && rawTag.isNotEmpty) ? rawTag : null,
       siteKey: json['site_key']?.toString(),
       siteName: json['site_name']?.toString(),
+      action: (rawAction != null && rawAction.isNotEmpty) ? rawAction : null,
     );
   }
 
@@ -109,6 +119,7 @@ class VodItem {
     if (tag != null) 'vod_tag': tag,
     if (siteKey != null) 'site_key': siteKey,
     if (siteName != null) 'site_name': siteName,
+    if (action != null) 'action': action,
   };
 }
 

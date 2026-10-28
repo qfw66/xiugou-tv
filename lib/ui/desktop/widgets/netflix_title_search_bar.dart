@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../theme/app_input_density.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import 'focus_ring.dart';
@@ -57,6 +58,17 @@ class _NetflixTitleSearchBarState extends State<NetflixTitleSearchBar> {
     if (mounted) setState(() {});
   }
 
+  /// 行盒高度倍数：输入文字与占位提示共用，避免两者度量漂移（§26）。
+  static const double _lineHeight = 1.2;
+
+  /// 输入 / 提示共用的文本样式：只差颜色，其余度量必须完全一致。
+  TextStyle _lineStyle(Color color) => TextStyle(
+        fontSize: AppType.caption,
+        color: color,
+        height: _lineHeight,
+        leadingDistribution: TextLeadingDistribution.even,
+      );
+
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
@@ -110,38 +122,34 @@ class _NetflixTitleSearchBarState extends State<NetflixTitleSearchBar> {
                 ),
                 const SizedBox(width: 4),
                 Expanded(
-                  child: TextField(
-                    controller: widget.controller,
-                    focusNode: widget.focusNode,
-                    // 中文在高 30 的胶囊里容易「看着偏下」：字体自带的
-                    // leading 默认按比例分配（上小下大）。把行盒按字号固定，
-                    // 并让上下 leading 均分，文字块才是视觉居中。
-                    style: TextStyle(
-                      fontSize: AppType.caption,
-                      color: palette.textMain,
-                      height: 1.2,
-                      leadingDistribution: TextLeadingDistribution.even,
-                    ),
-                    strutStyle: const StrutStyle(
-                      fontSize: AppType.caption,
-                      height: 1.2,
-                      forceStrutHeight: true,
-                      leadingDistribution: TextLeadingDistribution.even,
-                    ),
-                    textAlignVertical: TextAlignVertical.center,
-                    decoration: InputDecoration(
-                      isDense: true,
-                      hintText: widget.isAggregate
-                          ? '搜索全网影片…'
-                          : '搜索当前站源…',
-                      hintStyle: TextStyle(
+                  // §26 定案：桌面端 `ThemeData.visualDensity` 是 compact，
+                  // `InputDecorator` 会因此把输入/提示整体下压 4 逻辑像素
+                  // （推导与实测见 `AppInputDensity` 的文档、§26 第 3 轮）。
+                  child: AppInputDensity(
+                    child: TextField(
+                      controller: widget.controller,
+                      focusNode: widget.focusNode,
+                      // 输入文字与**占位提示**共用同一套行盒度量：两套样式只要度量
+                      // 不一致，空态看到的提示就会和输入后的文字对不上（§26 第 2 轮）。
+                      style: _lineStyle(palette.textMain),
+                      strutStyle: const StrutStyle(
                         fontSize: AppType.caption,
-                        color: palette.textDim,
+                        height: _lineHeight,
+                        forceStrutHeight: true,
+                        leadingDistribution: TextLeadingDistribution.even,
                       ),
-                      border: InputBorder.none,
-                      contentPadding: EdgeInsets.zero,
+                      textAlignVertical: TextAlignVertical.center,
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: widget.isAggregate
+                            ? '搜索全网影片…'
+                            : '搜索当前站源…',
+                        hintStyle: _lineStyle(palette.textDim),
+                        border: InputBorder.none,
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                      onSubmitted: widget.onSearch,
                     ),
-                    onSubmitted: widget.onSearch,
                   ),
                 ),
                 if (hasText)

@@ -6,9 +6,12 @@ import 'core/app_info.dart';
 import 'core/companion/companion_process_manager.dart';
 import 'core/config/config_repository.dart';
 import 'core/config/models/builtin_sites.dart';
+import 'core/diagnostics/error_log.dart';
+import 'core/danmaku/danmaku_api.dart';
 import 'core/player/mpv_player_engine.dart';
 import 'core/settings/models/appearance_preferences.dart';
 import 'core/settings/settings_repository.dart';
+import 'core/storage/app_data_reset.dart';
 import 'core/storage/data_directory_manager.dart';
 import 'ui/desktop/window/desktop_window_manager.dart';
 import 'ui/theme/app_icon_assets.dart';
@@ -21,6 +24,17 @@ Future<void> main() async {
     // 超出按 LRU 淘汰、重复浏览会再解码，换取常驻内存下降。
     PaintingBinding.instance.imageCache.maximumSizeBytes = 48 << 20;
     await loadAppVersionLabel();
+    // §43：可选服务是否启用（只打印是否配置，不打印地址 / 令牌）
+    debugPrint('[xiugou-tv] 弹幕服务：${danmakuServiceConfigured ? '已配置' : '未配置（config/app.env）'}');
+
+    // 关于页「重置所有设置」：上次会话安排的全部清空，在创建任何存储之前执行
+    try {
+      if (await AppDataReset.applyPendingAtStartup()) {
+        debugPrint('[xiugou-tv] 已按上次的「重置所有设置」清空数据目录');
+      }
+    } catch (error) {
+      debugPrint('[xiugou-tv] reset failed: $error');
+    }
 
     // N-2：先解析数据目录并执行待定迁移，再创建任何存储（避免运行中双目录写入）
     try {
@@ -28,6 +42,13 @@ Future<void> main() async {
     } catch (error) {
       debugPrint('[xiugou-tv] data directory init failed: $error');
     }
+
+    // 关于页「错误日志」：本次运行期间的未捕获异常、框架错误、播放器报错，只放内存（关闭即清空）
+    final previousOnError = FlutterError.onError;
+    FlutterError.onError = (details) {
+      ErrorLog.instance.record('界面', details.exception, details.stack);
+      previousOnError?.call(details);
+    };
 
     final configRepository = ConfigRepository(fallbackHomeSite: builtinDoubanSite);
     await configRepository.initialize();
@@ -72,6 +93,11 @@ Future<void> main() async {
     // 初始化时捕获默认音量 / 倍速；之后只更新即时参数，不覆盖当前播放默认值
     unawaited(
         playerEngine.applyPlaybackSettings(settingsRepository.playerSettings));
+    playerEngine.errorStream.listen((message) {
+      if (message != null && message.trim().isNotEmpty) {
+        ErrorLog.instance.record('播放器', message);
+      }
+    });
     settingsRepository.playerSettingsStream
         .skip(1)
         .listen(playerEngine.applyPlaybackSettings);
@@ -92,5 +118,6 @@ Future<void> main() async {
     unawaited(playerEngine.initialize());
   }, (error, stack) {
     debugPrint('[xiugou-tv] startup error: $error\n$stack');
+    ErrorLog.instance.record('未捕获异常', error, stack);
   });
 }

@@ -16,7 +16,47 @@ public class Context {
     }
 
     public Object getSystemService(String name) {
-        return null;
+        if (name == null) return null;
+        switch (name) {
+            case "clipboard":
+                return CLIPBOARD;
+            case "input_method":
+                return INPUT_METHOD;
+            case "window":
+                return WINDOW_MANAGER;
+            default:
+                return null;
+        }
+    }
+
+    private static final ClipboardManager CLIPBOARD = new ClipboardManager();
+    private static final android.view.inputmethod.InputMethodManager INPUT_METHOD =
+            new android.view.inputmethod.InputMethodManager();
+    private static final android.view.WindowManager WINDOW_MANAGER = new android.view.WindowManager() {
+    };
+
+    /**
+     * 桌面端没有 Activity 栈：只处理带数据地址的跳转（打开网页 / 唤起 App），交给宿主呈现，其余忽略。
+     */
+    public void startActivity(Intent intent) {
+        if (intent == null || intent.getData() == null) {
+            System.out.println("[Context] ignore startActivity without data: "
+                    + (intent == null ? null : intent.getAction()));
+            return;
+        }
+        android.app.DialogHost.get().onOpenUri(intent.getData().toString(), intent.getType());
+    }
+
+    public int checkCallingOrSelfPermission(String permission) {
+        return 0;
+    }
+
+    public ClassLoader getClassLoader() {
+        return Context.class.getClassLoader();
+    }
+
+    public String getString(int resId) {
+        return getResources().getString(resId);
     }
 
     public Context getApplicationContext() {
@@ -77,15 +117,44 @@ public class Context {
             new android.content.pm.PackageManager();
 
     public java.io.File getCacheDir() {
-        java.io.File dir = new java.io.File(System.getProperty("java.io.tmpdir"), "xiugou_tv_cache");
-        if (!dir.exists()) dir.mkdirs();
-        return dir;
+        return persistentDir("cache", "xiugou_tv_cache");
     }
 
     public java.io.File getFilesDir() {
-        java.io.File dir = new java.io.File(System.getProperty("java.io.tmpdir"), "xiugou_tv_files");
-        if (!dir.exists()) dir.mkdirs();
+        return persistentDir("files", "xiugou_tv_files");
+    }
+
+    /**
+     * files / cache 放在 {@code user.home/.xiugou_tv_companion} 下：载荷把网盘 cookie、配置中心设置存在这里，
+     * 放系统临时目录会被清理，用户就得反复扫码登录。旧版本用的临时目录在首次访问时整体复制过来（不删除原目录）。
+     */
+    private static java.io.File persistentDir(String name, String legacyTempName) {
+        java.io.File dir = new java.io.File(
+                new java.io.File(System.getProperty("user.home", "."), ".xiugou_tv_companion"), name);
+        if (!dir.exists()) {
+            java.io.File legacy = new java.io.File(System.getProperty("java.io.tmpdir"), legacyTempName);
+            if (legacy.isDirectory()) copyTree(legacy.toPath(), dir.toPath());
+            dir.mkdirs();
+        }
         return dir;
+    }
+
+    private static void copyTree(java.nio.file.Path from, java.nio.file.Path to) {
+        try (java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(from)) {
+            walk.forEach(src -> {
+                java.nio.file.Path dst = to.resolve(from.relativize(src).toString());
+                try {
+                    if (java.nio.file.Files.isDirectory(src)) {
+                        java.nio.file.Files.createDirectories(dst);
+                    } else {
+                        java.nio.file.Files.copy(src, dst, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } catch (java.io.IOException ignored) {
+                    // 单个文件复制失败（被占用等）不影响其余文件
+                }
+            });
+        } catch (java.io.IOException ignored) {
+        }
     }
 
     /**

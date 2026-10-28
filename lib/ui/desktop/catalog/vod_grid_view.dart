@@ -3,6 +3,7 @@ import '../../../core/api/models/vod_models.dart';
 import '../../theme/app_palette.dart';
 import '../widgets/focus_ring.dart';
 import '../../theme/app_tokens.dart';
+import 'poster_image.dart';
 
 /// 网格布局参数（真实网格与骨架屏共用：同列数、同间距、同宽高比，
 /// 保证加载完成时布局不跳变——skill 规则 `content-jumping`）。
@@ -97,6 +98,8 @@ class VodGridView extends StatelessWidget {
               item: item,
               index: index,
               poster: imageProviderFor?.call(item) ??
+                  posterImageProvider(item.pic,
+                      targetWidth: VodGridMetrics.posterCacheWidth) ??
                   ResizeImage(NetworkImage(item.pic),
                       width: VodGridMetrics.posterCacheWidth),
               onTap: () => onItemTap(item),

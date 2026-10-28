@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../../core/api/models/vod_models.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
+import '../catalog/poster_image.dart';
 import '../widgets/focus_ring.dart';
 
 /// 海报加载规格。
@@ -319,6 +320,7 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                           urlOverride: stillUrl,
                         ),
                       ) ??
+                      posterImageProvider(item.pic) ??
                       NetworkImage(item.pic),
                   fit: BoxFit.cover,
                   filterQuality: FilterQuality.medium,
@@ -1027,6 +1029,7 @@ class _NetflixRowCard extends StatefulWidget {
 class _NetflixRowCardState extends State<_NetflixRowCard> {
   bool _isHovered = false;
 
+
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
@@ -1074,6 +1077,7 @@ class _NetflixRowCardState extends State<_NetflixRowCard> {
                           item,
                           const PosterSpec(targetWidth: 512),
                         ) ??
+                        posterImageProvider(item.pic, targetWidth: 512) ??
                         NetworkImage(item.pic),
                     fit: BoxFit.cover,
                     errorBuilder: (_, __, ___) => Container(

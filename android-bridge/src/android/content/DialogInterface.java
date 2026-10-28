@@ -1,9 +1,15 @@
 package android.content;
 
+import android.view.KeyEvent;
+
 /**
- * Minimal android.content.DialogInterface stub。
+ * android.content.DialogInterface：弹窗回调契约（与 AOSP 签名一致）。
  */
 public interface DialogInterface {
+
+    int BUTTON_POSITIVE = -1;
+    int BUTTON_NEGATIVE = -2;
+    int BUTTON_NEUTRAL = -3;
 
     void cancel();
 
@@ -11,6 +17,10 @@ public interface DialogInterface {
 
     interface OnClickListener {
         void onClick(DialogInterface dialog, int which);
+    }
+
+    interface OnMultiChoiceClickListener {
+        void onClick(DialogInterface dialog, int which, boolean isChecked);
     }
 
     interface OnCancelListener {
@@ -26,5 +36,6 @@ public interface DialogInterface {
     }
 
     interface OnKeyListener {
+        boolean onKey(DialogInterface dialog, int keyCode, KeyEvent event);
     }
 }

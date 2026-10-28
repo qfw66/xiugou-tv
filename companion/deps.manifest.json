@@ -1,6 +1,6 @@
 {
   "note": "构建期依赖（javac classpath / 打包输入 / 运行时子进程）；各自保留上游许可。",
-  "count": 40,
+  "count": 41,
   "files": [
     {
       "path": "companion/lib/android-json-0.0.20131108.vaadin1.jar",
@@ -36,6 +36,11 @@
       "path": "companion/lib/collections-24.1.2.jar",
       "bytes": 121973,
       "sha256": "cb4046c0ca469961b93d6159f87ae17ff449847a3677ffdde59ba09091bf1d84"
+    },
+    {
+      "path": "companion/lib/core-3.5.3.jar",
+      "bytes": 607650,
+      "sha256": "8d8064c1636fdaef7189dd9055c7d59950a8940a12f2293956446ec3c109fd82"
     },
     {
       "path": "companion/lib/dex-ir-2.4.31.jar",

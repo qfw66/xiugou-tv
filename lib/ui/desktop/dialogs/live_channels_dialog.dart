@@ -22,6 +22,12 @@ class LiveChannelsDialog extends StatefulWidget {
   final Uri? baseUri;
   final Future<String?> Function()? pickPlaylistFile;
 
+  /// 已收藏的频道键集合（§33）；为 null 时卡片不展示收藏入口。
+  final Set<String>? favoritedKeys;
+
+  /// 切换收藏；失败时应抛错，弹窗据此回退星标。
+  final Future<void> Function(Live channel)? onToggleFavorite;
+
   const LiveChannelsDialog({
     super.key,
     required this.lives,
@@ -30,6 +36,8 @@ class LiveChannelsDialog extends StatefulWidget {
     this.epgRepository,
     this.baseUri,
     this.pickPlaylistFile,
+    this.favoritedKeys,
+    this.onToggleFavorite,
   });
 
   @override
@@ -44,6 +52,45 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
   String _keyword = '';
   bool _busy = false;
   int _generation = 0;
+
+  /// 收藏态的本地视图（§33）：点星标立刻反馈，落盘失败再回退。
+  late final Set<String> _favorited = {...?widget.favoritedKeys};
+
+  /// 置顶「收藏频道」分类的哨兵值（§34）。真实分组来自数据，不会等于它。
+  static const String _favoriteGroup = '\u0000favorites';
+
+  String get _favoriteGroupLabel => '收藏频道 ${_favorited.length}';
+
+  bool _matchesGroup(Live channel) {
+    if (_group == null) return true;
+    if (_group == _favoriteGroup) return _favorited.contains(channel.key);
+    return channel.groupName == _group;
+  }
+
+  Future<void> _toggleFavorite(Live channel) async {
+    final toggle = widget.onToggleFavorite;
+    if (toggle == null) return;
+    final wasFavorited = _favorited.contains(channel.key);
+    setState(() {
+      if (wasFavorited) {
+        _favorited.remove(channel.key);
+      } else {
+        _favorited.add(channel.key);
+      }
+    });
+    try {
+      await toggle(channel);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        if (wasFavorited) {
+          _favorited.add(channel.key);
+        } else {
+          _favorited.remove(channel.key);
+        }
+      });
+    }
+  }
 
   List<String> get _groups =>
       _channels.map((channel) => channel.groupName).toSet().toList();
@@ -78,7 +125,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
       setState(() {
         _channels =
             widget.lives.where((channel) => !channel.isPlaylist).toList();
-        if (!_groups.contains(_group)) _group = null;
+        if (_group != _favoriteGroup && !_groups.contains(_group)) _group = null;
       });
       return;
     }
@@ -90,7 +137,9 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
       setState(() {
         _channels = catalog.channels;
         _warnings = catalog.warnings;
-        if (!_groups.contains(_group)) _group = null;
+        if (_group != _favoriteGroup && !_groups.contains(_group)) {
+          _group = null;
+        }
       });
     } catch (error) {
       if (mounted && generation == _generation) {
@@ -175,6 +224,18 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
     );
   }
 
+  String _emptyTitle() {
+    if (_channels.isEmpty) return '暂无直播频道';
+    if (_group == _favoriteGroup) return '收藏频道还是空的';
+    return '未找到匹配的直播频道';
+  }
+
+  String _emptyHint() {
+    if (_channels.isEmpty) return '可导入 M3U / TXT 清单，或直接播放直播流';
+    if (_group == _favoriteGroup) return '在频道卡片上点右下角星标即可收藏';
+    return '换个分组或清空搜索词试试';
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
@@ -182,7 +243,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
     final keyword = _keyword.toLowerCase();
     final filtered = _channels
         .where((channel) =>
-            (_group == null || channel.groupName == _group) &&
+            _matchesGroup(channel) &&
             (keyword.isEmpty ||
                 channel.name.toLowerCase().contains(keyword) ||
                 (channel.epgName ?? '').toLowerCase().contains(keyword) ||
@@ -336,10 +397,27 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                 child: ListView(
                   scrollDirection: Axis.horizontal,
                   children: [
+                    // §34：置顶「收藏频道」分类（一直显示，空时给空态引导）。
+                    if (widget.onToggleFavorite != null)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: ChoiceChip(
+                          key: const ValueKey('live-group-favorites'),
+                          label: Text(_favoriteGroupLabel),
+                          labelStyle: TextStyle(
+                              color: palette.textBody, fontSize: AppType.body),
+                          backgroundColor: palette.raised,
+                          selectedColor: palette.accent.withValues(alpha: 0.22),
+                          selected: _group == _favoriteGroup,
+                          onSelected: (_) =>
+                              setState(() => _group = _favoriteGroup),
+                        ),
+                      ),
                     for (final group in <String?>[null, ...groups])
                       Padding(
                         padding: const EdgeInsets.only(right: 8),
                         child: ChoiceChip(
+                          key: ValueKey('live-group-${group ?? 'all'}'),
                           label: Text(group ?? '全部'),
                           labelStyle: TextStyle(
                               color: palette.textBody, fontSize: AppType.body),
@@ -372,10 +450,10 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                       Icon(Icons.tv_off_outlined,
                           size: 42, color: palette.textDim),
                       const SizedBox(height: 12),
-                      Text(_channels.isEmpty ? '暂无直播频道' : '未找到匹配的直播频道',
+                      Text(_emptyTitle(),
                           style: TextStyle(color: palette.textBody)),
                       const SizedBox(height: 6),
-                      Text('可导入 M3U / TXT 清单，或直接播放直播流',
+                      Text(_emptyHint(),
                           textAlign: TextAlign.center,
                           style: TextStyle(
                               color: palette.textSub, fontSize: AppType.body)),
@@ -409,6 +487,10 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                           key: ValueKey(channel.key),
                           channel: channel,
                           onPlay: () => _play(channel),
+                          favorited: _favorited.contains(channel.key),
+                          onToggleFavorite: widget.onToggleFavorite == null
+                              ? null
+                              : () => _toggleFavorite(channel),
                           onEpg: widget.epgRepository == null ||
                                   (channel.epg?.isEmpty ?? true)
                               ? null
@@ -429,11 +511,19 @@ class _LiveChannelCard extends StatefulWidget {
   final VoidCallback onPlay;
   final VoidCallback? onEpg;
 
+  /// 已收藏态（§33）。收藏键用 [Live.key]。
+  final bool favorited;
+
+  /// 为 null 时不展示收藏入口（例如收藏夹内部复用该卡片时不需要再收藏）。
+  final VoidCallback? onToggleFavorite;
+
   const _LiveChannelCard({
     super.key,
     required this.channel,
     required this.onPlay,
     this.onEpg,
+    this.favorited = false,
+    this.onToggleFavorite,
   });
 
   @override
@@ -558,6 +648,27 @@ class _LiveChannelCardState extends State<_LiveChannelCard> {
                             // 热标与 EPG「正在播出」共用同一组件（B6）。
                             const LiveIndicator(label: 'LIVE'),
                             const Spacer(),
+                            if (widget.onToggleFavorite != null)
+                              Tooltip(
+                                message: widget.favorited ? '取消收藏' : '收藏频道',
+                                child: IconButton(
+                                  key: ValueKey('live-fav-${channel.key}'),
+                                  onPressed: widget.onToggleFavorite,
+                                  icon: Icon(
+                                    widget.favorited
+                                        ? Icons.star_rounded
+                                        : Icons.star_border_rounded,
+                                    size: 20,
+                                  ),
+                                  color: widget.favorited
+                                      ? palette.warning
+                                      : palette.textSub,
+                                  visualDensity: VisualDensity.compact,
+                                  constraints: const BoxConstraints(
+                                      minWidth: 32, minHeight: 32),
+                                  padding: EdgeInsets.zero,
+                                ),
+                              ),
                             if (widget.onEpg != null)
                               TextButton.icon(
                                 onPressed: widget.onEpg,

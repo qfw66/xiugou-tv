@@ -53,8 +53,8 @@ public final class AndroidBridge {
     /**
      * 安装 Android 运行时补丁，可重复调用。
      *
-     * <p>当前只做一件事：为 Android 专有的 {@code AES/CBC/PKCS7Padding} 注册
-     * BouncyCastle Provider（Appgz / AppSx 等加固载荷需要）。
+     * <p>当前只做一件事：以最高优先级注册 BouncyCastle Provider，让加解密行为对齐 Android
+     * （{@code AES/CBC/PKCS7Padding} 等 Android 专有写法、RSA 块大小与默认填充等语义差异）。
      *
      * <p>注意：这里**不用**本仓库里那个自研的 {@code Pkcs7Provider}——
      * 未签名的 JCE Provider 在现代 JDK 上会被直接拒绝
@@ -152,7 +152,11 @@ public final class AndroidBridge {
                         new URL[]{f.toURI().toURL()}, ClassLoader.getSystemClassLoader());
                 Class<?> bcp = cl.loadClass("org.bouncycastle.jce.provider.BouncyCastleProvider");
                 Provider p = (Provider) bcp.getDeclaredConstructor().newInstance();
-                Security.addProvider(p);
+                // 放在最高优先级：载荷按 Android（Conscrypt / BC）语义写加解密，与 JDK 的 SunJCE 有差异，
+                // 例如 RSA 解密时 Cipher.getBlockSize() 在 Android 返回模长、SunJCE 返回 0
+                // （按块循环 doFinal 的载荷在 SunJCE 下第一块就 BadPaddingException），
+                // 以及 "RSA" 不带填充时 Android 默认 NoPadding、SunJCE 默认 PKCS1Padding。
+                Security.insertProviderAt(p, 1);
                 System.out.println("[COMPANION_PKCS7] BouncyCastle registered from " + f);
                 return;
             } catch (Throwable t) {

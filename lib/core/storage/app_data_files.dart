@@ -30,7 +30,7 @@ class AppDataFile {
   const AppDataFile(this.name, this.category, {this.sensitive = false});
 }
 
-/// 应用数据目录中的 15 个持久化文件（2026-10-18 核对；含 SET-08 外观偏好）。
+/// 应用数据目录中的 16 个持久化文件（2026-10-26 增补 §33 直播收藏）。
 const List<AppDataFile> appDataFiles = [
   AppDataFile('appearance_preferences.json', AppDataCategory.appearance),
   AppDataFile('cached_vod_config.json', AppDataCategory.configSnapshot, sensitive: true),
@@ -42,6 +42,9 @@ const List<AppDataFile> appDataFiles = [
   AppDataFile('history_preferences.json', AppDataCategory.preference),
   AppDataFile('home_site_preferences.json', AppDataCategory.preference),
   AppDataFile('live_sources.json', AppDataCategory.live, sensitive: true),
+  // §33 直播收藏：与点播收藏分开存（模型不同），但同属「收藏」这一类，
+  // 所以跟随 backupAppDataFiles 一起进备份 —— 用户换机后两个收藏都要在。
+  AppDataFile('live_favorites.json', AppDataCategory.favorite),
   AppDataFile('play_skip_preferences.json', AppDataCategory.preference),
   AppDataFile('player_settings.json', AppDataCategory.player),
   AppDataFile('search_preferences.json', AppDataCategory.preference),

@@ -80,6 +80,8 @@ public class GradientDrawable extends Drawable {
     public void setAlpha(int alpha) {
     }
 
-    public void mutate() {
+    @Override
+    public Drawable mutate() {
+        return this;
     }
 }

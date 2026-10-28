@@ -133,7 +133,27 @@ if ($LASTEXITCODE -ne 0) {
 
 # 3. Release compilation
 Write-Host "[3/5] Building Windows x64 Release binary..." -ForegroundColor Yellow
-& $FlutterCmd build windows --release
+# §43 构建期配置：config/app.env（不入库，模板见 config/app.env.example）存在就注入；
+# 没有也能构建，只是弹幕等可选功能不出现。
+$BuildArgs = @("build", "windows", "--release")
+# 关于页「Build Time / Commit Hash」：打包时注入（工作区有已跟踪改动时哈希带 -dirty）
+$BuildTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$Commit = ""
+try {
+    $Commit = (& git -C $ProjectRoot rev-parse --short=8 HEAD 2>$null).Trim()
+    if ($Commit -and (& git -C $ProjectRoot status --porcelain --untracked-files=no 2>$null)) { $Commit = "$Commit-dirty" }
+} catch { $Commit = "" }
+$BuildArgs += "--dart-define=XIUGOU_BUILD_TIME=$BuildTime"
+if ($Commit) { $BuildArgs += "--dart-define=XIUGOU_COMMIT=$Commit" }
+Write-Host "      Build info: $BuildTime  $Commit" -ForegroundColor Gray
+$AppEnvFile = Join-Path $ProjectRoot "config/app.env"
+if (Test-Path -LiteralPath $AppEnvFile -PathType Leaf) {
+    Write-Host "      Using build config: config/app.env" -ForegroundColor Gray
+    $BuildArgs += "--dart-define-from-file=$AppEnvFile"
+} else {
+    Write-Host "      config/app.env not found: optional features (danmaku) disabled in this build." -ForegroundColor DarkYellow
+}
+& $FlutterCmd @BuildArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "flutter build windows --release failed."
 }

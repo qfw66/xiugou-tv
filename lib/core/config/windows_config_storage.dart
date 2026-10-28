@@ -17,6 +17,11 @@ class WindowsConfigStorage {
   static const String _historyFileName = 'history.json';
   static const String _favoritesFileName = 'favorites.json';
 
+  /// 直播收藏单独落盘（§33）：与点播收藏刻意不共用文件 —— 两者的模型、失效判定
+  /// 和点击行为都不同（点播要点详情，直播要直接起播），混存会让任一侧的格式演进
+  /// 变成另一侧的迁移风险。
+  static const String _liveFavoritesFileName = 'live_favorites.json';
+
   Directory? _baseDir;
 
   /// 存储目录路径（同步计算，不触盘）。
@@ -105,12 +110,14 @@ class WindowsConfigStorage {
     final dir = await getStorageDirectory();
     final file = File(p.join(dir.path, 'current_config.json'));
     if (!await file.exists()) return null;
-    return ConfigSnapshot.fromJson(jsonDecode(await file.readAsString()) as Map<String, dynamic>);
+    return ConfigSnapshot.fromJson(
+        jsonDecode(await file.readAsString()) as Map<String, dynamic>);
   }
 
   Future<void> saveCurrentConfig(ConfigSnapshot snapshot) async {
     final dir = await getStorageDirectory();
-    await _atomicWrite(p.join(dir.path, 'current_config.json'), jsonEncode(snapshot.toJson()));
+    await _atomicWrite(
+        p.join(dir.path, 'current_config.json'), jsonEncode(snapshot.toJson()));
   }
 
   Future<Map<String, HomeSitePreference>> readHomeSitePreferences() async {
@@ -118,7 +125,9 @@ class WindowsConfigStorage {
     final file = File(p.join(dir.path, 'home_site_preferences.json'));
     if (!await file.exists()) return {};
     final decoded = jsonDecode(await file.readAsString());
-    if (decoded is! Map || decoded['version'] != 1 || decoded['sources'] is! Map) {
+    if (decoded is! Map ||
+        decoded['version'] != 1 ||
+        decoded['sources'] is! Map) {
       throw const FormatException('首页站源偏好格式无效');
     }
     final preferences = <String, HomeSitePreference>{};
@@ -126,7 +135,8 @@ class WindowsConfigStorage {
       final identity = entry.key;
       final preference = HomeSitePreference.tryFromJson(entry.value);
       if (identity is! String ||
-          !RegExp(r'^[a-f0-9]{64}$').hasMatch(identity) || preference == null) {
+          !RegExp(r'^[a-f0-9]{64}$').hasMatch(identity) ||
+          preference == null) {
         throw const FormatException('首页站源偏好条目无效');
       }
       preferences[identity] = preference;
@@ -134,12 +144,17 @@ class WindowsConfigStorage {
     return preferences;
   }
 
-  Future<void> saveHomeSitePreferences(Map<String, HomeSitePreference> preferences) async {
+  Future<void> saveHomeSitePreferences(
+      Map<String, HomeSitePreference> preferences) async {
     final dir = await getStorageDirectory();
-    await _atomicWrite(p.join(dir.path, 'home_site_preferences.json'), jsonEncode({
-      'version': 1,
-      'sources': preferences.map((key, value) => MapEntry(key, value.toJson())),
-    }), throwWhenBlocked: true);
+    await _atomicWrite(
+        p.join(dir.path, 'home_site_preferences.json'),
+        jsonEncode({
+          'version': 1,
+          'sources':
+              preferences.map((key, value) => MapEntry(key, value.toJson())),
+        }),
+        throwWhenBlocked: true);
   }
 
   /// 读取播放历史记录列表
@@ -199,7 +214,48 @@ class WindowsConfigStorage {
     final dir = await getStorageDirectory();
     final targetPath = p.join(dir.path, _favoritesFileName);
     final jsonList = items.map((e) => e.toJson()).toList();
-    await _atomicWrite(targetPath, jsonEncode(jsonList), throwWhenBlocked: true);
+    await _atomicWrite(targetPath, jsonEncode(jsonList),
+        throwWhenBlocked: true);
+  }
+
+  /// 读取直播收藏（§33）。
+  ///
+  /// 坏条目跳过而不是整份丢弃：直播源换地址很常见，一条残缺记录不该让
+  /// 其余收藏一起消失。缺 `url` 的条目直接判无效（点它必然播放失败）。
+  Future<List<Live>> readLiveFavorites() async {
+    try {
+      final dir = await getStorageDirectory();
+      final file = File(p.join(dir.path, _liveFavoritesFileName));
+      if (!await file.exists()) return [];
+
+      final content = await file.readAsString();
+      if (content.trim().isEmpty) return [];
+
+      final decoded = jsonDecode(content);
+      if (decoded is! List) return [];
+
+      final items = <Live>[];
+      for (final entry in decoded.whereType<Map<String, dynamic>>()) {
+        try {
+          final live = Live.fromJson(entry);
+          if (live.url.isNotEmpty) items.add(live);
+        } catch (_) {
+          // 单条坏数据不影响其余收藏。
+        }
+      }
+      return items;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// 保存直播收藏。
+  Future<void> saveLiveFavorites(List<Live> items) async {
+    final dir = await getStorageDirectory();
+    final targetPath = p.join(dir.path, _liveFavoritesFileName);
+    final jsonList = items.map((e) => e.toJson()).toList();
+    await _atomicWrite(targetPath, jsonEncode(jsonList),
+        throwWhenBlocked: true);
   }
 
   static int _temporarySequence = 0;

@@ -21,6 +21,13 @@ class DesktopWindowManager with WindowListener {
   /// （落盘用进入前的快照，避免下次启动开成小窗）。
   final ValueNotifier<bool> isPipNotifier = ValueNotifier<bool>(false);
 
+  /// 沉浸播放（§38）：播放页激活且用户开启「播放时隐藏标题栏」期间为 true。
+  ///
+  /// 与 PiP 并列放在窗口层：业务页销毁不会让窗口卡在无标题栏状态，
+  /// 退出播放页时由播放器 `dispose` 复位。
+  final ValueNotifier<bool> isImmersiveNotifier = ValueNotifier<bool>(false);
+
+
   /// PiP 小窗尺寸（16:9）。
   static const Size pipWindowSize = Size(400, 225);
   static const Size _normalMinimumSize = Size(960, 540);
@@ -241,6 +248,12 @@ class DesktopWindowManager with WindowListener {
     _schedulePersistWindowGeometry();
   }
 
+  /// 切换「沉浸播放」状态（§38）。只在值真的变化时才通知，避免逐帧重建。
+  void setImmersive(bool value) {
+    if (isImmersiveNotifier.value == value) return;
+    isImmersiveNotifier.value = value;
+  }
+
   /// 开始拖拽移动窗口
   Future<void> startDragging() async {
     await windowManager.startDragging();
@@ -369,5 +382,6 @@ class DesktopWindowManager with WindowListener {
     isMaximizedNotifier.dispose();
     isAlwaysOnTopNotifier.dispose();
     isPipNotifier.dispose();
+    isImmersiveNotifier.dispose();
   }
 }

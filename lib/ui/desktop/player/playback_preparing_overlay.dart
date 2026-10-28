@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../../core/player/playback_intent.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
+import '../catalog/poster_image.dart';
 
 /// 播放页的「起播准备」覆盖层：解析播放地址期间盖在播放器上。
 ///
@@ -21,6 +22,7 @@ class PlaybackPreparingOverlay extends StatefulWidget {
     required this.intent,
     this.onRetry,
     this.onCancel,
+    this.topInset = 0,
   });
 
   final PlaybackIntent intent;
@@ -30,6 +32,9 @@ class PlaybackPreparingOverlay extends StatefulWidget {
 
   /// 「返回」回调（退出准备态，回到列表）。
   final VoidCallback? onCancel;
+
+  /// 顶部让出的高度（通常是播放器顶栏）：让顶栏的返回按钮保持可点（§39）。
+  final double topInset;
 
   @override
   State<PlaybackPreparingOverlay> createState() =>
@@ -80,7 +85,11 @@ class _PlaybackPreparingOverlayState extends State<PlaybackPreparingOverlay> {
     final intent = widget.intent;
     final reduceMotion = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
 
-    return Positioned.fill(
+    return Positioned(
+      top: widget.topInset,
+      left: 0,
+      right: 0,
+      bottom: 0,
       child: Semantics(
         container: true,
         liveRegion: true,
@@ -126,6 +135,16 @@ class _PlaybackPreparingOverlayState extends State<PlaybackPreparingOverlay> {
                     _failed(palette, intent.error ?? '播放解析失败，请稍后重试')
                   else
                     _preparing(palette, reduceMotion),
+                  // §39：加载中也必须能退出 —— 曾经只有失败态才有「返回」，
+                  // 弱网站源卡住时用户只能干等或杀进程。
+                  if (!intent.isFailed && widget.onCancel != null) ...[
+                    const SizedBox(height: AppSpacing.lg),
+                    TextButton(
+                      key: const ValueKey('preparing-cancel'),
+                      onPressed: widget.onCancel,
+                      child: const Text('返回'),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -145,8 +164,8 @@ class _PlaybackPreparingOverlayState extends State<PlaybackPreparingOverlay> {
         height: 136,
         child: cover == null || cover.isEmpty
             ? ColoredBox(color: palette.raised)
-            : Image.network(
-                cover,
+            : Image(
+                image: posterImageProvider(cover) ?? NetworkImage(cover),
                 fit: BoxFit.cover,
                 errorBuilder: (_, __, ___) => ColoredBox(color: palette.raised),
               ),

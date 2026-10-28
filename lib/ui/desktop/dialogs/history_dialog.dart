@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../../../core/config/models/history_record.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
+import '../catalog/poster_image.dart';
 import '../widgets/focus_ring.dart';
 import 'history_sections.dart';
 
@@ -42,7 +43,7 @@ class HistoryDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = context.palette;
 
-    return Dialog(
+    final dialog = Dialog(
       backgroundColor: palette.panel,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadii.lg),
@@ -224,6 +225,9 @@ class HistoryDialog extends StatelessWidget {
         ),
       ),
     );
+
+    // 窗口拖动只保留在窗口顶部那条带（§40-R3），面板内部不再接管拖动。
+    return dialog;
   }
 
   /// 按日期分组渲染：区块标题 + 该组内的记录卡片
@@ -383,9 +387,10 @@ class _HistoryCardState extends State<_HistoryCard> {
                   ),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(AppRadii.sm),
-                    child: Image.network(
-                      record.vodPic,
-                      cacheWidth: 120,
+                    child: Image(
+                      image: posterImageProvider(record.vodPic,
+                              targetWidth: 120) ??
+                          ResizeImage(NetworkImage(record.vodPic), width: 120),
                       width: 46,
                       height: 64,
                       fit: BoxFit.cover,

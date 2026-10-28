@@ -1,12 +1,14 @@
 import 'dart:math' as math;
 import 'dart:ui';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../widgets/focus_ring.dart';
+import '../widgets/horizontal_scroll_area.dart';
 
 /// 播放页「选集」抽屉里的一集（宿主装配，组件保持哑视图）。
 class PlayerEpisodeOption {
@@ -98,6 +100,13 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
   static const double _itemExtent = 46;
 
   final ScrollController _scrollController = ScrollController();
+
+  /// 线路胶囊条的横向滚动控制器。
+  ///
+  /// 桌面鼠标默认拖不动 `ListView`，滚轮又只有 `dy` —— 两者都要靠
+  /// [HorizontalScrollArea] 补，控制器必须与它共用同一个实例。
+  final ScrollController _lineScrollController = ScrollController();
+
   final FocusNode _focusNode = FocusNode(debugLabel: 'episode-drawer');
 
   /// 键盘游标（与「当前集」分开：↑↓ 只是移动焦点，Enter 才切集）。
@@ -160,6 +169,7 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
   @override
   void dispose() {
     _scrollController.dispose();
+    _lineScrollController.dispose();
     _focusNode.dispose();
     super.dispose();
   }
@@ -293,11 +303,13 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
         filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
         child: Container(
           key: const ValueKey('episode-drawer-panel'),
+          // 跟随主题（与「播放设置」「弹幕设置」抽屉同一套 player 色）：
+          // 浅色主题下原先写死的深底 + 白描边会显得突兀（2026-10-27 实机反馈）。
           decoration: BoxDecoration(
-            color: const Color(0xE0101014),
+            color: palette.playerChrome,
             border: Border(
               left: BorderSide(
-                color: Colors.white.withValues(alpha: 0.12),
+                color: palette.playerText.withValues(alpha: 0.12),
                 width: 1,
               ),
             ),
@@ -317,14 +329,14 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
                 Divider(
                   height: 1,
                   thickness: 1,
-                  color: Colors.white.withValues(alpha: 0.08),
+                  color: palette.playerText.withValues(alpha: 0.08),
                 ),
                 _buildLinePills(context, nav, palette),
               ],
               Divider(
                 height: 1,
                 thickness: 1,
-                color: Colors.white.withValues(alpha: 0.08),
+                color: palette.playerText.withValues(alpha: 0.08),
               ),
               Expanded(
                 child: Opacity(
@@ -425,75 +437,86 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
     );
   }
 
+  /// 线路胶囊条：可横向滚动（线路多时不再只能看到前几条）。
+  ///
+  /// 桌面鼠标默认拖不动横向 `ListView`、滚轮又只给 `dy`，所以统一交给
+  /// [HorizontalScrollArea]（与影片分类栏同一套口径）。
   Widget _buildLinePills(
       BuildContext context, PlayerEpisodeListNav nav, AppPalette palette) {
     final onAccent = Theme.of(context).colorScheme.onPrimary;
     return SizedBox(
       height: 46,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-        itemCount: nav.lines.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
-        itemBuilder: (context, index) {
-          final line = nav.lines[index];
-          final disabled = nav.switching || line.unavailable;
-          final background = line.current
-              ? palette.accent
-              : Colors.white.withValues(alpha: 0.08);
-          final foreground = line.current
-              ? onAccent
-              : palette.playerText.withValues(alpha: 0.78);
-          return FocusRing(
-            key: ValueKey('episode-drawer-line-${line.index}'),
-            onTap: disabled
-                ? null
-                : () {
-                    if (!line.current) nav.onSelectLine(line.index);
-                  },
-            semanticLabel:
-                line.unavailable ? '${line.name}（不可用）' : line.name,
-            borderRadius:
-                const BorderRadius.all(Radius.circular(AppRadii.pill)),
-            child: AnimatedOpacity(
-              duration: AppMotion.exit,
-              opacity: disabled && !line.current ? 0.4 : 1,
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: disabled
-                    ? null
-                    : () {
-                        if (!line.current) nav.onSelectLine(line.index);
-                      },
-                child: Container(
-                  alignment: Alignment.center,
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  decoration: BoxDecoration(
-                    color: background,
-                    borderRadius: BorderRadius.circular(AppRadii.pill),
-                    border: Border.all(
-                      color: line.current
-                          ? palette.accentInk.withValues(alpha: 0.6)
-                          : Colors.white.withValues(alpha: 0.10),
-                      width: 1,
+      child: HorizontalScrollArea(
+        controller: _lineScrollController,
+        child: ListView.separated(
+          controller: _lineScrollController,
+          // 胶囊自己是 `GestureDetector(onTap:)`，与拖拽共用一个手势竞技场：
+          // 默认 `DragStartBehavior.start` 会把「接受拖拽」之前的位移整段丢掉
+          // —— 按住胶囊拖完全不动（只有按住 8px 空白才滚）。改从按下点起算。
+          dragStartBehavior: DragStartBehavior.down,
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          itemCount: nav.lines.length,
+          separatorBuilder: (_, __) => const SizedBox(width: 8),
+          itemBuilder: (context, index) {
+            final line = nav.lines[index];
+            final disabled = nav.switching || line.unavailable;
+            final background = line.current
+                ? palette.accent
+                : palette.playerText.withValues(alpha: 0.08);
+            final foreground = line.current
+                ? onAccent
+                : palette.playerText.withValues(alpha: 0.78);
+            return FocusRing(
+              key: ValueKey('episode-drawer-line-${line.index}'),
+              onTap: disabled
+                  ? null
+                  : () {
+                      if (!line.current) nav.onSelectLine(line.index);
+                    },
+              semanticLabel: line.unavailable ? '${line.name}（不可用）' : line.name,
+              borderRadius:
+                  const BorderRadius.all(Radius.circular(AppRadii.pill)),
+              child: AnimatedOpacity(
+                duration: AppMotion.exit,
+                opacity: disabled && !line.current ? 0.4 : 1,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: disabled
+                      ? null
+                      : () {
+                          if (!line.current) nav.onSelectLine(line.index);
+                        },
+                  child: Container(
+                    alignment: Alignment.center,
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    decoration: BoxDecoration(
+                      color: background,
+                      borderRadius: BorderRadius.circular(AppRadii.pill),
+                      border: Border.all(
+                        color: line.current
+                            ? palette.accentInk.withValues(alpha: 0.6)
+                            : palette.playerText.withValues(alpha: 0.10),
+                        width: 1,
+                      ),
                     ),
-                  ),
-                  child: Text(
-                    line.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: foreground,
-                      fontSize: AppType.caption,
-                      fontWeight:
-                          line.current ? FontWeight.bold : FontWeight.w500,
+                    child: Text(
+                      line.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: foreground,
+                        fontSize: AppType.caption,
+                        fontWeight:
+                            line.current ? FontWeight.bold : FontWeight.w500,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
@@ -528,14 +551,14 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
                   color: isCurrent
                       ? palette.accentInk.withValues(alpha: 0.22)
                       : (isCursor
-                          ? Colors.white.withValues(alpha: 0.08)
+                          ? palette.playerText.withValues(alpha: 0.08)
                           : Colors.transparent),
                   borderRadius: BorderRadius.circular(AppRadii.sm),
                   border: Border.all(
                     color: isCurrent
                         ? palette.accentInk.withValues(alpha: 0.45)
                         : (isCursor
-                            ? Colors.white.withValues(alpha: 0.12)
+                            ? palette.playerText.withValues(alpha: 0.12)
                             : Colors.transparent),
                     width: 1,
                   ),
@@ -548,7 +571,7 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
                       decoration: BoxDecoration(
                         color: isCurrent
                             ? palette.accentInk.withValues(alpha: 0.25)
-                            : Colors.white.withValues(alpha: 0.06),
+                            : palette.playerText.withValues(alpha: 0.06),
                         borderRadius: BorderRadius.circular(AppRadii.xs),
                       ),
                       child: Text(

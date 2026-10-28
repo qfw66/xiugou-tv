@@ -136,6 +136,26 @@ public class Handler {
         return msg;
     }
 
+    public Message obtainMessage(int what, int arg1, int arg2) {
+        Message msg = obtainMessage(what);
+        msg.arg1 = arg1;
+        msg.arg2 = arg2;
+        return msg;
+    }
+
+    /** 与 {@link #sendEmptyMessageDelayed} 一致：延迟消息异步投递。 */
+    public boolean sendMessageDelayed(Message msg, long delayMillis) {
+        if (msg == null) return false;
+        msg.target = this;
+        SCHEDULER.schedule(() -> dispatchMessage(msg), Math.max(0, delayMillis), TimeUnit.MILLISECONDS);
+        return true;
+    }
+
+    /** 已投递的延迟消息无法追踪（见类注释的已知限制），按「没有待处理消息」回答。 */
+    public boolean hasMessages(int what) {
+        return false;
+    }
+
     public void dispatchMessage(Message msg) {
         if (msg.callback != null) {
             msg.callback.run();

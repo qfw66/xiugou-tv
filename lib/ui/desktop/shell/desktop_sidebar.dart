@@ -179,7 +179,8 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
           child: GestureDetector(
             onTap: widget.onTap,
             child: AnimatedContainer(
-              duration: AppMotion.base,
+              // 2026-10-27 实机反馈：hover 不做过渡（进入也不）。
+              duration: Duration.zero,
               curve: AppMotion.ease,
               width: double.infinity,
               height: 58,
@@ -215,8 +216,10 @@ class _SidebarNavItemState extends State<_SidebarNavItem> {
                     widget.label,
                     style: TextStyle(
                       fontSize: AppType.caption,
-                      fontWeight:
-                          _isHovered ? FontWeight.bold : FontWeight.w500,
+                      // hover 不改字重（不用 bold / w500 互换）：
+                      // 字重变化会让文本宽度跳一下，实机看起来就是「闪」。
+                      // 悬停反馈交给颜色 / 背景 / 描边。
+                      fontWeight: FontWeight.w500,
                       color: _isHovered ? palette.textTitle : palette.textBody,
                     ),
                   ),
@@ -254,7 +257,7 @@ class _SidebarSettingsButtonState extends State<_SidebarSettingsButton> {
       child: GestureDetector(
         onTap: widget.onTap,
         child: AnimatedContainer(
-          duration: AppMotion.base,
+          duration: Duration.zero,
           curve: AppMotion.ease,
           width: double.infinity,
           padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),

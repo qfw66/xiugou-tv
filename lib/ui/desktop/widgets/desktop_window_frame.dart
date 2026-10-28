@@ -25,35 +25,47 @@ class DesktopWindowFrame extends StatelessWidget {
     this.refreshBusy = false,
   });
 
+  Widget _titleBar() => DesktopTitleBar(
+        windowManager: windowManager,
+        activeSiteName: activeSiteName,
+        onSettingsPressed: onSettingsPressed,
+        onSiteSelectorPressed: onSiteSelectorPressed,
+        searchBar: searchBar,
+        onRefresh: onRefresh,
+        refreshBusy: refreshBusy,
+      );
+
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
     return Scaffold(
       backgroundColor: palette.background,
-      // 画中画模式下隐藏自绘标题栏（无边框小窗）；其余结构不变。
       body: ValueListenableBuilder<bool>(
         valueListenable: windowManager.isPipNotifier,
-        builder: (context, pip, _) => Stack(
-          fit: StackFit.expand,
-          children: [
-            pip
-                ? child
-                : Column(
-                    children: [
-                      DesktopTitleBar(
-                        windowManager: windowManager,
-                        activeSiteName: activeSiteName,
-                        onSettingsPressed: onSettingsPressed,
-                        onSiteSelectorPressed: onSiteSelectorPressed,
-                        searchBar: searchBar,
-                        onRefresh: onRefresh,
-                        refreshBusy: refreshBusy,
-                      ),
-                      Expanded(child: child),
-                    ],
-                  ),
-            _WindowChromeSync(windowManager: windowManager),
-          ],
+        builder: (context, pip, _) => ValueListenableBuilder<bool>(
+          valueListenable: windowManager.isImmersiveNotifier,
+          builder: (context, immersive, _) {
+            // §38：PiP 与「沉浸播放」都隐藏自绘标题栏（无边框）。
+            //
+            // 沉浸期间**不再**用「顶部热区滑出标题栏」：浮出的标题栏正好压在
+            // 播放页顶栏的返回按钮上，用户点不到返回（2026-10-27 实机反馈）。
+            // 现在标题栏彻底不渲染，窗口三键与拖动由播放页顶栏接管。
+            final hideTitleBar = pip || immersive;
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                // 结构必须稳定：标题栏槽位恒为 Column 的第 0 个孩子、内容恒为第 1 个，
+                // 否则隐藏标题栏时内容会被重新挂载（页面状态、弹窗、播放器全丢）。
+                Column(
+                  children: [
+                    if (hideTitleBar) const SizedBox.shrink() else _titleBar(),
+                    Expanded(child: child),
+                  ],
+                ),
+                _WindowChromeSync(windowManager: windowManager),
+              ],
+            );
+          },
         ),
       ),
     );

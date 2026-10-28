@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../api/models/vod_models.dart';
@@ -242,10 +243,25 @@ class CompanionSpiderApi {
     );
   }
 
+  /// 调用站源的 `action()`（FongMi 语义：列表项带 action 字段时点击触发）。
+  ///
+  /// 配置中心的设置项在这里弹出扫码 / 输入窗口，窗口经 [CompanionUiChannel] 呈现；
+  /// 返回值是载荷的原始结果（通常为空或带 msg 的 JSON），失败返回空串。
+  Future<String> performAction(Site site, String action) {
+    return _callSpider(
+      site: site,
+      method: 'action',
+      params: {'action': action},
+    );
+  }
+
   /// 仅获取地址的兼容入口；播放调用应使用完整结果以保留解析标志与请求头。
   Future<String> fetchPlayUrl(Site site,
           {required String flag, required String id}) async =>
       (await fetchPlayResult(site, flag: flag, id: id)).url;
+
+  /// 每次 RPC 的唯一序号，用于生成取消标签（见 CallRegistry 的 rpcId 口径）。
+  static int _rpcSeq = 0;
 
   Future<String> _callSpider({
     required Site site,
@@ -259,7 +275,14 @@ class CompanionSpiderApi {
 
     // 点叉后立即放弃这次 RPC：Dio 中止连接，Dart 侧不再等满 20 秒。
     final dioCancelToken = CancelToken();
-    cancelToken?.onCancel(() => dioCancelToken.cancel('搜索已取消'));
+    // Dio 断的只是「Flutter ↔ companion」这条 HTTP 连接；companion 内的 worker
+    // 线程仍卡在 jar 里 OkHttp 的同步请求上，继续占着 callPool 的槽（上限 64，
+    // 满了直接 503）。所以必须用同一个 rpcId 让 companion 把那次请求真正 cancel()。
+    final rpcId = '$method@${site.key}#${++_rpcSeq}';
+    cancelToken?.onCancel(() {
+      dioCancelToken.cancel('搜索已取消');
+      unawaited(_cancelRemote(rpcId));
+    });
 
     try {
       final reqBody = {
@@ -268,6 +291,7 @@ class CompanionSpiderApi {
         'ext': _extensionJson(site),
         'jar': site.jar ?? '',
         'method': method,
+        'rpcId': rpcId,
         ...params,
       };
 
@@ -291,6 +315,24 @@ class CompanionSpiderApi {
       }
     } catch (_) {}
     return '';
+  }
+
+  /// 通知 companion 中止一次在途 RPC。尽力而为：这里失败不影响调用方，
+  /// 服务端仍会被看门狗超时收尾（超时路径也会先 cancel socket 再 interrupt worker）。
+  Future<void> _cancelRemote(String rpcId) async {
+    if (!processManager.isRunning) return;
+    try {
+      await _dio.post<dynamic>(
+        '${processManager.baseUrl}/spider/cancel',
+        data: {'rpcId': rpcId},
+        options: Options(
+          sendTimeout: const Duration(seconds: 3),
+          receiveTimeout: const Duration(seconds: 3),
+        ),
+      );
+    } catch (_) {
+      // 静默：取消请求本身不该再产生用户可见的错误。
+    }
   }
 
   VodPageResult _parseVodPageResult(String rawJson, {Site? site}) {

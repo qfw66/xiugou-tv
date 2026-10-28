@@ -1,5 +1,6 @@
 package com.fongmi.companion;
 
+import com.fongmi.companion.agent.CallRegistry;
 import com.github.catvod.crawler.Spider;
 import com.github.catvod.crawler.SpiderNull;
 import com.github.catvod.utils.DebugLog;
@@ -55,10 +56,18 @@ public class SpiderServer {
         server.createContext("/health", new HealthHandler());
         server.createContext("/spider/load", new LoadHandler());
         server.createContext("/spider/call", new CallHandler());
+        server.createContext("/spider/cancel", new CancelHandler());
         server.createContext("/shutdown", new ShutdownHandler());
+        // 载荷弹窗 / Toast 等界面事件（长轮询）与用户操作回放，见 ui.UiBridge
+        server.createContext("/ui/events", new UiEventsHandler());
+        server.createContext("/ui/input", new UiInputHandler());
+        com.fongmi.companion.ui.UiBridge.install();
+        // 网盘直链分块并发代理（替代载荷 8096 加速代理），见 docs/NETDISK_PLAYBACK_PLAN.md
+        server.createContext(NetdiskChunkProxy.PREFIX, new NetdiskChunkProxy());
 
         server.start();
         this.boundPort = server.getAddress().getPort();
+        NetdiskChunkProxy.setLocalPort(this.boundPort);
         return this.boundPort;
     }
 
@@ -73,6 +82,9 @@ public class SpiderServer {
             httpExecutor = null;
         }
         callPool.shutdownNow();
+        com.fongmi.companion.ui.UiBridge.get().reset();
+        // 停机时把还在 socket read 上的请求一并掐断，别把 Cancel 掉的引用留给下一个实例。
+        CallRegistry.clear();
     }
 
     public int getBoundPort() {
@@ -123,6 +135,55 @@ public class SpiderServer {
         }
     }
 
+    private class UiEventsHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            Map<String, String> query = parseQuery(exchange.getRequestURI().getRawQuery());
+            long after = parseLong(query.get("after"), -1L);
+            long waitMs = parseLong(query.get("wait"), 25_000L);
+            try {
+                sendJsonResponse(exchange, 200, com.fongmi.companion.ui.UiBridge.get().poll(after, waitMs));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                sendJsonResponse(exchange, 503, "{\"error\":\"interrupted\"}");
+            }
+        }
+    }
+
+    private class UiInputHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJsonResponse(exchange, 405, "{\"error\":\"Method Not Allowed\"}");
+                return;
+            }
+            boolean accepted = com.fongmi.companion.ui.UiBridge.get().input(JsonCodec.parseObject(readBody(exchange)));
+            sendJsonResponse(exchange, 200, "{\"code\":0,\"accepted\":" + accepted + "}");
+        }
+    }
+
+    private static Map<String, String> parseQuery(String raw) {
+        Map<String, String> out = new HashMap<>();
+        if (raw == null || raw.isEmpty()) return out;
+        for (String pair : raw.split("&")) {
+            int eq = pair.indexOf('=');
+            String key = eq < 0 ? pair : pair.substring(0, eq);
+            String value = eq < 0 ? "" : pair.substring(eq + 1);
+            out.put(java.net.URLDecoder.decode(key, StandardCharsets.UTF_8),
+                    java.net.URLDecoder.decode(value, StandardCharsets.UTF_8));
+        }
+        return out;
+    }
+
+    private static long parseLong(String value, long fallback) {
+        if (value == null) return fallback;
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
     private class LoadHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -144,7 +205,7 @@ public class SpiderServer {
 
             long timeoutMs = resolveTimeoutMs(map);
             final String loadTag = "load@" + siteKey;
-            String loadedKey = runWithWatchdog(exchange, loadTag, timeoutMs, () -> {
+            String loadedKey = runWithWatchdog(exchange, loadTag, rpcTagOf(loadTag, map.get("rpcId")), timeoutMs, () -> {
                 ParseStage.begin(loadTag);
                 Spider spider = loader.getSpider(siteKey, api, ext, jar);
                 return spider.siteKey != null ? spider.siteKey : siteKey;
@@ -181,7 +242,7 @@ public class SpiderServer {
             final String callTag = method + "@" + siteKey;
             long dbg = DebugLog.rpcEnabled() ? DebugLog.nextId() : 0;
             DebugLog.rpcStart(dbg, method, siteKey, api, ext, jar, map);
-            String result = runWithWatchdog(exchange, callTag, timeoutMs,
+            String result = runWithWatchdog(exchange, callTag, rpcTagOf(callTag, map.get("rpcId")), timeoutMs,
                     () -> invokeSpiderCall(siteKey, api, ext, jar, method, map, callTag));
             if (result == null) {
                 return;
@@ -194,16 +255,69 @@ public class SpiderServer {
     }
 
     /**
+     * POST /spider/cancel —— 客户端主动中止一次 RPC。
+     *
+     * <p>只断 HTTP 连接是不够的：Dio 侧 cancel 掉的是 Flutter 与 companion 之间那条连接，
+     * worker 线程仍在 jar 内部的 OkHttp 同步请求上阻塞，继续占着 {@code callPool} 的槽。
+     * 这里按取消标签调到 {@code Call.cancel()}，socket 立即关闭，阻塞中的请求以
+     * IOException 退出，线程归还。
+     *
+     * <p>入参优先用 {@code rpcId}（客户端生成的不透明 id）；没带则退回 {@code tag}
+     * （形如 {@code search@siteKey}），粒度更粗但同样生效。
+     */
+    private static class CancelHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJsonResponse(exchange, 405, "{\"error\":\"Method Not Allowed\"}");
+                return;
+            }
+            String body = readBody(exchange);
+            Map<String, Object> payload = JsonCodec.parseObject(body);
+            String tag = text(payload.get("rpcId"));
+            if (tag.isEmpty()) {
+                tag = text(payload.get("tag"));
+            }
+            int cancelled = CallRegistry.cancel(tag);
+            DebugLog.line("RPC", "cancel tag=" + tag + " cancelled=" + cancelled);
+            sendJsonResponse(exchange, 200, "{\"code\":0,\"tag\":\"" + escapeJson(tag)
+                    + "\",\"cancelled\":" + cancelled + "}");
+        }
+
+        private static String text(Object value) {
+            return value instanceof String ? ((String) value).trim() : "";
+        }
+    }
+
+    /**
+     * 取消标签：调用方给了 {@code rpcId} 就只用这个不透明 id —— 同站同方法的并发调用
+     * （比如连着搜两个词）不会互相误伤；没给就退回 {@code fallbackTag}，粒度变粗但依然可取消。
+     */
+    private static String rpcTagOf(String fallbackTag, String rpcId) {
+        return rpcId == null || rpcId.trim().isEmpty() ? fallbackTag : rpcId.trim();
+    }
+
+    /**
      * 看门狗：spider 调用（jar 下载 / init / 网络请求）可能无超时挂死
      * （实测：夸克网盘 HTTP/2 读挂起 160s+，spider 内部无超时轮询），
      * 统一在独立 worker 线程执行，超时后放弃等待并返回明确的 timeout 错误，
      * 避免调用方（Flutter 客户端）被无限拖死。
      * 返回 null 表示错误响应已发送，调用方应直接 return。
+     *
+     * <p>{@code rpcTag} 是取消标签（见 {@link CallRegistry}）：与 {@code tag} 分开传，
+     * 让日志继续用可读标签（{@code homeContent@xx}），取消则用「同站同方法也不会串味」的唯一标签。
      */
-    private String runWithWatchdog(HttpExchange exchange, String tag, long timeoutMs, Callable<String> task) throws IOException {
+    private String runWithWatchdog(HttpExchange exchange, String tag, String rpcTag, long timeoutMs, Callable<String> task) throws IOException {
         Future<String> future;
         try {
-            future = callPool.submit(task);
+            future = callPool.submit(() -> {
+                String previous = CallRegistry.bind(rpcTag);
+                try {
+                    return task.call();
+                } finally {
+                    CallRegistry.unbind(previous);
+                }
+            });
         } catch (RejectedExecutionException ree) {
             System.err.println("[SpiderServer] reject " + tag + ": too many in-flight calls (>=" + MAX_INFLIGHT_CALLS + ")");
             sendJsonResponse(exchange, 503, "{\"code\":-3,\"error\":\"overloaded: too many in-flight spider calls\"}");
@@ -212,9 +326,13 @@ public class SpiderServer {
         try {
             return future.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException te) {
+            // 先掐 socket，再 interrupt：只做 future.cancel(true) 时，卡在 OkHttp 同步
+            // execute() 的 worker 吃不到 interrupt（JDK 语义），会长期占着 callPool 的槽。
+            int aborted = CallRegistry.cancel(rpcTag);
             boolean cancelled = future.cancel(true);
             System.err.println("[SpiderServer] watchdog timeout " + timeoutMs + "ms tag=" + tag
-                    + " (cancel=" + cancelled + "; worker may still be blocked on network I/O)");
+                    + " (cancel=" + cancelled + "; abortedHttpCalls=" + aborted
+                    + (aborted == 0 ? "; worker may still be blocked on non-OkHttp I/O" : "") + ")");
             DebugLog.line("RPC", "watchdog timeout " + timeoutMs + "ms tag=" + tag);
             sendJsonResponse(exchange, 504, "{\"code\":-2,\"error\":\"timeout\",\"tag\":\"" + escapeJson(tag)
                     + "\",\"timeoutMs\":" + timeoutMs + "}");
@@ -339,6 +457,11 @@ public class SpiderServer {
                 result = spider.playerContent(flag, id, new ArrayList<>());
                 break;
             }
+            case "action": {
+                // FongMi 的 Spider.action：列表项带 action 字段时，点击触发它（配置中心的扫码 / 输入设置）
+                result = spider.action(map.getOrDefault("action", ""));
+                break;
+            }
             case "liveContent": {
                 String url = map.getOrDefault("url", map.getOrDefault("id", ""));
                 result = spider.liveContent(url);
@@ -352,6 +475,10 @@ public class SpiderServer {
         // 而 mv p/media_kit 会在第一个 & 处截断 URL（实测请求行只剩 ?do=m3u8），
         // 载荷拿不到 url → 空流 → 播放器报 "Failed to recognize file format."。
         // 统一改写成 `/proxy/<base64url>`，播放器与 curl 都可用。
+        // 网盘直链：载荷把直链包进 8096 多线程代理（ARM 原生库，Windows 起不来），拆壳直连。
+        if (result != null && "playerContent".equals(method)) {
+            result = NetdiskProxyUnwrap.unwrap(result);
+        }
         return result != null ? GuardProxyServer.rewriteLocalProxyUrls(result) : "";
     }
 

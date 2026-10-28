@@ -104,6 +104,11 @@ class CompanionProcessManager {
   String? get resolvedJavaPath => _resolvedJavaPath;
   String get baseUrl => isRunning ? 'http://127.0.0.1:$_port' : '';
 
+  /// 就绪端口：服务进入 running 时为端口号，停止 / 退出 / 启动失败时为 null。
+  /// 载荷弹窗通道据此启停长轮询（见 CompanionUiChannel）。
+  ValueListenable<int?> get readyPort => _readyPort;
+  final ValueNotifier<int?> _readyPort = ValueNotifier<int?>(null);
+
   /// companion-service.jar 由 companion/build.ps1 用构建机 JDK 直接编译（未加 --release），
   /// 当前基线 JDK 21 → class 文件主版本 65；低于该版本的 JRE 启动即抛
   /// UnsupportedClassVersionError。回退链路必须过版本闸门，否则会选中本机 JDK 8。
@@ -311,6 +316,7 @@ class CompanionProcessManager {
           _disarmIdleWatch();
           _process = null;
           _port = null;
+          _readyPort.value = null;
           if (!_stopRequested) _status = CompanionStatus.stopped;
         }
       }));
@@ -333,6 +339,7 @@ class CompanionProcessManager {
         throw StateError('Health check failed after start');
       }
       _status = CompanionStatus.running;
+      _readyPort.value = port;
       _lastActivity = DateTime.now();
       _armIdleWatch();
       return true;
@@ -346,6 +353,7 @@ class CompanionProcessManager {
         }
         _status = CompanionStatus.failed;
       }
+      _readyPort.value = null;
       return false;
     }
   }
@@ -389,6 +397,7 @@ class CompanionProcessManager {
 
   Future<void> _stop() async {
     _status = CompanionStatus.stopping;
+    _readyPort.value = null;
     try {
       // Process.start 不能撤销；等待所有权交接后再终止迟到的子进程。
       await _starting;

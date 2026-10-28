@@ -8,7 +8,10 @@ import '../../../core/config/config_repository.dart';
 import '../../../core/companion/companion_process_manager.dart';
 import '../../../core/companion/companion_spider_api.dart';
 import '../../../core/config/models/vod_config.dart';
-import '../../../core/config/windows_config_storage.dart';
+import '../../../core/build_info.dart';
+import '../../../core/diagnostics/error_log.dart';
+import '../../../core/danmaku/danmaku_api.dart';
+import '../../../core/danmaku/danmaku_settings.dart';
 import '../../../core/live/epg_repository.dart';
 import '../../../core/player/models/player_settings.dart';
 import '../../../core/settings/models/appearance_preferences.dart';
@@ -24,7 +27,6 @@ import '../../../core/storage/data_backup_service.dart';
 import '../../../core/storage/data_directory_manager.dart';
 import '../../../core/storage/data_restore_guard.dart';
 import '../../../core/storage/models/data_backup.dart';
-import '../../../core/player/mpv_player_engine.dart';
 import '../../../core/player/player_engine.dart';
 import '../../../core/player/player_settings_application.dart';
 import '../../../core/settings/models/config_source_entry.dart';
@@ -35,6 +37,8 @@ import '../../../core/settings/models/startup_preferences.dart';
 import '../../../core/settings/settings_repository.dart';
 import '../dialogs/depot_selection_dialog.dart';
 import '../wallpaper/wallpaper_size_probe.dart';
+import 'about_update_section.dart';
+import 'error_log_dialog.dart';
 import 'site_self_check_dialog.dart';
 
 /// 设置中心分区
@@ -85,8 +89,15 @@ class SettingsPage extends StatefulWidget {
   /// 壁纸选择器（可注入以便测试；缺省弹出系统文件选择框）
   final Future<String?> Function()? pickWallpaperPath;
 
-  /// 关于页的更新区块（由宿主注入，缺省不显示，避免设置页依赖更新控制器）
-  final Widget? updateSection;
+  /// 关于页的更新行（由宿主注入：参数是要插在「当前版本」与「自动检查」之间的构建信息）。
+  /// 缺省只显示静态版本号，避免设置页依赖更新控制器。
+  final Widget Function(Widget buildInfo)? updateSection;
+
+  /// 关于页「重置所有设置」（宿主注入：重置偏好后重启应用）；缺省不显示该行。
+  final Future<void> Function()? onResetAll;
+
+  /// §43 是否显示「弹幕」分组：缺省跟随本次构建是否配置了弹幕服务（可选功能，未配置就隐藏）
+  final bool? danmakuAvailable;
 
   const SettingsPage({
     super.key,
@@ -108,6 +119,8 @@ class SettingsPage extends StatefulWidget {
     this.wallpaperStore,
     this.pickWallpaperPath,
     this.updateSection,
+    this.onResetAll,
+    this.danmakuAvailable,
   });
 
   @override
@@ -199,11 +212,13 @@ class _SettingsPageState extends State<SettingsPage> {
                                 key: const ValueKey('settings-player'),
                                 settingsRepository: widget.settingsRepository,
                                 application: widget.playerSettingsApplication,
+                                danmakuAvailable: widget.danmakuAvailable,
                               ),
                             SettingsSection.about => AboutPanel(
                                 key: const ValueKey('settings-about'),
                                 playerEngine: widget.playerEngine,
                                 updateSection: widget.updateSection,
+                                onResetAll: widget.onResetAll,
                               ),
                           },
                         ),
@@ -1205,8 +1220,14 @@ class PlayerSettingsPanel extends StatefulWidget {
 
   final PlayerSettingsApplication? application;
 
+  /// §43 是否显示「弹幕」分组（null = 跟随 [danmakuServiceConfigured]）
+  final bool? danmakuAvailable;
+
   const PlayerSettingsPanel(
-      {super.key, required this.settingsRepository, this.application});
+      {super.key,
+      required this.settingsRepository,
+      this.application,
+      this.danmakuAvailable});
 
   static const List<double> rateOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
 
@@ -1383,6 +1404,48 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                 ],
               ),
             ),
+            const _GroupTitle('播放页'),
+            _card(
+              context,
+              child: _SettingRow(
+                title: '播放时隐藏标题栏',
+                description: '开启后播放页顶到窗口上沿（无边框观感）；'
+                    '鼠标移到窗口顶部会临时滑出标题栏，可用于拖动 / 最小化 / 关闭',
+                trailing: Switch(
+                  key: const ValueKey('setting-hide-window-title-bar'),
+                  value: s.hideWindowTitleBar,
+                  onChanged: (value) =>
+                      _update(s.copyWith(hideWindowTitleBar: value)),
+                ),
+              ),
+            ),
+            // §43 弹幕是可选功能：本次构建没配置弹幕服务时整组不出现
+            if (widget.danmakuAvailable ?? danmakuServiceConfigured) ...[
+            const _GroupTitle('弹幕'),
+            _card(
+              context,
+              child: Column(
+                children: [
+                  _SettingRow(
+                    title: '播放时显示弹幕',
+                    description: '点播起播时自动匹配并显示弹幕（直播不显示）；'
+                        '播放中可用控制条「弹幕」按钮或 D 键临时开关，不影响这里的默认值',
+                    trailing: Switch(
+                      key: const ValueKey('setting-danmaku-enabled'),
+                      value: s.danmakuEnabled,
+                      onChanged: (value) =>
+                          _update(s.copyWith(danmakuEnabled: value)),
+                    ),
+                  ),
+                  const _RowDivider(),
+                  _DanmakuSettingsRows(
+                    value: s.danmaku,
+                    onChanged: (d) => _update(s.copyWith(danmaku: d)),
+                  ),
+                ],
+              ),
+            ),
+            ],
             const _GroupTitle('片头片尾'),
             _card(
               context,
@@ -1548,6 +1611,167 @@ class _SettingRow extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [row, const SizedBox(height: 8), footer!],
+    );
+  }
+}
+
+/// §43 弹幕外观与屏蔽（设置页「弹幕」分组的其余行）。改动即时落盘，播放中实时生效。
+class _DanmakuSettingsRows extends StatelessWidget {
+  const _DanmakuSettingsRows({required this.value, required this.onChanged});
+
+  final DanmakuSettings value;
+  final ValueChanged<DanmakuSettings> onChanged;
+
+  static String _areaLabel(double v) {
+    for (final o in DanmakuSettings.areaOptions) {
+      if ((o.$1 - v).abs() < 0.01) return o.$2;
+    }
+    return '${(v * 100).round()}%';
+  }
+
+  Widget _areaDropdown(String key, double current, ValueChanged<double> onPick) {
+    final options = [
+      for (final o in DanmakuSettings.areaOptions) PlayerOption(o.$1.toStringAsFixed(4), o.$2),
+    ];
+    final match = DanmakuSettings.areaOptions
+        .firstWhere((o) => (o.$1 - current).abs() < 0.01, orElse: () => DanmakuSettings.areaOptions[3]);
+    return _OptionDropdown(
+      key: ValueKey(key),
+      options: options,
+      value: match.$1.toStringAsFixed(4),
+      onChanged: (v) => onPick(double.parse(v)),
+    );
+  }
+
+  Widget _slider(String key, double current, double min, double max, int divisions,
+          String Function(double) format, ValueChanged<double> onCommit) =>
+      _SliderControl(
+        key: ValueKey(key),
+        value: current,
+        min: min,
+        max: max,
+        divisions: divisions,
+        format: format,
+        onCommit: onCommit,
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final d = value;
+    final blocks = <(String, String, bool, DanmakuSettings Function(bool))>[
+      ('scroll', '滚动', d.blockScroll, (b) => d.copyWith(blockScroll: b)),
+      ('top', '顶部', d.blockTop, (b) => d.copyWith(blockTop: b)),
+      ('bottom', '底部', d.blockBottom, (b) => d.copyWith(blockBottom: b)),
+      ('colorful', '彩色', d.blockColorful, (b) => d.copyWith(blockColorful: b)),
+      ('advanced', '高级', d.blockAdvanced, (b) => d.copyWith(blockAdvanced: b)),
+    ];
+    String px(double v) => '${v.round()}';
+    String sec(double v) => '${v.toStringAsFixed(v % 1 == 0 ? 0 : 1)} 秒';
+    return Column(
+      children: [
+        _SettingRow(
+          title: '屏蔽类型',
+          description: '选中的类型不显示；「高级」指定位 / 代码类特殊弹幕（桌面端无法还原其动画，默认屏蔽）',
+          trailing: Wrap(
+            spacing: 6,
+            children: [
+              for (final b in blocks)
+                FilterChip(
+                  key: ValueKey('setting-danmaku-block-${b.$1}'),
+                  label: Text(b.$2),
+                  selected: b.$3,
+                  showCheckmark: false,
+                  visualDensity: VisualDensity.compact,
+                  selectedColor: context.palette.accentInk.withValues(alpha: 0.22),
+                  side: BorderSide(
+                      color: b.$3 ? context.palette.accentInk : context.palette.borderStrong),
+                  onSelected: (sel) => onChanged(b.$4(sel)),
+                ),
+            ],
+          ),
+        ),
+        const _RowDivider(),
+        _SettingRow(
+          title: '显示区域',
+          description: '弹幕占用画面的范围（自上而下），当前：${_areaLabel(d.area)}',
+          trailing: _areaDropdown('setting-danmaku-area', d.area, (v) => onChanged(d.copyWith(area: v))),
+        ),
+        const _RowDivider(),
+        _SettingRow(
+          title: '画中画显示区域',
+          description: '画中画小窗里弹幕的范围（小窗字号自动缩小）',
+          trailing: _areaDropdown('setting-danmaku-pip-area', d.pipArea, (v) => onChanged(d.copyWith(pipArea: v))),
+        ),
+        const _RowDivider(),
+        _SettingRow(
+          title: '不透明度',
+          description: '数值越小越透明',
+          trailing: _slider('setting-danmaku-opacity', d.opacity, DanmakuSettings.minOpacity,
+              DanmakuSettings.maxOpacity, 18, (v) => '${(v * 100).round()}%', (v) => onChanged(d.copyWith(opacity: v))),
+        ),
+        const _RowDivider(),
+        _SettingRow(
+          title: '字体粗细',
+          description: '弹幕文字的字重',
+          trailing: _OptionDropdown(
+            key: const ValueKey('setting-danmaku-font-weight'),
+            options: [for (final o in DanmakuSettings.fontWeightOptions) PlayerOption('${o.$1}', o.$2)],
+            value: '${d.fontWeight}',
+            onChanged: (v) => onChanged(d.copyWith(fontWeight: int.parse(v))),
+          ),
+        ),
+        const _RowDivider(),
+        _SettingRow(
+          title: '描边粗细',
+          description: '文字外圈黑色描边，0 为不描边',
+          trailing: _slider('setting-danmaku-stroke', d.strokeWidth, DanmakuSettings.minStroke, DanmakuSettings.maxStroke,
+              8, (v) => v == 0 ? '无' : v.toStringAsFixed(1), (v) => onChanged(d.copyWith(strokeWidth: v))),
+        ),
+        const _RowDivider(),
+        _SettingRow(
+          title: '字体大小',
+          description: '窗口播放时的字号',
+          trailing: _slider('setting-danmaku-font-size', d.fontSize, DanmakuSettings.minFontSize,
+              DanmakuSettings.maxFontSize, 36, px, (v) => onChanged(d.copyWith(fontSize: v.roundToDouble()))),
+        ),
+        const _RowDivider(),
+        _SettingRow(
+          title: '全屏字体大小',
+          description: '全屏播放时的字号',
+          trailing: _slider('setting-danmaku-fullscreen-font-size', d.fullscreenFontSize, DanmakuSettings.minFontSize,
+              DanmakuSettings.maxFontSize, 36, px, (v) => onChanged(d.copyWith(fullscreenFontSize: v.roundToDouble()))),
+        ),
+        const _RowDivider(),
+        _SettingRow(
+          title: '滚动弹幕时长',
+          description: '滚动弹幕横穿屏幕的时间，越小越快',
+          trailing: _slider('setting-danmaku-scroll-duration', d.scrollDuration, DanmakuSettings.minScroll,
+              DanmakuSettings.maxScroll, 34, sec, (v) => onChanged(d.copyWith(scrollDuration: v))),
+        ),
+        const _RowDivider(),
+        _SettingRow(
+          title: '静态弹幕时长',
+          description: '顶部 / 底部弹幕停留的时间',
+          trailing: _slider('setting-danmaku-fixed-duration', d.fixedDuration, DanmakuSettings.minFixed,
+              DanmakuSettings.maxFixed, 18, sec, (v) => onChanged(d.copyWith(fixedDuration: v))),
+        ),
+        const _RowDivider(),
+        _SettingRow(
+          title: '弹幕行高',
+          description: '每行占用的高度（字号的倍数），越大行间距越宽',
+          trailing: _slider('setting-danmaku-line-height', d.lineHeight, DanmakuSettings.minLineHeight,
+              DanmakuSettings.maxLineHeight, 15, (v) => '${v.toStringAsFixed(1)}×', (v) => onChanged(d.copyWith(lineHeight: v))),
+        ),
+        const _RowDivider(),
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton(
+            key: const ValueKey('setting-danmaku-reset'),
+            onPressed: d == DanmakuSettings.defaults ? null : () => onChanged(DanmakuSettings.defaults),
+            child: const Text('恢复弹幕默认设置'),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -2334,7 +2558,7 @@ class _StorageCacheCardState extends State<_StorageCacheCard> {
           ),
           const SizedBox(height: 4),
           Text(
-            '只迁移用户数据（15 个 JSON + 壁纸 + 备份）；随包 JRE / 伴随运行时仍在默认目录。',
+            '只迁移用户数据（16 个 JSON + 壁纸 + 备份）；随包 JRE / 伴随运行时仍在默认目录。',
             style: TextStyle(
                 fontSize: AppType.caption, color: context.palette.textSub),
           ),
@@ -3163,15 +3387,40 @@ class _WallpaperPreviewState extends State<_WallpaperPreview> {
   }
 }
 
-/// 关于：应用信息、运行环境、开源许可与诊断信息
+/// 关于（2026-10-27 重构）：顶部居中 logo / 名字 / 介绍，下面一列行，不再分卡片。
+///
+/// 行：当前版本（点击检查更新）· 构建信息（Build Time / Commit Hash）· 自动检查 ·
+/// 分割线 · Source Code · 问题反馈 · 错误日志（点击打开、长按清除）· 重置所有设置。
+/// 已移除：更新源、镜像开关、运行环境、开源许可、诊断信息。
 class AboutPanel extends StatefulWidget {
-  /// 播放引擎（可为空：不可用时引擎信息显示「不可用」，其余内容不受影响）
+  /// 播放引擎（保留参数：宿主仍会传入；新版关于页不再展示引擎信息）
   final PlayerEngine? playerEngine;
 
-  /// 更新区块（宿主注入；为空时不显示，保持设置页与更新控制器解耦）
-  final Widget? updateSection;
+  /// 更新相关行的构造器（宿主注入，保持设置页与更新控制器解耦）。
+  /// 参数是要插在「当前版本」与「自动检查」之间的构建信息。
+  /// 为空时（测试 / 未接入更新）只显示静态版本号。
+  final Widget Function(Widget buildInfo)? updateSection;
 
-  const AboutPanel({super.key, this.playerEngine, this.updateSection});
+  /// 重置所有设置（宿主注入：重置后重启应用）；为空时该行不显示。
+  final Future<void> Function()? onResetAll;
+
+  /// 打开外部链接 / 文件（可注入以便测试；缺省调系统默认程序）。
+  final Future<bool> Function(String target)? openExternal;
+
+  /// 错误日志（可注入以便测试；缺省 [ErrorLog.instance]）。
+  final ErrorLog? errorLog;
+
+  const AboutPanel({
+    super.key,
+    this.playerEngine,
+    this.updateSection,
+    this.onResetAll,
+    this.openExternal,
+    this.errorLog,
+  });
+
+  static const String sourceCodeUrl = 'https://github.com/qfw66/xiugou-tv';
+  static const String issuesUrl = 'https://github.com/qfw66/xiugou-tv/issues';
 
   @override
   State<AboutPanel> createState() => _AboutPanelState();
@@ -3180,9 +3429,9 @@ class AboutPanel extends StatefulWidget {
 class _AboutPanelState extends State<AboutPanel> {
   String? _version;
   bool _versionFailed = false;
-  String? _mpvVersion;
-  bool _mpvUnavailable = false;
-  String _dataDirectory = '';
+  bool _resetting = false;
+
+  ErrorLog get _log => widget.errorLog ?? ErrorLog.instance;
 
   @override
   void initState() {
@@ -3198,251 +3447,193 @@ class _AboutPanelState extends State<AboutPanel> {
       final info = await PackageInfo.fromPlatform();
       version = info.version;
     } catch (_) {
-      // 读取失败：显示「读取失败」，不显示占位版本
       versionFailed = true;
     }
-
-    String? mpvVersion;
-    var mpvUnavailable = false;
-    final engine = widget.playerEngine;
-    if (engine is MpvPlayerEngine) {
-      mpvVersion = await engine.readEngineVersion();
-      mpvUnavailable = mpvVersion == null || mpvVersion.trim().isEmpty;
-    } else {
-      mpvUnavailable = true;
-    }
-
-    String dataDirectory;
-    try {
-      // 同步路径计算（与 WindowsConfigStorage 同一约定，不触盘）：
-      // 避免在 UI 加载路径上等待真实文件 IO
-      dataDirectory = WindowsConfigStorage.storageDirectoryPath();
-    } catch (_) {
-      dataDirectory = '不可用';
-    }
-
     if (!mounted) return;
     setState(() {
       _version = version;
       _versionFailed = versionFailed;
-      _mpvVersion = mpvVersion;
-      _mpvUnavailable = mpvUnavailable;
-      _dataDirectory = dataDirectory;
     });
   }
 
   String get _versionText => _versionFailed ? '读取失败' : (_version ?? '…');
 
-  String get _mpvVersionText =>
-      _mpvUnavailable ? '不可用（播放器未初始化）' : (_mpvVersion ?? '…');
-
-  /// 诊断信息：仅白名单字段（版本 / 引擎 / 系统 / 运行时 / 数据目录）。
-  /// 不含订阅地址、令牌、请求头、凭据、历史或收藏内容。
-  String _diagnosticsText() => [
-        '修狗TV 诊断信息',
-        '应用版本: $_versionText',
-        '播放引擎: mpv（经 media_kit 接入）',
-        'mpv 版本: $_mpvVersionText',
-        '系统: ${Platform.operatingSystemVersion}',
-        '运行时: ${Platform.version}',
-        '数据目录: ${_dataDirectory.isEmpty ? '…' : _dataDirectory}',
-      ].join('\n');
-
-  Future<void> _copyDiagnostics() async {
-    await Clipboard.setData(ClipboardData(text: _diagnosticsText()));
-    if (!mounted) return;
-    showAppMessage('诊断信息已复制到剪贴板（不含订阅地址与凭据）', type: AppMessageType.success);
+  Future<void> _open(String target) async {
+    final open = widget.openExternal ?? _defaultOpen;
+    final ok = await open(target);
+    if (!ok && mounted) showAppMessage('无法打开：$target', type: AppMessageType.error);
   }
 
-  void _openLicenses() {
-    showLicensePage(
+  static Future<bool> _defaultOpen(String target) async {
+    try {
+      await Process.start('rundll32.exe', ['url.dll,FileProtocolHandler', target],
+          mode: ProcessStartMode.detached);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 点击：应用内查看本次运行的错误日志（关闭软件即清空，不落盘）。
+  void _openErrorLog() => unawaited(showErrorLogDialog(context, _log));
+
+  /// 长按：清除。
+  void _clearErrorLog() {
+    _log.clear();
+    showAppMessage('错误日志已清除', type: AppMessageType.success);
+  }
+
+  Future<void> _confirmReset() async {
+    final onResetAll = widget.onResetAll;
+    if (onResetAll == null || _resetting) return;
+    final confirmed = await showDialog<bool>(
       context: context,
-      applicationName: '修狗TV',
-      applicationVersion: _versionText,
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return _PanelScaffold(
-      title: '关于',
-      subtitle: '应用信息、运行环境、开源许可与诊断信息。',
-      children: [
-        _card(
-          context,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('应用信息',
-                  style: TextStyle(
-                      fontSize: AppType.label,
-                      fontWeight: FontWeight.bold,
-                      color: context.palette.textMain)),
-              const SizedBox(height: 8),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Image.asset(
-                    appIconAsset,
-                    width: 40,
-                    height: 40,
-                    filterQuality: FilterQuality.high,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('修狗TV',
-                            style: TextStyle(
-                                fontSize: AppType.label,
-                                color: context.palette.textMain)),
-                        const SizedBox(height: 4),
-                        Text(
-                            '面向 Windows 10/11 x64 的影视桌面客户端；基于 Flutter 与 mpv（media_kit）。',
-                            style: TextStyle(
-                                fontSize: AppType.body,
-                                color: context.palette.textSub)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              _AboutRow(
-                  label: '版本',
-                  value: _versionText,
-                  valueKey: const ValueKey('about-version')),
-              if (widget.updateSection != null) ...[
-                const SizedBox(height: 12),
-                widget.updateSection!,
-              ],
-            ],
-          ),
+      builder: (ctx) => AlertDialog(
+        backgroundColor: context.palette.card,
+        title: Text('重置所有设置',
+            style: TextStyle(color: context.palette.textTitle, fontSize: AppType.heading)),
+        content: Text(
+          '将清空修狗TV 的全部数据并恢复到刚安装的状态：所有设置、播放历史、收藏、配置源、直播源、'
+          '片头片尾记录、壁纸、本地备份与缓存都会被删除，且无法恢复。\n应用随后自动重启。是否继续？',
+          style: TextStyle(color: context.palette.textBody, fontSize: AppType.label, height: 1.5),
         ),
-        const SizedBox(height: 16),
-        _card(
-          context,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('运行环境',
-                  style: TextStyle(
-                      fontSize: AppType.label,
-                      fontWeight: FontWeight.bold,
-                      color: context.palette.textMain)),
-              const SizedBox(height: 8),
-              const _AboutRow(label: '播放引擎', value: 'mpv（经 media_kit 接入）'),
-              _AboutRow(label: 'mpv 版本', value: _mpvVersionText),
-              _AboutRow(label: '系统', value: Platform.operatingSystemVersion),
-              _AboutRow(label: '运行时', value: Platform.version),
-            ],
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('取消', style: TextStyle(color: context.palette.textSub)),
           ),
-        ),
-        const SizedBox(height: 16),
-        _card(
-          context,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('开源许可',
-                  style: TextStyle(
-                      fontSize: AppType.label,
-                      fontWeight: FontWeight.bold,
-                      color: context.palette.textMain)),
-              const SizedBox(height: 6),
-              Text('查看应用与依赖组件（Flutter、mpv / media_kit 等）的开源许可。',
-                  style: TextStyle(
-                      fontSize: AppType.body, color: context.palette.textSub)),
-              const SizedBox(height: 12),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: OutlinedButton(
-                  style: _outlinedStyle(context),
-                  onPressed: _openLicenses,
-                  child: const Text('查看开源许可'),
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
-        _card(
-          context,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('诊断信息',
-                  style: TextStyle(
-                      fontSize: AppType.label,
-                      fontWeight: FontWeight.bold,
-                      color: context.palette.textMain)),
-              const SizedBox(height: 6),
-              Text('仅含以下字段，不含订阅地址与凭据；点击复制后由你自行粘贴使用。',
-                  style: TextStyle(
-                      fontSize: AppType.body, color: context.palette.textSub)),
-              const SizedBox(height: 12),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: context.palette.panel,
-                  borderRadius: BorderRadius.circular(AppRadii.sm),
-                  border: Border.all(color: context.palette.border),
-                ),
-                child: SelectableText(
-                  _diagnosticsText(),
-                  key: const ValueKey('about-diagnostics'),
-                  style: TextStyle(
-                      fontSize: AppType.body,
-                      color: context.palette.textBody,
-                      height: 1.6),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: OutlinedButton(
-                  style: _outlinedStyle(context),
-                  onPressed: () => unawaited(_copyDiagnostics()),
-                  child: const Text('复制诊断信息'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _AboutRow extends StatelessWidget {
-  final String label;
-  final String value;
-  final Key? valueKey;
-
-  const _AboutRow({required this.label, required this.value, this.valueKey});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 88,
-            child: Text(label,
-                style: TextStyle(
-                    fontSize: AppType.label, color: context.palette.textSub)),
-          ),
-          Expanded(
-            child: Text(value,
-                key: valueKey,
-                style: TextStyle(
-                    fontSize: AppType.label, color: context.palette.textMain)),
+          ElevatedButton(
+            key: const ValueKey('about-reset-confirm'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: context.palette.danger,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadii.sm)),
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('全部清空并重启'),
           ),
         ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _resetting = true);
+    try {
+      await onResetAll();
+    } catch (e) {
+      if (mounted) showAppMessage('重置失败：$e', type: AppMessageType.error);
+    } finally {
+      if (mounted) setState(() => _resetting = false);
+    }
+  }
+
+  Widget _buildInfo(BuildContext context) {
+    final style = TextStyle(
+      fontSize: AppType.body,
+      color: context.palette.textSub,
+      fontFeatures: const [FontFeature.tabularFigures()],
+      height: 1.6,
+    );
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      child: SelectableText(
+        'Build Time: ${BuildInfo.buildTime}\nCommit Hash: ${BuildInfo.commit}',
+        key: const ValueKey('about-build-info'),
+        style: style,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final buildInfo = _buildInfo(context);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(24, 40, 24, 32),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // 顶部：居中 logo / 名字 / 介绍
+              Center(
+                child: Image.asset(appIconAsset,
+                    width: 88, height: 88, filterQuality: FilterQuality.high),
+              ),
+              const SizedBox(height: 14),
+              Text('修狗TV',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      fontSize: AppType.h2,
+                      fontWeight: FontWeight.bold,
+                      color: palette.textTitle)),
+              const SizedBox(height: 6),
+              Text('面向 Windows 10/11 的影视桌面客户端',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: AppType.label, color: palette.textSub)),
+              const SizedBox(height: 32),
+              if (widget.updateSection != null)
+                widget.updateSection!(buildInfo)
+              else ...[
+                AboutLine(
+                  label: '当前版本',
+                  trailing: Text(
+                    _versionFailed || _version == null ? _versionText : 'v$_versionText',
+                    key: const ValueKey('about-version'),
+                    style: TextStyle(
+                        fontSize: AppType.label, color: palette.textMain, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                buildInfo,
+              ],
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Divider(height: 1, color: palette.divider),
+              ),
+              AboutLine(
+                key: const ValueKey('about-source-code'),
+                label: 'Source Code',
+                onTap: () => unawaited(_open(AboutPanel.sourceCodeUrl)),
+                trailing: Text('GitHub',
+                    style: TextStyle(fontSize: AppType.body, color: palette.textSub)),
+                tooltip: AboutPanel.sourceCodeUrl,
+              ),
+              AboutLine(
+                key: const ValueKey('about-issues'),
+                label: '问题反馈',
+                onTap: () => unawaited(_open(AboutPanel.issuesUrl)),
+                trailing: Text('Issues',
+                    style: TextStyle(fontSize: AppType.body, color: palette.textSub)),
+                tooltip: AboutPanel.issuesUrl,
+              ),
+              AboutLine(
+                key: const ValueKey('about-error-log'),
+                label: '错误日志',
+                onTap: _openErrorLog,
+                onLongPress: _clearErrorLog,
+                tooltip: '点击查看本次运行的错误，长按清除',
+                trailing: ListenableBuilder(
+                  listenable: _log,
+                  builder: (context, _) => Text(
+                    _log.isEmpty ? '无' : '${_log.entries.length} 条',
+                    key: const ValueKey('about-error-log-count'),
+                    style: TextStyle(fontSize: AppType.body, color: _log.isEmpty ? palette.textSub : palette.warning),
+                  ),
+                ),
+              ),
+              if (widget.onResetAll != null)
+                AboutLine(
+                  key: const ValueKey('about-reset-all'),
+                  label: '重置所有设置',
+                  danger: true,
+                  onTap: _resetting ? null : () => unawaited(_confirmReset()),
+                  trailing: _resetting
+                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                      : null,
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }

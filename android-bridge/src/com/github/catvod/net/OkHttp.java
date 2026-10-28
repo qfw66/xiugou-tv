@@ -7,7 +7,16 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.util.Map;
+
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 import okhttp3.Dns;
 import okhttp3.OkHttpClient;
@@ -41,6 +50,10 @@ public class OkHttp {
     /**
      * 对齐手机端 OkHttp.client()：全局共享 OkHttpClient。
      * spider jar 通过 Spider.client() 依赖本方法。
+     *
+     * <p>与 FongMi 宿主一致：不校验证书链与主机名（上游 getBuilder 的
+     * {@code hostnameVerifier((h, s) -> true)} + trust-all {@code sslSocketFactory}）。
+     * 载荷默认宿主会这样做，站点证书过期 / 自签时手机端照常出数据，桌面端也必须如此。
      */
     public static OkHttpClient client() {
         OkHttpClient client = CLIENT;
@@ -49,10 +62,43 @@ public class OkHttp {
                 client = CLIENT;
                 // 调试/伪装拦截器由构建期补丁统一注入（见 PatchOkHttp），
                 // 这里不再重复添加，否则同一个请求会被记两遍（覆盖前/覆盖后各一条）。
-                if (client == null) CLIENT = client = new OkHttpClient.Builder().dns(dns()).build();
+                if (client == null) {
+                    CLIENT = client = new OkHttpClient.Builder()
+                            .dns(dns())
+                            .hostnameVerifier((hostname, session) -> true)
+                            .sslSocketFactory(TRUST_ALL_FACTORY, TRUST_ALL)
+                            .build();
+                }
             }
         }
         return client;
+    }
+
+    private static final X509TrustManager TRUST_ALL = new X509TrustManager() {
+        @Override
+        public void checkClientTrusted(X509Certificate[] chain, String authType) {
+        }
+
+        @Override
+        public void checkServerTrusted(X509Certificate[] chain, String authType) {
+        }
+
+        @Override
+        public X509Certificate[] getAcceptedIssuers() {
+            return new X509Certificate[0];
+        }
+    };
+
+    private static final SSLSocketFactory TRUST_ALL_FACTORY = trustAllContext().getSocketFactory();
+
+    private static SSLContext trustAllContext() {
+        try {
+            SSLContext context = SSLContext.getInstance("TLS");
+            context.init(null, new TrustManager[]{TRUST_ALL}, new SecureRandom());
+            return context;
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     public static String string(String urlStr) {
@@ -99,6 +145,11 @@ public class OkHttp {
         DebugLog.httpRequest(dbg, method, urlStr, headers, body);
         URL url = URI.create(urlStr).toURL();
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        if (conn instanceof HttpsURLConnection) {
+            HttpsURLConnection https = (HttpsURLConnection) conn;
+            https.setSSLSocketFactory(TRUST_ALL_FACTORY);
+            https.setHostnameVerifier((hostname, session) -> true);
+        }
         try {
             conn.setRequestMethod(method);
             conn.setConnectTimeout(15000);

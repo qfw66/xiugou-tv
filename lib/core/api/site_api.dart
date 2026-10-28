@@ -167,6 +167,15 @@ class SiteApi {
     return MediaPlaySpec(url: resolved.url, headers: headers.isEmpty ? null : headers);
   }
 
+  /// 触发站源动作（见 [CompanionSpiderApi.performAction]）；非 Spider 站源没有动作，返回空串。
+  Future<String> performAction(Site site, String action) async {
+    if (!site.usesCompanion) return '';
+    if (!await _ensureCompanionReady(site)) {
+      throw const FormatException('Companion 服务不可用');
+    }
+    return companionSpiderApi.performAction(site, action);
+  }
+
   /// 仅获取地址的兼容入口，不用于应用选集播放。
   Future<String> fetchPlayUrl(Site site, {required String flag, required String id}) async {
     if (!site.usesCompanion) return id;

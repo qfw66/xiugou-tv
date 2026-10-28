@@ -437,6 +437,10 @@ class DataBackupService {
         case 'favorites.json':
           _validateList(content, name, maxItems: 5000);
           break;
+        case 'live_favorites.json':
+          // 直播频道没有海报，单条体积小；上限对齐收藏量级即可。
+          _validateList(content, name, maxItems: 2000);
+          break;
         case 'live_sources.json':
           _validateList(content, name, maxItems: 1000);
           break;

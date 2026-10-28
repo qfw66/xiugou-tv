@@ -43,6 +43,11 @@ class NextEpisodeIntent extends Intent {
   const NextEpisodeIntent();
 }
 
+/// §43 弹幕开 / 关
+class ToggleDanmakuIntent extends Intent {
+  const ToggleDanmakuIntent();
+}
+
 /// 默认桌面播放器键位绑定字典
 final Map<ShortcutActivator, Intent> defaultPlayerShortcuts = {
   // 播放 / 暂停
@@ -87,4 +92,7 @@ final Map<ShortcutActivator, Intent> defaultPlayerShortcuts = {
   // 上一集 / 下一集 (PAGE UP / PAGE DOWN)
   const SingleActivator(LogicalKeyboardKey.pageUp): const PrevEpisodeIntent(),
   const SingleActivator(LogicalKeyboardKey.pageDown): const NextEpisodeIntent(),
+
+  // 弹幕开 / 关
+  const SingleActivator(LogicalKeyboardKey.keyD): const ToggleDanmakuIntent(),
 };

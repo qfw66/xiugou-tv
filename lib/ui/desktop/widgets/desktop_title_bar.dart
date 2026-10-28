@@ -181,7 +181,10 @@ class _TitleBarIconButtonState extends State<_TitleBarIconButton> {
           child: GestureDetector(
             onTap: widget.busy ? null : widget.onPressed,
             child: AnimatedContainer(
-              duration: AppMotion.base,
+              // 2026-10-27 实机反馈：hover **不做任何过渡**。
+              // 移出要直接还原，而 200ms 的渐入 / 渐隐在实机上都被
+              // 看成「闪一下」（快速扫过一排按钮时更明显）。
+              duration: Duration.zero,
               width: 30,
               height: 30,
               decoration: BoxDecoration(
@@ -252,7 +255,7 @@ class _SiteSourcePillState extends State<_SiteSourcePill> {
       child: GestureDetector(
         onTap: widget.onTap,
         child: AnimatedContainer(
-          duration: AppMotion.base,
+          duration: Duration.zero,
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4.5),
           decoration: BoxDecoration(
             color: _isHovered ? palette.hover : palette.raised,
@@ -347,7 +350,7 @@ class _WindowButtonState extends State<_WindowButton> {
             onTap: widget.onPressed,
             behavior: HitTestBehavior.opaque,
             child: AnimatedContainer(
-              duration: AppMotion.base,
+              duration: Duration.zero,
               width: 44,
               height: kDesktopTitleBarHeight,
               color: backgroundColor,

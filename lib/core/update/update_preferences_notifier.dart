@@ -21,7 +21,9 @@ class UpdatePreferencesNotifier extends StateNotifier<UpdatePreferences> {
     final loaded = await _store.read();
     // 用户在读取完成前已经改过偏好：以内存为准，避免被旧文件覆盖
     if (!mounted || _dirty) return;
-    state = loaded;
+    // 2026-10-27 关于页重构：界面不再提供「镜像加速」开关，固定「官方不通就用镜像」。
+    // 旧版本里关掉过镜像的用户，读取时恢复为开启（不改文件，下次写入时一并更正）。
+    state = loaded.useMirror ? loaded : loaded.copyWith(useMirror: true);
   }
 
   Future<void> setAutoCheck(bool value) =>

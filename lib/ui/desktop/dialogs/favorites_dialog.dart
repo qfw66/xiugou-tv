@@ -1,8 +1,10 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../../../core/api/models/vod_models.dart';
+import '../../../core/config/models/vod_config.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
+import '../catalog/poster_image.dart';
 import '../widgets/focus_ring.dart';
 
 /// 收藏夹弹窗（Infuse × Netflix 融合设计）。
@@ -20,11 +22,21 @@ class FavoritesDialog extends StatefulWidget {
   final ValueChanged<VodItem> onItemTap;
   final Future<String?> Function(String id) onRemoveItem;
 
+  /// 直播收藏（§33）。与点播收藏是两份独立数据，因此单独传入。
+  final List<Live> liveItems;
+
+  /// 为 null 时不展示「直播」分栏（旧调用方 / 测试可以不传）。
+  final ValueChanged<Live>? onLiveTap;
+  final Future<String?> Function(String key)? onRemoveLiveItem;
+
   const FavoritesDialog({
     super.key,
     required this.items,
     required this.onItemTap,
     required this.onRemoveItem,
+    this.liveItems = const [],
+    this.onLiveTap,
+    this.onRemoveLiveItem,
   });
 
   @override
@@ -33,8 +45,12 @@ class FavoritesDialog extends StatefulWidget {
 
 class _FavoritesDialogState extends State<FavoritesDialog> {
   late final List<VodItem> _items = List.of(widget.items);
+  late final List<Live> _liveItems = List.of(widget.liveItems);
   String? _error;
   bool _removing = false;
+
+  /// 0 = 点播收藏，1 = 直播收藏。
+  int _tab = 0;
 
   Future<void> _remove(String id) async {
     if (_removing) return;
@@ -52,12 +68,29 @@ class _FavoritesDialogState extends State<FavoritesDialog> {
     });
   }
 
+  Future<void> _removeLive(String key) async {
+    final remove = widget.onRemoveLiveItem;
+    if (_removing || remove == null) return;
+    _removing = true;
+    final message = await remove(key);
+    _removing = false;
+    if (!mounted) return;
+    if (message != null) {
+      setState(() => _error = message);
+      return;
+    }
+    setState(() {
+      _error = null;
+      _liveItems.removeWhere((e) => e.key == key);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    return Dialog(
+    final dialog = Dialog(
       backgroundColor: Colors.transparent,
       elevation: 0,
       insetPadding: const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
@@ -132,7 +165,9 @@ class _FavoritesDialogState extends State<FavoritesDialog> {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            '共收藏 ${_items.length} 部影片',
+                            _tab == 0
+                                ? '共收藏 ${_items.length} 部影片'
+                                : '共收藏 ${_liveItems.length} 个直播频道',
                             style: TextStyle(
                               fontSize: AppType.label,
                               color: palette.textSub,
@@ -223,81 +258,228 @@ class _FavoritesDialogState extends State<FavoritesDialog> {
                     ),
                   ),
 
+                // 分栏：点播 / 直播（§33）。仅在调用方提供直播收藏能力时出现。
+                if (widget.onLiveTap != null)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 14, 24, 0),
+                    child: Row(
+                      children: [
+                        ChoiceChip(
+                          key: const ValueKey('favorites-tab-vod'),
+                          label: Text('点播 ${_items.length}'),
+                          labelStyle: TextStyle(
+                              color: palette.textBody, fontSize: AppType.body),
+                          backgroundColor: palette.raised,
+                          selectedColor: palette.accent.withValues(alpha: 0.22),
+                          selected: _tab == 0,
+                          onSelected: (_) => setState(() => _tab = 0),
+                        ),
+                        const SizedBox(width: 8),
+                        ChoiceChip(
+                          key: const ValueKey('favorites-tab-live'),
+                          label: Text('直播 ${_liveItems.length}'),
+                          labelStyle: TextStyle(
+                              color: palette.textBody, fontSize: AppType.body),
+                          backgroundColor: palette.raised,
+                          selectedColor: palette.accent.withValues(alpha: 0.22),
+                          selected: _tab == 1,
+                          onSelected: (_) => setState(() => _tab = 1),
+                        ),
+                      ],
+                    ),
+                  ),
+
                 // 收藏网格内容区
-                Expanded(
-                  child: _items.isEmpty
-                      ? Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Container(
-                                width: 72,
-                                height: 72,
-                                decoration: BoxDecoration(
-                                  color: palette.raised,
-                                  borderRadius:
-                                      BorderRadius.circular(AppRadii.pill),
-                                  border: Border.all(
-                                    color: isDark
-                                        ? Colors.white.withValues(alpha: 0.08)
-                                        : palette.borderStrong,
-                                    width: 1,
+                if (_tab == 0)
+                  Expanded(
+                    child: _items.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Container(
+                                  width: 72,
+                                  height: 72,
+                                  decoration: BoxDecoration(
+                                    color: palette.raised,
+                                    borderRadius:
+                                        BorderRadius.circular(AppRadii.pill),
+                                    border: Border.all(
+                                      color: isDark
+                                          ? Colors.white.withValues(alpha: 0.08)
+                                          : palette.borderStrong,
+                                      width: 1,
+                                    ),
+                                  ),
+                                  child: Icon(
+                                    Icons.star_outline_rounded,
+                                    size: 38,
+                                    color: palette.textDim,
                                   ),
                                 ),
-                                child: Icon(
-                                  Icons.star_outline_rounded,
-                                  size: 38,
-                                  color: palette.textDim,
+                                const SizedBox(height: 16),
+                                Text(
+                                  '暂无收藏影片',
+                                  style: TextStyle(
+                                    color: palette.textTitle,
+                                    fontSize: AppType.title,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 16),
-                              Text(
-                                '暂无收藏影片',
-                                style: TextStyle(
-                                  color: palette.textTitle,
-                                  fontSize: AppType.title,
-                                  fontWeight: FontWeight.w600,
+                                const SizedBox(height: 6),
+                                Text(
+                                  '在影片详情页点击「收藏」即可保存在这里随时观看',
+                                  style: TextStyle(
+                                    color: palette.textSub,
+                                    fontSize: AppType.body,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                '在影片详情页点击「收藏」即可保存在这里随时观看',
-                                style: TextStyle(
-                                  color: palette.textSub,
-                                  fontSize: AppType.body,
-                                ),
-                              ),
-                            ],
+                              ],
+                            ),
+                          )
+                        : GridView.builder(
+                            padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 4,
+                              childAspectRatio: 0.68,
+                              crossAxisSpacing: 16,
+                              mainAxisSpacing: 16,
+                            ),
+                            itemCount: _items.length,
+                            itemBuilder: (context, index) {
+                              final item = _items[index];
+                              return _FavoriteItemCard(
+                                item: item,
+                                onTap: () {
+                                  Navigator.of(context).pop();
+                                  widget.onItemTap(item);
+                                },
+                                onRemove: () => _remove(item.id),
+                              );
+                            },
                           ),
-                        )
-                      : GridView.builder(
-                          padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 4,
-                            childAspectRatio: 0.68,
-                            crossAxisSpacing: 16,
-                            mainAxisSpacing: 16,
-                          ),
-                          itemCount: _items.length,
-                          itemBuilder: (context, index) {
-                            final item = _items[index];
-                            return _FavoriteItemCard(
-                              item: item,
-                              onTap: () {
-                                Navigator.of(context).pop();
-                                widget.onItemTap(item);
-                              },
-                              onRemove: () => _remove(item.id),
-                            );
-                          },
-                        ),
-                ),
+                  ),
+                if (_tab == 1) Expanded(child: _buildLiveTab(context)),
               ],
             ),
           ),
         ),
       ),
+    );
+
+    // 窗口拖动只保留在窗口顶部那条带（§40-R3）：面板内部不再接管拖动，
+    // 避免「拖哪里窗口都动」——用户明确要求只有上方能拖。
+    return dialog;
+  }
+
+  /// 直播收藏列表（§33）。用列表而不是海报网格：频道没有海报，网格里一行
+  /// 只放一两张卡片反而浪费横向空间；点整行即起播，右侧可直接取关。
+  Widget _buildLiveTab(BuildContext context) {
+    final palette = AppPalette.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    if (_liveItems.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.live_tv_outlined, size: 38, color: palette.textDim),
+            const SizedBox(height: 16),
+            Text(
+              '暂无收藏频道',
+              style: TextStyle(
+                color: palette.textTitle,
+                fontSize: AppType.title,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '在「直播频道」里点频道卡片上的星标即可收藏',
+              style: TextStyle(color: palette.textSub, fontSize: AppType.body),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+      itemCount: _liveItems.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      itemBuilder: (context, index) {
+        final channel = _liveItems[index];
+        return Container(
+          key: ValueKey('live-favorite-${channel.key}'),
+          decoration: BoxDecoration(
+            color: palette.card,
+            borderRadius: BorderRadius.circular(AppRadii.sm),
+            border: Border.all(
+              color: isDark
+                  ? Colors.white.withValues(alpha: 0.08)
+                  : palette.border,
+            ),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () {
+                Navigator.of(context).pop();
+                widget.onLiveTap?.call(channel);
+              },
+              hoverColor: palette.hover,
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                child: Row(
+                  children: [
+                    Icon(Icons.live_tv_rounded,
+                        size: 22, color: palette.accentInk),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            channel.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: palette.textTitle,
+                              fontSize: AppType.title,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            channel.groupName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                color: palette.textSub, fontSize: AppType.body),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      key: ValueKey('live-favorite-remove-${channel.key}'),
+                      tooltip: '取消收藏',
+                      onPressed: () => _removeLive(channel.key),
+                      icon: const Icon(Icons.close_rounded, size: 18),
+                      color: palette.textSub,
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    Icon(Icons.play_circle_outline,
+                        size: 22, color: palette.accentInk),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -366,9 +548,9 @@ class _FavoriteItemCardState extends State<_FavoriteItemCard> {
                 fit: StackFit.expand,
                 children: [
                   // 1. 全景海报封面（Netflix 式画报铺满）
-                  Image.network(
-                    item.pic,
-                    cacheWidth: 360,
+                  Image(
+                    image: posterImageProvider(item.pic, targetWidth: 360) ??
+                        ResizeImage(NetworkImage(item.pic), width: 360),
                     fit: BoxFit.cover,
                     errorBuilder: (_, __, ___) => Container(
                       color: palette.raised,

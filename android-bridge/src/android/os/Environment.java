@@ -67,4 +67,9 @@ public class Environment {
         if (!dir.exists()) dir.mkdirs();
         return dir;
     }
+
+    /** 桌面端没有分区存储限制，视为已获「所有文件访问」权限。 */
+    public static boolean isExternalStorageManager() {
+        return true;
+    }
 }

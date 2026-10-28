@@ -1,3 +1,5 @@
+import '../../danmaku/danmaku_settings.dart';
+
 /// 可选项：显示名 + mpv 取值
 class PlayerOption {
   final String value;
@@ -44,6 +46,23 @@ class PlayerSettings {
   /// 网络缓冲时长（秒），mpv `cache-secs`
   final int cacheSecs;
 
+  /// 播放页激活时隐藏窗口自绘标题栏（§38 沉浸播放）。
+  ///
+  /// 默认 true：播放时画面顶到窗口上沿，鼠标移到窗口顶部再滑出标题栏。
+  /// 关掉后回到「始终显示标题栏」的传统布局。
+  final bool hideWindowTitleBar;
+
+  /// 点播弹幕总开关（§43）。默认 true；播放器内「弹」按钮只影响当前播放，
+  /// 这里是每次起播的初始状态。
+  final bool danmakuEnabled;
+
+  /// 弹幕外观与屏蔽（§43 二期），嵌套保存为 `danmaku` 对象。
+  final DanmakuSettings danmaku;
+
+  /// 共享片段（§44）：2 人以上确认的片段是否自动跳过 / 静音。默认 true；
+  /// 关闭后共享片段只在「片段」抽屉里列出，1 票的提示胶囊照常出现。
+  final bool segmentsAutoApply;
+
   const PlayerSettings({
     this.hwdec = 'auto-safe',
     this.defaultVolume = 100,
@@ -57,6 +76,10 @@ class PlayerSettings {
     this.saturation = 0,
     this.gamma = 0,
     this.cacheSecs = 30,
+    this.hideWindowTitleBar = true,
+    this.danmakuEnabled = true,
+    this.danmaku = DanmakuSettings.defaults,
+    this.segmentsAutoApply = true,
   });
 
   static const PlayerSettings defaults = PlayerSettings();
@@ -151,6 +174,11 @@ class PlayerSettings {
       saturation: integer('saturation', 0, minPicture, maxPicture),
       gamma: integer('gamma', 0, minPicture, maxPicture),
       cacheSecs: integer('cacheSecs', 30, minCacheSecs, maxCacheSecs),
+      // 缺字段（旧配置文件）按默认 true 处理；只有显式 false 才关闭。
+      hideWindowTitleBar: json['hideWindowTitleBar'] != false,
+      danmakuEnabled: json['danmakuEnabled'] != false,
+      danmaku: DanmakuSettings.fromJson(json['danmaku']),
+      segmentsAutoApply: json['segmentsAutoApply'] != false,
     );
   }
 
@@ -167,6 +195,10 @@ class PlayerSettings {
         'saturation': saturation,
         'gamma': gamma,
         'cacheSecs': cacheSecs,
+        'hideWindowTitleBar': hideWindowTitleBar,
+        'danmakuEnabled': danmakuEnabled,
+        'danmaku': danmaku.toJson(),
+        'segmentsAutoApply': segmentsAutoApply,
       };
 
   /// 画面缩放对应的 mpv 属性取值：比例模式强制对应比例，其余复位默认态。
@@ -209,6 +241,10 @@ class PlayerSettings {
     int? saturation,
     int? gamma,
     int? cacheSecs,
+    bool? hideWindowTitleBar,
+    bool? danmakuEnabled,
+    DanmakuSettings? danmaku,
+    bool? segmentsAutoApply,
   }) {
     return PlayerSettings(
       hwdec: hwdec ?? this.hwdec,
@@ -223,6 +259,10 @@ class PlayerSettings {
       saturation: saturation ?? this.saturation,
       gamma: gamma ?? this.gamma,
       cacheSecs: cacheSecs ?? this.cacheSecs,
+      hideWindowTitleBar: hideWindowTitleBar ?? this.hideWindowTitleBar,
+      danmakuEnabled: danmakuEnabled ?? this.danmakuEnabled,
+      danmaku: danmaku ?? this.danmaku,
+      segmentsAutoApply: segmentsAutoApply ?? this.segmentsAutoApply,
     );
   }
 
@@ -240,9 +280,14 @@ class PlayerSettings {
       other.contrast == contrast &&
       other.saturation == saturation &&
       other.gamma == gamma &&
-      other.cacheSecs == cacheSecs;
+      other.cacheSecs == cacheSecs &&
+      other.hideWindowTitleBar == hideWindowTitleBar &&
+      other.danmakuEnabled == danmakuEnabled &&
+      other.danmaku == danmaku &&
+      other.segmentsAutoApply == segmentsAutoApply;
 
   @override
   int get hashCode => Object.hash(hwdec, defaultVolume, defaultRate, audioChannels, audioDelayMs,
-      toneMapping, scale, brightness, contrast, saturation, gamma, cacheSecs);
+      toneMapping, scale, brightness, contrast, saturation, gamma, cacheSecs, hideWindowTitleBar,
+      danmakuEnabled, danmaku, segmentsAutoApply);
 }

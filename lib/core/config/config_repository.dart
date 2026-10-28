@@ -127,6 +127,7 @@ class ConfigRepository {
   List<HistoryRecord> _historyRecords = [];
   int _historyLimit = defaultHistoryLimit;
   List<VodItem> _favorites = [];
+  List<Live> _liveFavorites = [];
 
   final StreamController<VodConfig> _vodConfigController =
       StreamController<VodConfig>.broadcast();
@@ -138,6 +139,8 @@ class ConfigRepository {
       StreamController<List<HistoryRecord>>.broadcast();
   final StreamController<List<VodItem>> _favoritesController =
       StreamController<List<VodItem>>.broadcast();
+  final StreamController<List<Live>> _liveFavoritesController =
+      StreamController<List<Live>>.broadcast();
   final StreamController<ConfigLoadEvent> _configLoadedController =
       StreamController<ConfigLoadEvent>.broadcast();
 
@@ -283,6 +286,9 @@ class ConfigRepository {
   int get historyLimit => _historyLimit;
   List<VodItem> get favorites => List.unmodifiable(_favorites);
 
+  /// 直播收藏（§33）。与点播收藏是两份独立数据：一个存 `VodItem`，一个存 `Live`。
+  List<Live> get liveFavorites => List.unmodifiable(_liveFavorites);
+
   Stream<VodConfig> get vodConfigStream async* {
     yield _currentVodConfig;
     yield* _vodConfigController.stream;
@@ -306,6 +312,11 @@ class ConfigRepository {
   Stream<List<VodItem>> get favoritesStream async* {
     yield _favorites;
     yield* _favoritesController.stream;
+  }
+
+  Stream<List<Live>> get liveFavoritesStream async* {
+    yield _liveFavorites;
+    yield* _liveFavoritesController.stream;
   }
 
   /// 初始化：从 Windows 本地持久化中恢复窗口配置与缓存的影视配置
@@ -337,6 +348,9 @@ class ConfigRepository {
 
     _favorites = await _storage.readFavorites();
     _favoritesController.add(_favorites);
+
+    _liveFavorites = await _storage.readLiveFavorites();
+    _liveFavoritesController.add(_liveFavorites);
 
     // 如果此前保存了配置 URL，尝试后台异步更新最新配置
     final lastUrl = _currentWindowConfig.lastConfigUrl;
@@ -551,6 +565,52 @@ class ConfigRepository {
     } catch (_) {
       _favorites.insert(index, removed);
       _favoritesController.add(_favorites);
+      rethrow;
+    }
+  }
+
+  /// 该频道是否已收藏（§33）。键用 [Live.key]（分组+名称+地址），
+  /// 与频道列表、上次播放记录共用同一套身份口径。
+  bool isLiveFavorite(String key) => _liveFavorites.any((e) => e.key == key);
+
+  /// 切换直播频道收藏；落盘失败时撤回内存变更，避免 UI 显示「已保存」。
+  Future<bool> toggleLiveFavorite(Live channel) async {
+    final index = _liveFavorites.indexWhere((e) => e.key == channel.key);
+    Live? removed;
+    bool favorited;
+    if (index >= 0) {
+      removed = _liveFavorites.removeAt(index);
+      favorited = false;
+    } else {
+      _liveFavorites.insert(0, channel);
+      favorited = true;
+    }
+    _liveFavoritesController.add(_liveFavorites);
+    try {
+      await _storage.saveLiveFavorites(_liveFavorites);
+    } catch (_) {
+      if (removed != null) {
+        _liveFavorites.insert(index, removed);
+      } else {
+        _liveFavorites.removeWhere((e) => e.key == channel.key);
+      }
+      _liveFavoritesController.add(_liveFavorites);
+      rethrow;
+    }
+    return favorited;
+  }
+
+  /// 移除指定直播收藏；落盘失败时恢复原位置并抛错。
+  Future<void> removeLiveFavorite(String key) async {
+    final index = _liveFavorites.indexWhere((e) => e.key == key);
+    if (index < 0) return;
+    final removed = _liveFavorites.removeAt(index);
+    _liveFavoritesController.add(_liveFavorites);
+    try {
+      await _storage.saveLiveFavorites(_liveFavorites);
+    } catch (_) {
+      _liveFavorites.insert(index, removed);
+      _liveFavoritesController.add(_liveFavorites);
       rethrow;
     }
   }

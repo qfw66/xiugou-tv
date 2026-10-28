@@ -43,7 +43,11 @@ doc/
 # 第三方组件署名与开源协作文档（属「许可 / 版权说明」与对外协作入口）
 !/THIRD_PARTY_LICENSES.md
 !/CONTRIBUTING.md
+# 开发者指北：可选在线服务（弹幕 / 共享片段）的配置说明
+!/DEVELOPER_GUIDE.md
 !/SECURITY.md
+# §44 共享片段服务的部署 / D1 结构说明（随服务端代码入库）
+!/server/segments-worker/README.md
 
 # AI 提示、规则、会话、工具配置及本地工作记录不入库
 .do-it/
@@ -102,6 +106,13 @@ doc/
 !.env.example
 !.env.sample
 !.env.template
+# §43 构建期配置（弹幕服务地址 / 令牌等）：只提交空值模板 config/app.env.example
+/config/*.env
+!/config/*.env.example
+# §44 Worker 本地依赖与 wrangler 状态
+/server/segments-worker/node_modules/
+/server/segments-worker/.wrangler/
+/.wrangler/
 *.key
 *.pem
 *.p12

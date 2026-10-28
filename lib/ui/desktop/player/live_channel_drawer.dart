@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -23,6 +24,12 @@ class LiveChannelLayer extends StatefulWidget {
   final VoidCallback onManage;
   final Widget child;
 
+  /// 已收藏频道的键集合（§34）：抽屉顶部置顶「收藏频道」小节。
+  final Set<String> favoriteKeys;
+
+  /// §35：画中画小窗里整层不生效（无热区、无抽屉），还原后恢复。
+  final bool enabled;
+
   const LiveChannelLayer({
     super.key,
     required this.channels,
@@ -30,6 +37,8 @@ class LiveChannelLayer extends StatefulWidget {
     required this.onSelect,
     required this.onManage,
     required this.child,
+    this.favoriteKeys = const {},
+    this.enabled = true,
   });
 
   @override
@@ -56,6 +65,10 @@ class _LiveChannelLayerState extends State<LiveChannelLayer> {
   void didUpdateWidget(covariant LiveChannelLayer oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.channels.isEmpty && _open) {
+      _open = false;
+    }
+    // §35：进画中画时立刻收起，避免抽屉留在小窗里。
+    if (!widget.enabled && _open) {
       _open = false;
     }
   }
@@ -93,7 +106,8 @@ class _LiveChannelLayerState extends State<LiveChannelLayer> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.channels.isEmpty) return widget.child;
+    // §35 方案 A：画中画下整层直通（不留热区，不会误弹）。
+    if (!widget.enabled || widget.channels.isEmpty) return widget.child;
     return LayoutBuilder(
       builder: (context, constraints) {
         _layoutWidth = constraints.maxWidth;
@@ -116,6 +130,7 @@ class _LiveChannelLayerState extends State<LiveChannelLayer> {
                   child: _LiveChannelDrawer(
                     channels: widget.channels,
                     currentIndex: widget.currentIndex,
+                    favoriteKeys: widget.favoriteKeys,
                     open: _open,
                     onSelect: _handleSelect,
                     onManage: widget.onManage,
@@ -136,18 +151,43 @@ class _DrawerEntry {
   final int? channelIndex;
   final Live? channel;
 
+  /// 非 null 时是提示行（例如「收藏频道」为空时的引导文案，§34）。
+  final String? hint;
+
+  /// true = 置顶「收藏频道」小节里的快捷入口行（§34-R）。
+  /// 它不参与悬停/播放高亮，避免与下方主列表同一频道双亮。
+  final bool quickEntry;
+
   const _DrawerEntry.header(this.group)
       : channelIndex = null,
-        channel = null;
+        channel = null,
+        hint = null,
+        quickEntry = false;
 
-  const _DrawerEntry.channel(this.channelIndex, this.channel) : group = null;
+  const _DrawerEntry.channel(this.channelIndex, this.channel,
+      {this.quickEntry = false})
+      : group = null,
+        hint = null;
+
+  /// 同一频道可能在置顶小节与主列表各出现一次（§34），
+  /// 用「行身份」而不是「频道下标」区分选中态。
+  String get rowId => quickEntry ? 'q:$channelIndex' : 'm:$channelIndex';
+
+  const _DrawerEntry.hint(this.hint)
+      : group = null,
+        channelIndex = null,
+        channel = null,
+        quickEntry = false;
 
   bool get isHeader => group != null;
+  bool get isHint => hint != null;
+  bool get isChannel => channelIndex != null;
 }
 
 class _LiveChannelDrawer extends StatefulWidget {
   final List<Live> channels;
   final int currentIndex;
+  final Set<String> favoriteKeys;
   final bool open;
   final ValueChanged<int> onSelect;
   final VoidCallback onManage;
@@ -156,6 +196,7 @@ class _LiveChannelDrawer extends StatefulWidget {
   const _LiveChannelDrawer({
     required this.channels,
     required this.currentIndex,
+    required this.favoriteKeys,
     required this.open,
     required this.onSelect,
     required this.onManage,
@@ -177,6 +218,12 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
   final ScrollController _scrollController = ScrollController();
   int _cursor = 0;
 
+  /// 当前光标的**行身份**（非 null 时优先于 [_cursor]）。
+  ///
+  /// §34-R：置顶「收藏频道」小节与下方主列表可能指向同一频道，但它们是两行。
+  /// 用行身份记录光标，两行各自的悬停/选中互不牵连；播放高亮（正在播出）仍只认主列表。
+  String? _cursorRowId;
+
   /// 分组行 / 「频道下标 → 行下标」/「行下标 → 顶部偏移」缓存。
   ///
   /// 频道上千时 `_buildEntries()` 每次 build 都要全量遍历，而鼠标在列表上悬停
@@ -193,10 +240,14 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
     _rebuildEntryCache();
   }
 
+  /// 置顶「收藏频道」小节标题（§34）。与弹窗里的分类同名同口径。
+  static const String favoriteSectionTitle = '收藏频道';
+
   @override
   void didUpdateWidget(covariant _LiveChannelDrawer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.channels, widget.channels)) {
+    if (!identical(oldWidget.channels, widget.channels) ||
+        !setEquals(oldWidget.favoriteKeys, widget.favoriteKeys)) {
       _rebuildEntryCache();
       if (_cursor >= widget.channels.length) {
         _cursor = widget.channels.isEmpty ? 0 : widget.channels.length - 1;
@@ -204,6 +255,7 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
     }
     if (widget.open && !oldWidget.open) {
       _cursor = widget.currentIndex;
+      _cursorRowId = null;
       _afterFrame(() {
         _focusNode.requestFocus();
         _scrollToCursor();
@@ -212,6 +264,7 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
       _focusNode.unfocus();
     } else if (widget.open && widget.currentIndex != oldWidget.currentIndex) {
       _cursor = widget.currentIndex;
+      _cursorRowId = null;
       _afterFrame(_scrollToCursor);
     }
   }
@@ -254,19 +307,60 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
     return KeyEventResult.ignored;
   }
 
+  /// 键盘移动光标：在**行序列**上移动（收藏小节的行也参与），
+  /// 因此键盘可以选中置顶小节里的快捷入口。
   void _moveCursor(int delta) {
-    if (widget.channels.isEmpty) return;
-    final next = (_cursor + delta).clamp(0, widget.channels.length - 1);
-    if (next == _cursor) return;
-    setState(() => _cursor = next);
-    _scrollToCursor();
+    if (_entries.isEmpty) return;
+    final currentRow = _cursorRowId;
+    var index = currentRow == null
+        ? -1
+        : _entries.indexWhere((e) => e.rowId == currentRow);
+    if (index < 0) index = _entries.indexWhere((e) => e.rowId == 'm:$_cursor');
+    if (index < 0) index = 0;
+
+    var next = index + delta;
+    // 跳过标题行与提示行，只停在可选的频道行上。
+    while (next >= 0 && next < _entries.length && !_entries[next].isChannel) {
+      next += delta;
+    }
+    if (next < 0 || next >= _entries.length) return;
+
+    final entry = _entries[next];
+    setState(() {
+      _cursorRowId = entry.rowId;
+      _cursor = entry.channelIndex!;
+    });
+    _scrollToRow(next);
   }
 
   void _rebuildEntryCache() {
     final entries = <_DrawerEntry>[];
     final channelEntryIndex = List<int>.filled(widget.channels.length, 0);
+    final assigned = List<bool>.filled(widget.channels.length, false);
     final tops = <double>[];
     var offset = 0.0;
+
+    // 置顶「收藏频道」小节（§34）：一直显示，空时给引导。
+    tops.add(offset);
+    entries.add(const _DrawerEntry.header(favoriteSectionTitle));
+    offset += _headerHeight;
+    var favoriteCount = 0;
+    for (var i = 0; i < widget.channels.length; i++) {
+      final channel = widget.channels[i];
+      if (!widget.favoriteKeys.contains(channel.key)) continue;
+      tops.add(offset);
+      channelEntryIndex[i] = entries.length;
+      assigned[i] = true;
+      entries.add(_DrawerEntry.channel(i, channel, quickEntry: true));
+      offset += _itemHeight;
+      favoriteCount++;
+    }
+    if (favoriteCount == 0) {
+      tops.add(offset);
+      entries.add(const _DrawerEntry.hint('还没有收藏频道，点「管理频道」加星标'));
+      offset += _itemHeight;
+    }
+
     String? lastGroup;
     for (var i = 0; i < widget.channels.length; i++) {
       final channel = widget.channels[i];
@@ -278,7 +372,8 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
         lastGroup = group;
       }
       tops.add(offset);
-      channelEntryIndex[i] = entries.length;
+      // 收藏过的频道在置顶小节里已经出现过，滚动定位仍指第一次出现的位置。
+      if (!assigned[i]) channelEntryIndex[i] = entries.length;
       entries.add(_DrawerEntry.channel(i, channel));
       offset += _itemHeight;
     }
@@ -287,10 +382,27 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
     _entryTops = tops;
   }
 
+  /// 光标所在行的滚动定位：有行身份时按该行，否则退回「该频道第一次出现」的行。
   void _scrollToCursor() {
     if (!_scrollController.hasClients) return;
-    if (_cursor < 0 || _cursor >= _channelEntryIndex.length) return;
-    final offset = _entryTops[_channelEntryIndex[_cursor]];
+    var rowIndex = -1;
+    final rowId = _cursorRowId;
+    if (rowId != null) {
+      rowIndex = _entries.indexWhere((e) => e.rowId == rowId);
+    }
+    if (rowIndex < 0) {
+      if (_cursor < 0 || _cursor >= _channelEntryIndex.length) return;
+      rowIndex = _channelEntryIndex[_cursor];
+    }
+    if (rowIndex < 0 || rowIndex >= _entryTops.length) return;
+    _scrollToRow(rowIndex);
+  }
+
+  /// 按**行下标**滚动到目标行（键盘在行序列上移动时用）。
+  void _scrollToRow(int rowIndex) {
+    if (!_scrollController.hasClients) return;
+    if (rowIndex < 0 || rowIndex >= _entryTops.length) return;
+    final offset = _entryTops[rowIndex];
     final position = _scrollController.position;
     final target = (offset - position.viewportDimension / 2 + _itemHeight)
         .clamp(0.0, position.maxScrollExtent)
@@ -433,6 +545,22 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
   }
 
   Widget _buildEntry(AppPalette palette, _DrawerEntry entry) {
+    if (entry.isHint) {
+      return Container(
+        height: _itemHeight,
+        padding: const EdgeInsets.fromLTRB(18, 6, 14, 6),
+        alignment: Alignment.centerLeft,
+        child: Text(
+          entry.hint!,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: palette.playerText.withValues(alpha: 0.45),
+            fontSize: AppType.caption,
+          ),
+        ),
+      );
+    }
     if (entry.isHeader) {
       return Container(
         height: _headerHeight,
@@ -467,8 +595,14 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
     }
     final i = entry.channelIndex!;
     final channel = entry.channel!;
-    final isCurrent = i == widget.currentIndex;
-    final isCursor = i == _cursor;
+    // §34-R：置顶「收藏频道」小节只是快捷入口，不参与**播放高亮** ——
+    // 否则同一频道会在置顶小节和下方主列表两处同时挂「正在播出」红点。
+    // §34-R2：但它自己可以被光标选中（悬停态只在这一行显示），两行互不联动。
+    final isQuickEntry = entry.quickEntry;
+    final isCurrent = !isQuickEntry && i == widget.currentIndex;
+    final isCursor = _cursorRowId != null
+        ? entry.rowId == _cursorRowId
+        : (!isQuickEntry && i == _cursor);
 
     // 台号格式化：三位对齐
     final channelNumber = (i + 1).toString().padLeft(3, '0');
@@ -482,7 +616,11 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
         child: MouseRegion(
           cursor: SystemMouseCursors.click,
           onEnter: (_) {
-            if (i != _cursor) setState(() => _cursor = i);
+            if (entry.rowId == _cursorRowId) return;
+            setState(() {
+              _cursorRowId = entry.rowId;
+              _cursor = i;
+            });
           },
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,

@@ -47,4 +47,13 @@ public class TextUtils {
         }
         return sb.toString();
     }
+
+    /** 文字溢出时的省略位置（桌面端不排版，只为载荷的 setEllipsize 调用可解析）。 */
+    public enum TruncateAt {
+        START,
+        MIDDLE,
+        END,
+        MARQUEE,
+        END_SMALL
+    }
 }

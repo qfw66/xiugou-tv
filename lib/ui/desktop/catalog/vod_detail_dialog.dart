@@ -1,8 +1,11 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import '../../../core/api/models/vod_models.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../widgets/focus_ring.dart';
+import '../widgets/horizontal_scroll_area.dart';
+import 'poster_image.dart';
 
 /// 详情页选集的完整选择上下文（把同站全部线路带进播放会话）。
 class EpisodeSelection {
@@ -88,11 +91,20 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
   bool _favoriteBusy = false;
   String? _error;
 
+  /// 播放源横栏的横向滚动控制器（滚轮 / 拖拽共用）。
+  final ScrollController _sourceScrollController = ScrollController();
+
   @override
   void initState() {
     super.initState();
     _favorited = widget.isFavorite;
     _selectedSourceIndex = _initialSourceIndex();
+  }
+
+  @override
+  void dispose() {
+    _sourceScrollController.dispose();
+    super.dispose();
   }
 
   /// §15：打开弹窗时落到当前集所在线路；找不到就保持默认（第一条）。
@@ -167,9 +179,10 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                         ),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(AppRadii.md),
-                          child: Image.network(
-                            item.pic,
-                            cacheWidth: 320,
+                          child: Image(
+                            image: posterImageProvider(item.pic,
+                                    targetWidth: 320) ??
+                                ResizeImage(NetworkImage(item.pic), width: 320),
                             width: 110,
                             height: 156,
                             fit: BoxFit.cover,
@@ -415,18 +428,26 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                   if (sources.length > 1) ...[
                     SizedBox(
                       height: 34,
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: sources.length,
-                        separatorBuilder: (_, __) => const SizedBox(width: 8),
-                        itemBuilder: (context, index) {
-                          return _SourcePill(
-                            label: sources[index].name,
-                            isSelected: index == _selectedSourceIndex,
-                            onTap: () =>
-                                setState(() => _selectedSourceIndex = index),
-                          );
-                        },
+                      child: HorizontalScrollArea(
+                        controller: _sourceScrollController,
+                        child: ListView.separated(
+                          controller: _sourceScrollController,
+                          // 胶囊自带 onTap，与拖拽同处一个手势竞技场：
+                          // 默认 DragStartBehavior.start 会丢掉接受前的位移。
+                          dragStartBehavior: DragStartBehavior.down,
+                          scrollDirection: Axis.horizontal,
+                          itemCount: sources.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(width: 8),
+                          itemBuilder: (context, index) {
+                            return _SourcePill(
+                              label: sources[index].name,
+                              isSelected: index == _selectedSourceIndex,
+                              onTap: () => setState(
+                                  () => _selectedSourceIndex = index),
+                            );
+                          },
+                        ),
                       ),
                     ),
                     const SizedBox(height: 12),

@@ -18,4 +18,11 @@ public class Message {
         m.target = h;
         return m;
     }
+
+    public void sendToTarget() {
+        if (target != null) target.sendMessage(this);
+    }
+
+    public void recycle() {
+    }
 }

@@ -6,7 +6,9 @@
 ///
 /// - `SearchEngine` 在发出下一批前检查，取消后立即结束并丢弃在途结果；
 /// - CMS 站源把它桥接成 Dio `CancelToken`，**在途 HTTP 请求会被真正中止**；
-/// - 伴随（Spider）站源暂不支持中止，结果同样被丢弃。
+/// - 伴随（Spider）站源除了断掉本地 RPC 连接，还会按 `rpcId` 通知 companion
+///   调 `Call.cancel()`，把 jar 内部正在阻塞的那次网络请求一起中止，
+///   以免 worker 继续占着线程池槽位（见 `CallRegistry`）。
 class SearchCancelToken {
   bool _cancelled = false;
   final List<void Function()> _listeners = <void Function()>[];

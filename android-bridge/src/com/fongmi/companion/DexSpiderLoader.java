@@ -4,6 +4,7 @@ import android.content.Context;
 import com.github.catvod.crawler.Spider;
 import com.github.catvod.crawler.SpiderNull;
 import com.github.catvod.spider.UnsupportedGuardSpider;
+import com.fongmi.companion.d2j.PreciseDex2jar;
 import com.fongmi.companion.guard.GuardCryptoService;
 
 import java.io.*;
@@ -810,9 +811,9 @@ public class DexSpiderLoader {
 
             String base = jarFile.getName();
             if (base.endsWith(".jar")) base = base.substring(0, base.length() - 4);
-            // -jvm4：修补版后缀（新增「字符串表 arraycopy 换向」规则）。
-            // 旧缓存（-jvm / -jvm2 / -jvm3）是未修补或旧规则产物，直接换名作废。
-            File converted = new File(cacheDir, base + "-jvm4.jar");
+            // -jvm7：转换器改为 PreciseDex2jar（保留 new-instance 的真实分配类型，不再塌缩成父类）。
+            // 旧缓存（-jvm 至 -jvm6）是塌缩产物或基于启发式补点位的产物，直接换名作废。
+            File converted = new File(cacheDir, base + "-jvm7.jar");
             if (converted.exists() && converted.length() > 0
                     && converted.lastModified() >= jarFile.lastModified()) {
                 return converted;
@@ -820,18 +821,19 @@ public class DexSpiderLoader {
 
             System.out.println("[DexSpiderLoader] Converting dex jar to JVM jar: " + jarFile.getName());
             long t0 = System.currentTimeMillis();
-            File tmp = new File(cacheDir, base + "-jvm4.tmp.jar");
-            com.googlecode.d2j.dex.Dex2jar.from(jarFile).to(tmp.toPath());
+            File tmp = new File(cacheDir, base + "-jvm7.tmp.jar");
+            PreciseDex2jar.Result result = PreciseDex2jar.convert(jarFile, tmp.toPath());
             if (tmp.exists() && tmp.length() > 0) {
-                // dex2jar 会产出「NEW 抽象类」「子类构造器丢失」这类必然抛错的字节码，
-                // 先做结构化修补；修补失败就退回未修补产物（不影响既有站点）。
+                // 修补 dex2jar 十六进制字符串表还原产生的 arraycopy 反向；
+                // 修补失败就退回未修补产物（不影响既有站点）。
                 if (!Dex2jarRepair.repair(tmp, converted)) {
                     java.nio.file.Files.move(tmp.toPath(), converted.toPath(),
                             java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 }
                 tmp.delete();
                 System.out.println("[DexSpiderLoader] Dex2jar done in " + (System.currentTimeMillis() - t0)
-                        + "ms -> " + converted.getName() + " (" + converted.length() + " bytes)");
+                        + "ms -> " + converted.getName() + " (" + converted.length() + " bytes, "
+                        + result.classes + " classes, 保留真实分配类型 " + result.keptMismatchedNew + " 处)");
                 converted.setLastModified(System.currentTimeMillis());
                 return converted;
             }

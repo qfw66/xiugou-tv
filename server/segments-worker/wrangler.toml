@@ -1,0 +1,12 @@
+# 修狗TV 共享跳过片段 Worker（§44）。部署步骤见 README.md。
+# 本文件不含任何密钥：令牌与盐用 `wrangler secret put` 设置。
+
+name = "xiugou-segments"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "xiugou-segments"
+# 运行 `npx wrangler d1 create xiugou-segments` 后，把输出里的 database_id 填到这里
+database_id = "REPLACE_WITH_YOUR_DATABASE_ID"

@@ -5,6 +5,20 @@ package android.view;
  */
 public interface WindowManager {
 
+    /** 载荷用它取屏宽决定弹窗尺寸。 */
+    default Display getDefaultDisplay() {
+        return new Display();
+    }
+
+    default void addView(android.view.View view, ViewGroup.LayoutParams params) {
+    }
+
+    default void removeView(android.view.View view) {
+    }
+
+    default void updateViewLayout(android.view.View view, ViewGroup.LayoutParams params) {
+    }
+
     class LayoutParams extends ViewGroup.LayoutParams {
 
         public static final int TYPE_APPLICATION = 2;
@@ -27,6 +41,7 @@ public interface WindowManager {
         public int flags;
         public float alpha = 1.0f;
         public float dimAmount = 1.0f;
+        public android.os.IBinder token;
 
         public LayoutParams() {
             super(WRAP_CONTENT, WRAP_CONTENT);
