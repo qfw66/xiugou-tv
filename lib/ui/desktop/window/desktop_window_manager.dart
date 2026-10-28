@@ -6,6 +6,7 @@ import 'package:screen_retriever/screen_retriever.dart';
 import 'package:window_manager/window_manager.dart';
 import '../../../core/config/config_repository.dart';
 import '../../../core/config/models/desktop_window_config.dart';
+import 'window_geometry_guard.dart';
 
 /// Windows 桌面原生窗口生命周期与几何形态管理控制器
 class DesktopWindowManager with WindowListener {
@@ -62,7 +63,11 @@ class DesktopWindowManager with WindowListener {
     windowManager.addListener(this);
     await windowManager.setPreventClose(true);
 
-    final initialConfig = _configRepository.currentWindowConfig;
+    // §47 启动不显示页面热修：已保存的几何若是最小化占位 / 屏幕外坐标，先清洗再用。
+    final initialConfig = WindowGeometryGuard.sanitizeWindowGeometry(
+      _configRepository.currentWindowConfig,
+      await _displayWorkAreas(),
+    );
 
     final windowOptions = WindowOptions(
       size: const Size(1280, 720),
@@ -108,6 +113,22 @@ class DesktopWindowManager with WindowListener {
     // 监听配置仓库外部变动
     _configSubscription =
         _configRepository.windowConfigStream.listen(_onConfigChanged);
+  }
+
+  /// 各显示器工作区（逻辑像素）。取不到时返回空列表，由守卫退化为只剔除占位坐标。
+  Future<List<Rect>> _displayWorkAreas() async {
+    try {
+      final displays = await screenRetriever.getAllDisplays();
+      return [
+        for (final d in displays)
+          if (d.visiblePosition != null && d.visibleSize != null)
+            d.visiblePosition! & d.visibleSize!
+          else
+            Offset.zero & d.size,
+      ];
+    } catch (_) {
+      return const [];
+    }
   }
 
   /// 主题切换时更新原生窗口底色；失败不影响界面（最多是缩放时露旧色）。
@@ -357,6 +378,21 @@ class DesktopWindowManager with WindowListener {
           : await windowManager.getPosition();
 
       final current = _configRepository.currentWindowConfig;
+      // §47：最小化（任务栏右键关闭）时 Windows 报告的是占位几何 (-32000,-32000) / 158×26，
+      // 此时 isMaximized 也读不准——几何与最大化状态都保留旧值，只同步置顶。
+      final minimized = !pip && await windowManager.isMinimized();
+      final skipGeometry = minimized ||
+          (!pip &&
+              !(isMax || isFull) &&
+              !WindowGeometryGuard.isPersistableGeometry(
+                  minimized: false, size: size));
+      if (skipGeometry) {
+        if (current.alwaysOnTop != isAlwaysOnTopNotifier.value) {
+          await _configRepository.updateWindowConfig(
+              current.copyWith(alwaysOnTop: isAlwaysOnTopNotifier.value));
+        }
+        return;
+      }
       final updated = current.copyWith(
         width: isMax || isFull ? current.width : size.width,
         height: isMax || isFull ? current.height : size.height,

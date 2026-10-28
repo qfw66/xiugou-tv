@@ -463,6 +463,9 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
   /// 静音提醒只弹一次（同一播放器实例内）。
   bool _mutedHintSent = false;
 
+  /// 静音起播检测用的引擎状态订阅（dispose 时取消）。
+  StreamSubscription<PlaybackStatus>? _statusSubscription;
+
   Future<void> _checkMutedPlayback() async {
     if (_mutedHintSent) return;
     final status = widget.playerEngine.status;
@@ -480,7 +483,9 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
     _immersive = widget.windowManager.isImmersiveNotifier.value;
     _syncImmersive(widget.hideWindowTitleBar);
     _bottomBarFocusNode.addListener(_onBottomBarFocusChanged);
-    widget.playerEngine.statusStream.listen((status) {
+    // 引擎是全应用单例（广播流）：订阅必须在 dispose 时取消，否则每进一次播放页
+    // 就多挂一个监听，闭包还会拽住整个 State 无法回收（2026-10-28 发布前资源审查）。
+    _statusSubscription = widget.playerEngine.statusStream.listen((status) {
       if (status == PlaybackStatus.playing) _checkMutedPlayback();
     });
     _startHideTimer();
@@ -506,6 +511,7 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
 
   @override
   void dispose() {
+    unawaited(_statusSubscription?.cancel());
     _hideControlsTimer?.cancel();
     _syncImmersive(false);
     widget.windowManager.isPipNotifier.removeListener(_onPipChanged);
