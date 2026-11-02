@@ -35,10 +35,16 @@ class AppVersion implements Comparable<AppVersion> {
 
   /// 是否为预发布标签（`v1.2.0-beta.1`）。
   ///
-  /// build 元数据（`1.0.0+1`）不算预发布，只有 `-` 后缀才是。
+  /// build 元数据（`1.0.0+1`）不算预发布。`-` 后缀只在表示 semver 预发布标识
+  /// （`alpha` / `beta` / `rc` / `pre` / `preview` / `dev` / `snapshot` / `canary`）
+  /// 时才算——维护者的发布命名习惯（如 `v1.0.3-hotfix`）是正式版，不是预发布。
   static bool isPrereleaseTag(String raw) {
     final text = raw.trim().replaceFirst(RegExp(r'^[vV]'), '');
-    return text.contains('-');
+    final dash = text.indexOf('-');
+    if (dash < 0) return false;
+    final suffix = text.substring(dash + 1).toLowerCase();
+    return RegExp(r'^(alpha|beta|preview|pre|rc|dev|snapshot|canary)(?![a-z])')
+        .hasMatch(suffix);
   }
 
   @override

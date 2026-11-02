@@ -165,7 +165,9 @@ class _PlaybackPreparingOverlayState extends State<PlaybackPreparingOverlay> {
         child: cover == null || cover.isEmpty
             ? ColoredBox(color: palette.raised)
             : Image(
-                image: posterImageProvider(cover) ?? NetworkImage(cover),
+                // 显示框只有 96 宽：按约 3 倍像素解码，避免按原图分辨率（数 MB）进 ImageCache
+                image: posterImageProvider(cover, targetWidth: 288) ??
+                    NetworkImage(cover),
                 fit: BoxFit.cover,
                 errorBuilder: (_, __, ___) => ColoredBox(color: palette.raised),
               ),

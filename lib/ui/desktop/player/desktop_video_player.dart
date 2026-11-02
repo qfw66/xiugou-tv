@@ -6,6 +6,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../../../core/config/models/vod_config.dart';
 import '../../../core/danmaku/danmaku_controller.dart';
 import '../../../core/danmaku/danmaku_settings.dart';
+import '../../../core/player/decode_diagnostics.dart';
 import '../../../core/player/models/player_settings.dart';
 import '../../../core/player/models/player_state.dart';
 import '../../../core/player/models/track_info.dart';
@@ -345,6 +346,15 @@ class DesktopVideoPlayer extends StatefulWidget {
   /// 标题栏的浮出 / 收回由窗口框架负责；`false` 时回到传统布局。
   final bool hideWindowTitleBar;
 
+  /// §51 底栏隐藏后是否显示贴底细进度线（设置中心「播放页」开关，实时生效）。
+  final bool showMiniProgress;
+
+  /// §14 长按 → 的临时倍速（`PlayerSettings.holdRate`，实时生效）。
+  final double holdRate;
+
+  /// §55 播放中鼠标静止 5 秒后隐藏光标（`PlayerSettings.autoHideCursor`，实时生效）。
+  final bool autoHideCursor;
+
   /// 起播准备态（§16）：非空时在画面上盖一层骨架/失败面板。
   ///
   /// 解析播放地址在弱网下要几秒；把播放页先亮出来、状态放页内，
@@ -378,6 +388,9 @@ class DesktopVideoPlayer extends StatefulWidget {
     required this.playerEngine,
     required this.windowManager,
     this.hideWindowTitleBar = true,
+    this.showMiniProgress = true,
+    this.holdRate = PlayerSettings.defaultHoldRate,
+    this.autoHideCursor = true,
     this.scale = 'fit',
     this.onBack,
     this.videoSurface,
@@ -433,6 +446,14 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
   static const double _bottomChromeZone = 110;
   static const Duration _chromeExitDelay = Duration(milliseconds: 150);
 
+  /// §55 光标显隐独立于控制条：鼠标在播放器任意位置移动即显示，静止
+  /// [PlayerSettings.cursorIdleDelay] 后（且正在播放）隐藏。
+  ///
+  /// 以前光标跟着 `_showControls` 走，§37 之后画面中部移动不再唤起控制条，
+  /// 光标也就跟着「挪了也不出来」，只能把鼠标移出窗口。
+  bool _cursorAwake = true;
+  Timer? _cursorIdleTimer;
+
   /// 沉浸播放（§38）：窗口自绘标题栏此时不渲染，窗口三键并进本顶栏。
   bool _immersive = false;
 
@@ -466,6 +487,16 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
   /// 静音起播检测用的引擎状态订阅（dispose 时取消）。
   StreamSubscription<PlaybackStatus>? _statusSubscription;
 
+  /// §14 长按 → 临时倍速；进入长按前的倍速，松开 / 失焦时还原。
+  late final HoldToSpeedGesture _holdGesture = HoldToSpeedGesture(
+    isEnabled: () => widget.playerEngine.currentSpec?.isLive != true,
+    onTap: () => _handleSeek(const Duration(seconds: 10)),
+    onHoldStart: _startHoldRate,
+    onHoldEnd: _endHoldRate,
+  );
+  double? _rateBeforeHold;
+  AppLifecycleListener? _lifecycleListener;
+
   Future<void> _checkMutedPlayback() async {
     if (_mutedHintSent) return;
     final status = widget.playerEngine.status;
@@ -486,13 +517,46 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
     // 引擎是全应用单例（广播流）：订阅必须在 dispose 时取消，否则每进一次播放页
     // 就多挂一个监听，闭包还会拽住整个 State 无法回收（2026-10-28 发布前资源审查）。
     _statusSubscription = widget.playerEngine.statusStream.listen((status) {
-      if (status == PlaybackStatus.playing) _checkMutedPlayback();
+      if (status == PlaybackStatus.playing) {
+        _checkMutedPlayback();
+        // 暂停 / 缓冲期间光标不隐藏；恢复播放后重新计时。
+        if (_cursorAwake && _cursorIdleTimer?.isActive != true) {
+          _armCursorIdle();
+        }
+      }
     });
     _startHideTimer();
+    _armCursorIdle();
+    // 窗口失焦时收不到 → 的松开事件：主动结束长按，倍速不会卡在临时值。
+    _focusNode.addListener(_onPlayerFocusChanged);
+    _lifecycleListener = AppLifecycleListener(onInactive: _holdGesture.cancel);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _focusNode.requestFocus();
     });
   }
+
+  void _onPlayerFocusChanged() {
+    if (!_focusNode.hasFocus) _holdGesture.cancel();
+  }
+
+  void _startHoldRate() {
+    _rateBeforeHold = widget.playerEngine.rate;
+    final rate = widget.holdRate;
+    widget.playerEngine.setRate(rate);
+    _osdController.show(Icons.fast_forward_rounded, '${_rateLabel(rate)}x ▶▶',
+        persistent: true);
+  }
+
+  void _endHoldRate() {
+    final restore = _rateBeforeHold;
+    _rateBeforeHold = null;
+    if (restore == null) return;
+    widget.playerEngine.setRate(restore);
+    if (mounted) _osdController.dismiss();
+  }
+
+  static String _rateLabel(double rate) =>
+      rate == rate.roundToDouble() ? rate.toInt().toString() : rate.toString();
 
   @override
   void didUpdateWidget(covariant DesktopVideoPlayer oldWidget) {
@@ -511,8 +575,12 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
 
   @override
   void dispose() {
+    _holdGesture.dispose();
+    _lifecycleListener?.dispose();
+    _focusNode.removeListener(_onPlayerFocusChanged);
     unawaited(_statusSubscription?.cancel());
     _hideControlsTimer?.cancel();
+    _cursorIdleTimer?.cancel();
     _syncImmersive(false);
     widget.windowManager.isPipNotifier.removeListener(_onPipChanged);
     widget.windowManager.isImmersiveNotifier
@@ -551,8 +619,29 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
     }
   }
 
+  /// §55 鼠标移动：光标立即显示并重新开始静止计时。
+  void _onPointerMoved() {
+    if (!_cursorAwake) setState(() => _cursorAwake = true);
+    _armCursorIdle();
+  }
+
+  void _armCursorIdle() {
+    _cursorIdleTimer?.cancel();
+    _cursorIdleTimer = Timer(PlayerSettings.cursorIdleDelay, () {
+      if (!mounted || !widget.autoHideCursor) return;
+      // 暂停 / 缓冲 / 出错时保持可见（要点按钮）；恢复播放时由状态监听重新计时。
+      if (widget.playerEngine.status != PlaybackStatus.playing) return;
+      if (_cursorAwake) setState(() => _cursorAwake = false);
+    });
+  }
+
+  /// 光标是否可见：关闭自动隐藏、最近动过、或控制条正显示（指针可能停在按钮上）。
+  bool get _cursorVisible =>
+      !widget.autoHideCursor || _cursorAwake || _showControls;
+
   /// §37：指针位置决定显隐 —— 只认顶 / 底热区，画面中部移动不再唤起。
   void _onChromeHover(Offset localPosition) {
+    _onPointerMoved();
     // PiP 小窗保留旧口径：窗口只有 400×225，热区化会让整窗都是热区。
     if (widget.windowManager.isPipNotifier.value) {
       _onUserActivity();
@@ -989,11 +1078,12 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
         child: Focus(
           focusNode: _focusNode,
           autofocus: true,
+          onKeyEvent: (_, event) => _holdGesture.handleKeyEvent(event),
           child: MouseRegion(
             // §37：显隐判定改为「指针在不在顶/底热区」，不再按活动续命。
             onHover: (event) => _onChromeHover(event.localPosition),
             onExit: (_) => _onChromeExit(),
-            cursor: _showControls
+            cursor: _cursorVisible
                 ? SystemMouseCursors.basic
                 : SystemMouseCursors.none,
             child: Stack(
@@ -1504,7 +1594,8 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
         final posMs = (snapshot.data?.inMilliseconds ?? 0)
             .clamp(0, hasDuration ? durMs : 1);
         final fraction = hasDuration ? posMs / durMs : 0.0;
-        final visible = !_showControls && hasDuration;
+        final visible =
+            widget.showMiniProgress && !_showControls && hasDuration;
         return IgnorePointer(
           // 显示度用颜色 alpha 插值表达（不用 Opacity 包裹）：显隐
           // 不改变子树结构与语义节点。
@@ -1955,7 +2046,20 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
   bool _panelOpen = false;
 
   /// 「播放设置」：§43 验收反馈后由居中对话框改为右侧抽屉（与「弹幕设置」同一形态）。
+  /// §50 设置面板打开时回读一次实际解码状态（只读诊断，不随帧刷新）。
+  Future<DecodeDiagnostics?> _decodeDiagnostics = Future.value(null);
+
+  Future<DecodeDiagnostics?> _readDecodeDiagnostics() {
+    try {
+      return widget.playerEngine.readDecodeDiagnostics();
+    } catch (_) {
+      // 测试替身 / 引擎未就绪：不显示解码行
+      return Future.value(null);
+    }
+  }
+
   Future<void> _openSettingsPanel() async {
+    _decodeDiagnostics = _readDecodeDiagnostics();
     var panelAlive = true;
     await _runSideDrawer(
       width: 340,
@@ -2163,16 +2267,48 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
       closeTooltip: '关闭设置',
       footer: infoLabel.isEmpty
           ? null
-          : _panelRow(
-              icon: Icons.info_outline_rounded,
-              label: '播放器',
-              value: infoLabel,
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _buildDecodeRow(),
+                _panelRow(
+                  icon: Icons.info_outline_rounded,
+                  label: '播放器',
+                  value: infoLabel,
+                ),
+              ],
             ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: sections,
       ),
+    );
+  }
+
+  /// §50 实际解码行：期望硬解却回落软解时标红，提示可能是片源格式或显卡不支持。
+  Widget _buildDecodeRow() {
+    return FutureBuilder<DecodeDiagnostics?>(
+      future: _decodeDiagnostics,
+      builder: (context, snapshot) {
+        final d = snapshot.data;
+        if (d == null || !d.hasVideo) return const SizedBox.shrink();
+        final fellBack = d.fellBackToSoftware;
+        return Tooltip(
+          message: fellBack
+              ? '已选硬件解码，但当前片源或显卡不支持，mpv 已回落软件解码（CPU 占用会更高）'
+              : d.summary,
+          child: _panelRow(
+            key: const ValueKey('player-decode-diagnostics'),
+            icon: Icons.memory_rounded,
+            label: '解码',
+            value: fellBack ? '硬解不可用 · ${d.summary}' : d.summary,
+            danger: fellBack,
+            trailing: const SizedBox.shrink(),
+          ),
+        );
+      },
     );
   }
 
@@ -2196,6 +2332,7 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
   ///
   /// [trailing] 缺省为右向箭头；片头 / 片尾行在已设值时传入清除按钮。
   Widget _panelRow({
+    Key? key,
     required IconData icon,
     required String label,
     String? value,
@@ -2203,6 +2340,7 @@ class _DesktopVideoPlayerState extends State<DesktopVideoPlayer> {
     Widget? trailing,
   }) {
     return SizedBox(
+      key: key,
       height: 40,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14),

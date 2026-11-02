@@ -19,7 +19,6 @@ enum UpdateCheckStatus {
   upToDate,
   available,
   noInstaller,
-  ignoredPrerelease,
   error,
   cancelled,
 }
@@ -187,15 +186,9 @@ class UpdateService {
         continue;
       }
       markMirror(true);
-      if (manifest.isPrerelease) {
-        return UpdateCheckResult(
-          status: UpdateCheckStatus.ignoredPrerelease,
-          manifest: manifest,
-          sourceHost: host,
-          sourceLabel: candidate.label,
-          viaMirror: candidate.viaMirror,
-        );
-      }
+      // 只要远端版本比本地新就提示更新，**不因 tag 带 `-` 后缀（如 `v1.0.3-hotfix`）
+      // 而跳过**：这类后缀是维护者的发布命名习惯，不是「不适合普通用户」的预发布。
+      // 预发布标记只在对话框里作为事实展示（见 [`UpdateManifest.prerelease`]）。
       if (remote.compareTo(local) <= 0) {
         return UpdateCheckResult(
           status: UpdateCheckStatus.upToDate,

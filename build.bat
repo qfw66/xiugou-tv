@@ -1,1 +1,3 @@
-powershell.exe -NoProfile -File "%~dp0scripts\build_windows.ps1" -Version 1.0.0 -SkipInstaller
+@echo off
+rem Version follows pubspec.yaml (build_windows.ps1 reads it when -Version is omitted).
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\build_windows.ps1" -SkipInstaller %*

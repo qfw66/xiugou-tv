@@ -27,7 +27,12 @@ class PlayerEpisodeOption {
 class PlayerLineChoice {
   final int index;
   final String name;
+
+  /// 实际正在播放的线路。
   final bool current;
+
+  /// 抽屉当前展示目录的线路；缺少当前集时可与 [current] 不同。
+  final bool browsing;
 
   /// 本次会话里**确认失败**的线路（灰显不可点）；只是「用过」不算。
   final bool unavailable;
@@ -36,6 +41,7 @@ class PlayerLineChoice {
     required this.index,
     required this.name,
     this.current = false,
+    this.browsing = false,
     this.unavailable = false,
   });
 }
@@ -53,8 +59,11 @@ class PlayerEpisodeListNav {
   /// 切集 / 换线进行中：整块禁用，防重复触发。
   final bool switching;
 
-  /// 选集回调：参数是当前线路里的集下标。
+  /// 选集回调：参数是当前浏览线路里的集下标。
   final ValueChanged<int> onSelectEpisode;
+
+  /// 当前目录是否就是实际播放线路；否则选集时走跨线路切集事务。
+  final bool browsingPlayingLine;
 
   /// 换线路回调：参数是 `PlaybackSession.sources` 的下标。
   final ValueChanged<int> onSelectLine;
@@ -64,6 +73,7 @@ class PlayerEpisodeListNav {
     required this.lines,
     required this.onSelectEpisode,
     required this.onSelectLine,
+    this.browsingPlayingLine = true,
     this.lineName,
     this.switching = false,
   });
@@ -463,16 +473,20 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
             final disabled = nav.switching || line.unavailable;
             final background = line.current
                 ? palette.accent
-                : palette.playerText.withValues(alpha: 0.08);
+                : line.browsing
+                    ? palette.accentWash
+                    : palette.playerText.withValues(alpha: 0.08);
             final foreground = line.current
                 ? onAccent
-                : palette.playerText.withValues(alpha: 0.78);
+                : line.browsing
+                    ? palette.accentInk
+                    : palette.playerText.withValues(alpha: 0.78);
             return FocusRing(
               key: ValueKey('episode-drawer-line-${line.index}'),
               onTap: disabled
                   ? null
                   : () {
-                      if (!line.current) nav.onSelectLine(line.index);
+                      if (!line.browsing) nav.onSelectLine(line.index);
                     },
               semanticLabel: line.unavailable ? '${line.name}（不可用）' : line.name,
               borderRadius:
@@ -485,7 +499,7 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
                   onTap: disabled
                       ? null
                       : () {
-                          if (!line.current) nav.onSelectLine(line.index);
+                          if (!line.browsing) nav.onSelectLine(line.index);
                         },
                   child: Container(
                     alignment: Alignment.center,
@@ -494,22 +508,35 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
                       color: background,
                       borderRadius: BorderRadius.circular(AppRadii.pill),
                       border: Border.all(
-                        color: line.current
+                        color: line.current || line.browsing
                             ? palette.accentInk.withValues(alpha: 0.6)
                             : palette.playerText.withValues(alpha: 0.10),
                         width: 1,
                       ),
                     ),
-                    child: Text(
-                      line.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: foreground,
-                        fontSize: AppType.caption,
-                        fontWeight:
-                            line.current ? FontWeight.bold : FontWeight.w500,
-                      ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (line.current) ...[
+                          Icon(Icons.play_arrow_rounded,
+                              size: 13, color: foreground),
+                          const SizedBox(width: 2),
+                        ],
+                        Flexible(
+                          child: Text(
+                            line.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: foreground,
+                              fontSize: AppType.caption,
+                              fontWeight: line.current
+                                  ? FontWeight.bold
+                                  : FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),

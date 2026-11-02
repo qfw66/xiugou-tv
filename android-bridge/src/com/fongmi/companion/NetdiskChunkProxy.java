@@ -41,6 +41,13 @@ public final class NetdiskChunkProxy implements HttpHandler {
     static final int START_WINDOW = 2;
     static final int MAX_WINDOW = 8;
     static final int ATTEMPTS = 3;
+    /**
+     * 全进程缓冲预算（按 1 MB 块计，共约 16 MB）：seek 时多路并发也不会叠到 25 MB+。
+     * 每路至少保有一块在途以保证前进：拿不到预算时只用一块（超额借用），不会饿死。
+     */
+    static final int GLOBAL_CHUNK_BUDGET = 16;
+    private static final java.util.concurrent.Semaphore BUDGET =
+            new java.util.concurrent.Semaphore(GLOBAL_CHUNK_BUDGET);
     private static final int MAX_ENTRIES = 64;
     private static final int CONNECT_TIMEOUT_MS = 10_000;
     private static final int READ_TIMEOUT_MS = 20_000;
@@ -91,6 +98,11 @@ public final class NetdiskChunkProxy implements HttpHandler {
     /** SpiderServer 绑定端口后调用；为 0 时 {@link #register} 不启用代理。 */
     public static void setLocalPort(int port) {
         localPort = port;
+    }
+
+    /** 本机分块代理所在端口（即 companion 端口）；未就绪时为 0。 */
+    public static int localPort() {
+        return localPort;
     }
 
     /** 登记直链，返回本机代理地址；代理未就绪时返回 null（调用方退回直链）。 */
@@ -204,23 +216,34 @@ public final class NetdiskChunkProxy implements HttpHandler {
         try {
             while (true) {
                 while (inflight.size() < window && next <= end) {
+                    boolean permit = BUDGET.tryAcquire();
+                    if (!permit && !inflight.isEmpty()) break; // 预算用尽：先消费已在途的块
                     long size = next == start ? FIRST_CHUNK : CHUNK;
                     long to = Math.min(end, next + size - 1);
                     Chunk chunk = new Chunk(entry, next, to);
+                    chunk.holdsBudget = permit;
                     chunk.future = POOL.submit(chunk);
                     inflight.add(chunk);
                     next = to + 1;
                 }
                 Chunk head = inflight.poll();
                 if (head == null) break;
-                byte[] data = head.await();
+                byte[] data;
+                try {
+                    data = head.await();
+                } finally {
+                    head.releaseBudget();
+                }
                 body.write(data);
                 sent[0] += data.length;
                 if (window < MAX_WINDOW) window++;
             }
             body.flush();
         } finally {
-            for (Chunk chunk : inflight) chunk.cancel();
+            for (Chunk chunk : inflight) {
+                chunk.cancel();
+                chunk.releaseBudget();
+            }
         }
     }
 
@@ -232,6 +255,15 @@ public final class NetdiskChunkProxy implements HttpHandler {
         Future<byte[]> future;
         private volatile HttpURLConnection connection;
         private volatile boolean cancelled;
+        /** 是否占用了一份全局缓冲预算；只由所属 stream 线程读写。 */
+        boolean holdsBudget;
+
+        void releaseBudget() {
+            if (holdsBudget) {
+                holdsBudget = false;
+                BUDGET.release();
+            }
+        }
 
         Chunk(Entry entry, long from, long to) {
             this.entry = entry;

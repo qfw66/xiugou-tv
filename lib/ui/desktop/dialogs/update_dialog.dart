@@ -81,7 +81,6 @@ class UpdateDialog extends StatelessWidget {
       null => ('检查更新', '正在读取发布信息…'),
       UpdateCheckStatus.error => ('检查更新失败', '更新源暂时不可用'),
       UpdateCheckStatus.upToDate => ('已是最新版本', '当前 $currentVersion'),
-      UpdateCheckStatus.ignoredPrerelease => ('暂无正式版更新', '已忽略预发布版本'),
       UpdateCheckStatus.noInstaller => ('该版本未提供安装版', '可到发布页手动下载'),
       UpdateCheckStatus.cancelled => ('检查已取消', ''),
       UpdateCheckStatus.available => (
@@ -159,15 +158,11 @@ class UpdateDialog extends StatelessWidget {
           ],
         );
       case UpdateCheckStatus.upToDate:
-      case UpdateCheckStatus.ignoredPrerelease:
       case UpdateCheckStatus.cancelled:
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-                result.status == UpdateCheckStatus.ignoredPrerelease
-                    ? '最新发布是预发布版本（${result.manifest?.tag ?? ''}），已按设置跳过。'
-                    : '当前已是最新版本（$currentVersion），无需更新。',
+            Text('当前已是最新版本（$currentVersion），无需更新。',
                 style: TextStyle(
                     fontSize: AppType.label, color: palette.textMain)),
             const SizedBox(height: 14),
@@ -212,6 +207,17 @@ class UpdateDialog extends StatelessWidget {
           _infoRow('发布时间', _formatDate(manifest.publishedAt!), palette),
         _infoRow('安装包大小', asset.size == null ? '未知' : _formatBytes(asset.size!),
             palette),
+        if (manifest.isPrerelease)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Row(children: [
+              Icon(Icons.science_outlined, size: 15, color: palette.textDim),
+              const SizedBox(width: 6),
+              Text('这是预发布版本，可能不稳定',
+                  style: TextStyle(
+                      fontSize: AppType.body, color: palette.textDim)),
+            ]),
+          ),
         if (skipped)
           Padding(
             padding: const EdgeInsets.only(top: 6),

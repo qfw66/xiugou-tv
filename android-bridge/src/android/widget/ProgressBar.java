@@ -15,6 +15,9 @@ public class ProgressBar extends View {
     private volatile boolean indeterminate = true;
     private Drawable progressDrawable;
     private Drawable indeterminateDrawable;
+    private android.content.res.ColorStateList progressTint;
+    private android.content.res.ColorStateList progressBackgroundTint;
+    private android.content.res.ColorStateList indeterminateTint;
 
     public ProgressBar(Context context) {
         super(context);
@@ -71,5 +74,31 @@ public class ProgressBar extends View {
 
     public Drawable getIndeterminateDrawable() {
         return indeterminateDrawable;
+    }
+
+    // 着色只保存，宿主用自己的主题色渲染进度条
+
+    public void setProgressTintList(android.content.res.ColorStateList tint) {
+        this.progressTint = tint;
+    }
+
+    public android.content.res.ColorStateList getProgressTintList() {
+        return progressTint;
+    }
+
+    public void setProgressBackgroundTintList(android.content.res.ColorStateList tint) {
+        this.progressBackgroundTint = tint;
+    }
+
+    public android.content.res.ColorStateList getProgressBackgroundTintList() {
+        return progressBackgroundTint;
+    }
+
+    public void setIndeterminateTintList(android.content.res.ColorStateList tint) {
+        this.indeterminateTint = tint;
+    }
+
+    public android.content.res.ColorStateList getIndeterminateTintList() {
+        return indeterminateTint;
     }
 }

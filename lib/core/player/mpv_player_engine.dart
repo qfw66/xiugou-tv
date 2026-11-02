@@ -1,14 +1,20 @@
 import 'dart:async';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'decode_diagnostics.dart';
+import 'live_stream_tuning.dart';
 import 'models/player_settings.dart';
 import 'models/player_state.dart';
 import 'models/track_info.dart';
 import 'playback_diagnostics.dart';
+import 'playback_error_gate.dart';
+import 'playback_error_text.dart';
+import 'playback_http_headers.dart';
 import 'player_engine.dart';
 import 'player_track_capabilities.dart';
 import 'player_settings_application.dart';
 import 'mpv_settings_target.dart';
+import '../danmaku/danmaku_api.dart';
 
 /// 基于 media_kit (libmpv) 的 Windows 平台硬件加速播放引擎实现
 class MpvPlayerEngine
@@ -25,6 +31,8 @@ class MpvPlayerEngine
   VideoDimensions _dimensions = const VideoDimensions();
   String? _currentError;
   MediaPlaySpec? _currentSpec;
+  /// 已经为这次会话做过「同一地址自动重开」的 spec；同一会话只重试一次。
+  MediaPlaySpec? _softRetrySpec;
   List<TrackInfo> _audioTracks = [];
   List<TrackInfo> _subtitleTracks = [];
   List<TrackInfo> _videoTracks = [];
@@ -46,6 +54,16 @@ class MpvPlayerEngine
   final _videoTracksController = StreamController<List<TrackInfo>>.broadcast();
 
   final List<StreamSubscription> _subscriptions = [];
+
+  /// 直播断流重连：退避计数 + 待执行的重开定时器；[_sessionEpoch] 用于作废
+  /// 换台 / 停止之后才到期的旧重连。
+  final LiveReconnectPolicy _liveReconnect = LiveReconnectPolicy();
+  Timer? _reconnectTimer;
+  int _sessionEpoch = 0;
+
+  /// §56 错误致命性判定：mpv 的 error 级日志先待定，到期看位置有没有推进再决定。
+  final PlaybackErrorGate _errorGate = PlaybackErrorGate();
+  Timer? _errorConfirmTimer;
 
   final settingsApplication = PlayerSettingsApplication();
   Future<void>? _initialization;
@@ -97,6 +115,8 @@ class MpvPlayerEngine
           // 换取播放期峰值内存下降；起播/流畅度在 V2 采样与实机验收中复核。
           bufferSize: 16 * 1024 * 1024,
           logLevel: MPVLogLevel.warn,
+          // §58 系统代理（HTTP_PROXY）下 https 需要 httpproxy 协议，见 mpvProtocolWhitelist。
+          protocolWhitelist: mpvProtocolWhitelist,
         ),
       );
       _nativeCreated = true;
@@ -116,6 +136,25 @@ class MpvPlayerEngine
     } catch (_) {
       settingsApplication.initializationFailed();
       rethrow;
+    }
+  }
+
+  /// §50 读取实际解码状态（hwdec-current / 编码 / 分辨率）。
+  ///
+  /// 只读诊断；引擎未初始化或回读失败时返回 null（界面不显示该行，不猜值）。
+  Future<DecodeDiagnostics?> readDecodeDiagnostics() async {
+    try {
+      final platform = _player.platform;
+      if (platform is! NativePlayer) return null;
+      return DecodeDiagnostics(
+        requested: playbackSettings.hwdec,
+        current: (await platform.getProperty('hwdec-current')).trim(),
+        codec: (await platform.getProperty('video-codec')).trim(),
+        width: int.tryParse(await platform.getProperty('width')) ?? 0,
+        height: int.tryParse(await platform.getProperty('height')) ?? 0,
+      );
+    } catch (_) {
+      return null;
     }
   }
 
@@ -148,6 +187,8 @@ class MpvPlayerEngine
     _subscriptions.add(
       _player.stream.completed.listen((completed) {
         if (completed) {
+          // 直播没有「播完」：EOF 即断流，优先自动重连。
+          if (_scheduleLiveReconnect()) return;
           _updateStatus(PlaybackStatus.completed);
         }
       }),
@@ -156,7 +197,18 @@ class MpvPlayerEngine
     _subscriptions.add(
       _player.stream.position.listen((pos) {
         _position = pos;
+        _liveReconnect.onPosition(pos);
+        _errorGate.onPosition(pos);
         _positionController.add(pos);
+        // §56 已确认的错误之后画面仍在走：解除错误态，不再挡着「播放错误」面板。
+        if (_status == PlaybackStatus.error && _errorGate.recovered(pos)) {
+          _recentLogs.add('[recover] 错误后播放继续推进，已解除错误态');
+          _currentError = null;
+          _errorController.add(null);
+          _updateStatus(_player.state.playing
+              ? PlaybackStatus.playing
+              : PlaybackStatus.paused);
+        }
       }),
     );
 
@@ -250,31 +302,189 @@ class MpvPlayerEngine
 
     _subscriptions.add(
       _player.stream.error.listen((err) {
-        if (err.isNotEmpty) {
-          _currentError = err;
-          _errorController.add(err);
-          _updateStatus(PlaybackStatus.error);
+        if (err.isEmpty) return;
+        // 解码器/缓存降级：mpv 会自动回退继续播放，不能当播放失败（否则「报错但视频正常」）。
+        if (isBenignPlaybackError(err)) {
+          _recentLogs.add('[benign] 解码/缓存降级，mpv 自动回退，不视为播放失败：$err');
+          return;
         }
+        _recentLogs.add('[error] $err');
+        if (_status == PlaybackStatus.error || _reconnectTimer != null) return;
+        final wait = _errorGate.onError(err,
+            position: _position,
+            mediaOpened: _duration > Duration.zero || _dimensions.width > 0);
+        if (wait == null) return;
+        final epoch = _sessionEpoch;
+        _errorConfirmTimer?.cancel();
+        _errorConfirmTimer = Timer(wait, () {
+          _errorConfirmTimer = null;
+          if (_disposed || epoch != _sessionEpoch) return;
+          final fatal = _errorGate.resolve(position: _position);
+          if (fatal == null) {
+            _recentLogs.add('[nonfatal] 报错后播放仍在推进，按可恢复处理：$err');
+            return;
+          }
+          _commitError(fatal);
+        });
       }),
     );
   }
 
+  /// 确认致命错误：直播先走断流重连，其余锁存为错误态（错误面板 / 自动换线据此工作）。
+  void _commitError(String err) {
+    if (_scheduleLiveReconnect()) return;
+    // 传输中断（清单/分段没读全）多为瞬时问题：同一地址先自动重开一次，再判失败。
+    if (_shouldSoftRetry(err)) {
+      _softRetrySpec = _currentSpec;
+      _recentLogs.add('[retry] 传输中断，同一地址自动重开一次：$err');
+      final spec = _currentSpec;
+      if (spec != null) {
+        unawaited(_open(spec).catchError((Object error) {
+          _currentError = '$error';
+          _errorController.add(_currentError);
+          _updateStatus(PlaybackStatus.error);
+        }));
+        return;
+      }
+    }
+    _currentError = err;
+    _errorController.add(err);
+    _updateStatus(PlaybackStatus.error);
+  }
+
+  /// 是否值得「同一地址再开一次」：只针对传输中断，且每个会话只做一次。
+  bool _shouldSoftRetry(String err) {
+    final spec = _currentSpec;
+    if (_disposed || spec == null) return false;
+    if (identical(_softRetrySpec, spec)) return false;
+    final text = err.toLowerCase();
+    return text.contains('stream ends prematurely') || text.contains('ffurl_read');
+  }
+
+  void _cancelErrorConfirm() {
+    _errorConfirmTimer?.cancel();
+    _errorConfirmTimer = null;
+    _errorGate.reset();
+  }
+
+  /// 直播会话断流时按退避策略安排重开；返回 false 表示非直播或重试已用尽。
+  bool _scheduleLiveReconnect() {
+    final spec = _currentSpec;
+    if (_disposed || spec == null || !spec.isLive) return false;
+    if (_reconnectTimer != null) return true;
+    final delay = _liveReconnect.nextDelay();
+    if (delay == null) return false;
+    final epoch = _sessionEpoch;
+    _recentLogs.add('[reconnect] 直播断流，${delay.inSeconds}s 后第 '
+        '${_liveReconnect.attempts} 次重连');
+    _updateStatus(PlaybackStatus.buffering);
+    _reconnectTimer = Timer(delay, () {
+      _reconnectTimer = null;
+      if (_disposed || epoch != _sessionEpoch || _currentSpec != spec) return;
+      unawaited(_open(spec).catchError((Object error) {
+        if (epoch != _sessionEpoch) return;
+        if (!_scheduleLiveReconnect()) {
+          _currentError = '$error';
+          _errorController.add(_currentError);
+          _updateStatus(PlaybackStatus.error);
+        }
+      }));
+    });
+    return true;
+  }
+
+  void _cancelLiveReconnect() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _liveReconnect.reset();
+  }
+
+  /// 按会话类型写入网络缓冲参数（见 [sessionStreamProperties]）；须在 open 前生效。
+  /// 把「系统代理」下发给 mpv。
+  ///
+  /// mpv/ffmpeg 只认进程环境变量（`HTTP_PROXY`/`HTTPS_PROXY`），读不到 Windows 的
+  /// 「系统代理」设置（Clash 等的默认模式）。于是开着系统代理时：弹幕/伴随服务能联网，
+  /// **播放器却在直连** —— HLS 子清单/分片走不通，表现就是时长只认出几秒、越播越长、
+  /// 快到底再加载（§58 记录的同款症状，另一种成因）。
+  ///
+  /// 两条约束：① 回环地址（本机网盘代理）必须显式直连，否则会被塞进代理；
+  /// ② 没有系统代理时**不动**，避免把用环境变量代理的用户清掉。
+  Future<void> _applyPlaybackProxy(String url) async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    final host = Uri.tryParse(url)?.host ?? '';
+    final loopback = host.isEmpty ||
+        host == 'localhost' ||
+        host == '::1' ||
+        host.startsWith('127.');
+    String value;
+    if (loopback) {
+      value = '';
+    } else {
+      final proxy = DanmakuApi.systemProxy();
+      if (proxy == null || proxy.isEmpty) return;
+      value = proxy.contains('://') ? proxy : 'http://$proxy';
+    }
+    try {
+      await platform.setProperty('http-proxy', value);
+    } catch (_) {
+      // 个别 mpv 构建不支持该属性：保持默认，不影响主链路。
+    }
+  }
+
+  Future<void> _applySessionStreamProperties(bool isLive) async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    for (final entry in sessionStreamProperties(isLive: isLive).entries) {
+      try {
+        await platform.setProperty(entry.key, entry.value);
+      } catch (_) {
+        // 个别 mpv 构建不支持某属性：保持默认，不影响播放主链路。
+      }
+    }
+  }
+
+  Future<void> _open(MediaPlaySpec spec) async {
+    _cancelErrorConfirm();
+    _updateStatus(PlaybackStatus.buffering);
+    await _applySessionStreamProperties(spec.isLive);
+    await _applyPlaybackProxy(spec.url);
+    final media = Media(
+      spec.url,
+      // 站点没给 UA/Referer 时补浏览器默认值（有些源按 UA 拦非浏览器请求）。
+      httpHeaders: withBrowserHeaderFallbacks(spec.headers, spec.url,
+          enabled: playbackSettings.browserHeaders),
+      // 直播是实时流，带起播位置会让 mpv 尝试 seek 到不存在的时间点。
+      start: spec.isLive ? null : spec.startPosition,
+    );
+    await _player.open(media, play: true);
+  }
+
   @override
   Future<void> play(MediaPlaySpec spec) async {
+    _sessionEpoch++;
+    _cancelLiveReconnect();
     _currentSpec = spec;
+    _softRetrySpec = null;
     _currentError = null;
     _errorController.add(null);
     // 每次新播放会话重置诊断日志，避免上一部片的日志混进本次错误诊断。
     _recentLogs.clear();
-    _updateStatus(PlaybackStatus.buffering);
+    await _applySessionRate(spec);
+    await _open(spec);
+  }
 
-    final media = Media(
-      spec.url,
-      httpHeaders: spec.headers,
-      start: spec.startPosition,
-    );
-
-    await _player.open(media, play: true);
+  /// 验收 C1：「默认倍速」每次起播都生效（以前只在播放器初始化时应用一次，
+  /// 改设置后重新起播仍是旧倍速；mpv 的 speed 跨文件保留，上一部片手动调的倍速也会带过来）。
+  /// 直播固定 1x：实时流加速只会追到直播边缘后反复缓冲。
+  Future<void> _applySessionRate(MediaPlaySpec spec) async {
+    final target = sessionPlaybackRate(
+        isLive: spec.isLive, defaultRate: playbackSettings.defaultRate);
+    try {
+      await setRate(target);
+    } catch (_) {
+      // 倍速写入失败不阻断起播。
+    }
   }
 
   @override
@@ -289,6 +499,9 @@ class MpvPlayerEngine
 
   @override
   Future<void> stop() async {
+    _sessionEpoch++;
+    _cancelLiveReconnect();
+    _cancelErrorConfirm();
     await _player.stop();
     _currentSpec = null;
     _updateStatus(PlaybackStatus.idle);
@@ -367,6 +580,8 @@ class MpvPlayerEngine
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _cancelLiveReconnect();
+    _cancelErrorConfirm();
     await settingsApplication.dispose();
     for (final sub in _subscriptions) {
       await sub.cancel();

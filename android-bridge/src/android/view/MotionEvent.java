@@ -10,8 +10,45 @@ public class MotionEvent {
     public static final int ACTION_MOVE = 2;
     public static final int ACTION_CANCEL = 3;
 
+    public static final int ACTION_OUTSIDE = 4;
+    public static final int ACTION_POINTER_DOWN = 5;
+    public static final int ACTION_POINTER_UP = 6;
+    public static final int ACTION_MASK = 0xff;
+
     public int getAction() {
         return ACTION_CANCEL;
+    }
+
+    public int getActionMasked() {
+        return getAction() & ACTION_MASK;
+    }
+
+    public int getActionIndex() {
+        return 0;
+    }
+
+    public int getPointerCount() {
+        return 1;
+    }
+
+    public int getPointerId(int pointerIndex) {
+        return 0;
+    }
+
+    public float getX(int pointerIndex) {
+        return getX();
+    }
+
+    public float getY(int pointerIndex) {
+        return getY();
+    }
+
+    public long getEventTime() {
+        return 0L;
+    }
+
+    public long getDownTime() {
+        return 0L;
     }
 
     public float getX() {

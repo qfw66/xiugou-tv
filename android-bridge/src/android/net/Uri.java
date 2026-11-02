@@ -100,6 +100,14 @@ public class Uri {
         return getAuthority();
     }
 
+    public String getUserInfo() {
+        return parsed != null ? parsed.getUserInfo() : null;
+    }
+
+    public String getEncodedUserInfo() {
+        return parsed != null ? parsed.getRawUserInfo() : null;
+    }
+
     public String getPath() {
         return parsed != null ? parsed.getPath() : null;
     }

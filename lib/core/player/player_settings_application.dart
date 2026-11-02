@@ -50,9 +50,9 @@ class PlayerSettingsApplication {
                         ? SettingsApplicationPhase.waiting
                         : SettingsApplicationPhase.confirmed,
         failures: Map.unmodifiable(_failures),
+        // 默认倍速已改为每次起播应用（见 MpvPlayerEngine.play），只剩音量需等下次初始化。
         defaultsPending: _startupSettings != null &&
-            (_settings.defaultVolume != _startupSettings!.defaultVolume ||
-                _settings.defaultRate != _startupSettings!.defaultRate),
+            _settings.defaultVolume != _startupSettings!.defaultVolume,
         canRetry: !_closed &&
             _target != null &&
             _pending == 0 &&

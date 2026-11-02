@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../../../core/api/models/vod_models.dart';
 import '../../theme/app_palette.dart';
@@ -199,6 +200,10 @@ class _HeroBillboard extends StatefulWidget {
 class _HeroBillboardState extends State<_HeroBillboard> {
   int _currentIndex = 0;
   Timer? _autoPlayTimer;
+
+  /// 子树是否在屏：播放页 / 设置页打开时主视图被 Offstage 挂起（不卸载），TickerMode 随之关闭。
+  /// Timer 不受 TickerMode 管，离屏时要自己跳过，否则看片期间仍每 6 s 解码一张约 15 MB 的大图。
+  ValueListenable<TickerModeData>? _onScreen;
   bool _isHovering = false;
 
   /// 已拿到的横图地址（键为 `item.id`）；没拿到的不进表，继续走竖版海报。
@@ -212,6 +217,12 @@ class _HeroBillboardState extends State<_HeroBillboard> {
     super.initState();
     _startAutoPlay();
     _resolveStills();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _onScreen = TickerMode.getValuesNotifier(context);
   }
 
   @override
@@ -249,7 +260,7 @@ class _HeroBillboardState extends State<_HeroBillboard> {
     _autoPlayTimer?.cancel();
     if (widget.items.length <= 1) return;
     _autoPlayTimer = Timer.periodic(const Duration(seconds: 6), (_) {
-      if (!mounted || _isHovering) return;
+      if (!mounted || _isHovering || !(_onScreen?.value.enabled ?? true)) return;
       setState(() {
         _currentIndex = (_currentIndex + 1) % widget.items.length;
       });
@@ -259,8 +270,8 @@ class _HeroBillboardState extends State<_HeroBillboard> {
   /// 大屏海报的解码宽度：按窗口逻辑宽度 × 设备像素。
   ///
   /// 上限 1600 是内存口径：竖版海报按宽解码后高度约 1.5 倍，1600 宽一张
-  /// 约 15MB，而大屏要轮播好几张——再往上翻会让 100MB 的 ImageCache 被占满，
-  /// 反而把下方轨道的海报挤掉。
+  /// 约 15MB，而大屏要轮播好几张——ImageCache 上限只有 48MB（见 main.dart），
+  /// 再往上翻三张就占满，反而把下方轨道的海报挤掉。
   int _heroTargetWidth(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
     final dpr = MediaQuery.devicePixelRatioOf(context);
@@ -320,7 +331,8 @@ class _HeroBillboardState extends State<_HeroBillboard> {
                           urlOverride: stillUrl,
                         ),
                       ) ??
-                      posterImageProvider(item.pic) ??
+                      posterImageProvider(item.pic,
+                          targetWidth: _heroTargetWidth(context)) ??
                       NetworkImage(item.pic),
                   fit: BoxFit.cover,
                   filterQuality: FilterQuality.medium,

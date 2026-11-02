@@ -12,6 +12,14 @@ public class TypedValue {
     public static final int COMPLEX_UNIT_IN = 4;
     public static final int COMPLEX_UNIT_MM = 5;
 
+    public int type;
+    public int data;
+    public int resourceId;
+    public int assetCookie;
+    public int changingConfigurations;
+    public int density;
+    public CharSequence string;
+
     public static float applyDimension(int unit, float value, DisplayMetrics metrics) {
         if (metrics == null) {
             metrics = new DisplayMetrics();

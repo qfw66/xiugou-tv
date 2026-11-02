@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
+import '../net/http_client_factory.dart';
 import 'spider_ui_models.dart';
 
 /// 载荷界面通道：companion 就绪后持续长轮询 `/ui/events`，把弹窗 / Toast 等事件广播给界面层；
@@ -15,6 +16,7 @@ import 'spider_ui_models.dart';
 class CompanionUiChannel {
   final ValueListenable<int?> readyPort;
   final Dio _dio;
+  final bool _ownsDio;
   final Duration pollWait;
   final Duration retryDelay;
   final void Function()? onActivity;
@@ -33,8 +35,9 @@ class CompanionUiChannel {
     this.pollWait = const Duration(seconds: 25),
     this.retryDelay = const Duration(seconds: 1),
     this.onActivity,
-  }) : _dio = dio ??
-            Dio(BaseOptions(
+  })  : _ownsDio = dio == null,
+        _dio = dio ??
+            HttpClientFactory.createDio(BaseOptions(
               connectTimeout: const Duration(seconds: 5),
               sendTimeout: const Duration(seconds: 5),
             ));
@@ -57,6 +60,9 @@ class CompanionUiChannel {
     _generation++;
     if (_started) readyPort.removeListener(_onPortChanged);
     unawaited(_events.close());
+    // 长轮询单次最长挂 pollWait（默认 25s）：自建的 Dio 在释放时强制关闭，
+    // 立刻断开在途请求与连接池，不留到超时（2026-10-28 发布前资源审查）。
+    if (_ownsDio) _dio.close(force: true);
   }
 
   void _onPortChanged() {
@@ -125,8 +131,15 @@ class CompanionUiChannel {
       );
       final raw =
           res.data is String ? jsonDecode(res.data as String) : res.data;
-      return raw is Map && raw['accepted'] == true;
-    } catch (_) {
+      final accepted = raw is Map && raw['accepted'] == true;
+      if (!accepted) {
+        debugPrint(
+            '[spider-ui] 操作未被接受：dialog=${input.dialogId} type=${input.type}');
+      }
+      return accepted;
+    } catch (e) {
+      debugPrint('[spider-ui] 操作发送失败：dialog=${input.dialogId} '
+          'type=${input.type} error=${e.runtimeType}');
       return false;
     }
   }

@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:xml/xml.dart';
+import '../bounded_map.dart';
 import '../config/models/vod_config.dart';
+import '../net/http_client_factory.dart';
 import 'epg_program.dart';
 import 'live_text_loader.dart';
 
@@ -17,7 +19,7 @@ class EpgRepository {
   EpgRepository({Dio? dio, DateTime Function()? clock})
       : _ownsDio = dio == null,
         _dio = dio ??
-            Dio(BaseOptions(
+            HttpClientFactory.createDio(BaseOptions(
               connectTimeout: const Duration(seconds: 10),
               receiveTimeout: const Duration(seconds: 20),
             )),
@@ -64,9 +66,7 @@ class EpgRepository {
       final document = await loadLiveText(Uri.parse(url), dio: _dio);
       final feed = _EpgFeed.parse(document.content, day);
       if (!_disposed) {
-        _cache.remove(key);
-        if (_cache.length >= 12) _cache.remove(_cache.keys.first);
-        _cache[key] = (time: _clock(), feed: feed);
+        _cache.putBounded(key, (time: _clock(), feed: feed), 12);
       }
       return feed;
     } finally {

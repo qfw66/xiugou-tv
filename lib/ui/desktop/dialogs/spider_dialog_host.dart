@@ -117,7 +117,11 @@ class _SpiderDialogHostState extends State<SpiderDialogHost> {
   Future<bool> _onInput(SpiderUiInput input) async {
     final accepted = await widget.channel.send(input);
     // 载荷那边弹窗已不存在（服务重启 / 已被关闭）：界面上的残留一并关掉
-    if (!accepted && mounted) _close(input.dialogId);
+    if (!accepted && mounted) {
+      _close(input.dialogId);
+      // 不静默：点了没反应时用户至少知道操作没送达（诊断日志由通道记录）
+      showAppMessage('站源未响应本次操作，弹窗已关闭，请重新打开再试', type: AppMessageType.warning);
+    }
     return accepted;
   }
 

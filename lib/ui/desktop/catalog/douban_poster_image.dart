@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 
 import '../../../core/api/douban_repository.dart';
+import '../../../core/net/http_client_factory.dart';
 
 /// 豆瓣海报解码器（§17）。
 ///
@@ -39,8 +40,8 @@ class DoubanPosterImage extends ImageProvider<DoubanPosterImage> {
   static const Duration _timeout = Duration(seconds: 20);
 
   /// 复用连接：一屏 18 张海报不必各建一个 HttpClient
-  static final HttpClient _client = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 10);
+  static final HttpClient _client = HttpClientFactory.createHttpClient(
+      connectionTimeout: const Duration(seconds: 10));
 
   @override
   Future<DoubanPosterImage> obtainKey(ImageConfiguration configuration) =>

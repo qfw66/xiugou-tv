@@ -1,5 +1,7 @@
 package com.fongmi.companion.guard;
 
+import com.fongmi.companion.fs.NativeCache;
+import com.fongmi.companion.ipc.LineProcess;
 import com.github.unidbg.AndroidEmulator;
 import com.github.unidbg.linux.android.AndroidEmulatorBuilder;
 import com.github.unidbg.linux.android.AndroidResolver;
@@ -12,13 +14,11 @@ import com.github.unidbg.linux.android.dvm.VM;
 import com.github.unidbg.linux.android.dvm.array.IntArray;
 
 import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
 import java.io.PrintStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -27,7 +27,6 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -169,9 +168,7 @@ public final class GuardCryptoService {
 
         ShellCrypto(File shellJar) throws Exception {
             this.shellJar = shellJar;
-            File tmp = Files.createTempDirectory("guardcrypto-").toFile();
-            tmp.deleteOnExit();
-            File so = extractSo(shellJar, tmp);
+            File so = extractSo(shellJar);
             if (so == null) throw new IOException("no guard so in shell jar: " + shellJar.getName());
             this.emulator = AndroidEmulatorBuilder.for64Bit()
                     .setProcessName("com.fongmi.android.tv")
@@ -215,7 +212,8 @@ public final class GuardCryptoService {
         }
     }
 
-    private static File extractSo(File shellJar, File tmp) throws IOException {
+    /** 取第一个存在的守卫库，按内容哈希落地复用（见 {@link NativeCache}）。 */
+    private static File extractSo(File shellJar) throws IOException {
         String[] candidates = {
                 "assets/ftyguard_v8.so", "assets/ftyguard_v7.so",
                 "assets/wexguard_v8.so", "assets/wexguard_v7.so",
@@ -224,11 +222,7 @@ public final class GuardCryptoService {
             for (String name : candidates) {
                 ZipEntry entry = zip.getEntry(name);
                 if (entry == null || entry.getSize() == 0) continue;
-                File out = new File(tmp, new File(name).getName());
-                try (InputStream in = zip.getInputStream(entry)) {
-                    Files.copy(in, out.toPath());
-                }
-                return out;
+                return NativeCache.materialize(new File(name).getName(), zip.getInputStream(entry));
             }
         }
         return null;
@@ -240,9 +234,7 @@ public final class GuardCryptoService {
 
     private static final Object LOCK = new Object();
     private static volatile File shellJar;
-    private static Process process;
-    private static BufferedWriter toServer;
-    private static BufferedReader fromServer;
+    private static LineProcess channel;
     private static int failures;
     private static long cooldownUntil;
 
@@ -252,7 +244,7 @@ public final class GuardCryptoService {
         File current = shellJar;
         if (current != null && current.getAbsolutePath().equals(jar.getAbsolutePath())) return;
         synchronized (LOCK) {
-            if (process != null) stopLocked();
+            stopLocked();
             shellJar = jar;
             failures = 0;
             cooldownUntil = 0;
@@ -319,9 +311,7 @@ public final class GuardCryptoService {
         synchronized (LOCK) {
             if (!ensureStarted()) return null;
             try {
-                toServer.write(op + "\t" + b64(arg));
-                toServer.newLine();
-                toServer.flush();
+                channel.send(op + "\t" + b64(arg));
                 String response = readLineWithTimeout(CALL_TIMEOUT_MS);
                 if (response == null) throw new IOException("timeout");
                 if ("NIL".equals(response)) return null;
@@ -347,7 +337,8 @@ public final class GuardCryptoService {
 
     private static boolean ensureStarted() {
         if (System.currentTimeMillis() < cooldownUntil) return false;
-        if (process != null && process.isAlive()) return true;
+        if (channel != null && channel.isAlive()) return true;
+        stopLocked(); // 进程已退出：先回收残留通道再决定是否重启
         File jar = shellJar;
         if (jar == null) return false;
         File libDir = new File(distDir(), "lib-unidbg");
@@ -361,9 +352,7 @@ public final class GuardCryptoService {
             ProcessBuilder builder = new ProcessBuilder(buildCommand(libDir, jar))
                     .redirectErrorStream(false)
                     .redirectError(ProcessBuilder.Redirect.to(log));
-            process = builder.start();
-            toServer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
-            fromServer = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+            channel = LineProcess.start(builder, "guardcrypto");
             long deadline = System.currentTimeMillis() + START_TIMEOUT_MS;
             String line;
             while ((line = readLineWithTimeout(Math.max(1, deadline - System.currentTimeMillis()))) != null) {
@@ -400,44 +389,26 @@ public final class GuardCryptoService {
         return command;
     }
 
-    /** 单次带超时的 readLine；超时返回 null，调用方负责杀进程。 */
+    /** 带超时的 readLine；超时或子进程已退出返回 null。 */
     private static String readLineWithTimeout(long timeoutMs) throws Exception {
-        final BufferedReader reader = fromServer;
-        if (reader == null) return null;
-        final String[] holder = new String[1];
-        Thread thread = new Thread(() -> {
-            try {
-                holder[0] = reader.readLine();
-            } catch (Throwable ignored) {
-            }
-        }, "guardcrypto-read");
-        thread.setDaemon(true);
-        thread.start();
-        thread.join(Math.max(1, timeoutMs));
-        if (thread.isAlive()) return null;
-        return holder[0];
+        LineProcess current = channel;
+        return current == null ? null : current.readLine(timeoutMs);
     }
 
+    /** 先杀进程再收通道（顺序见 {@link LineProcess} 类注释），不会因子进程挂起而卡住。 */
     private static void stopLocked() {
-        try {
-            if (toServer != null) toServer.close();
-        } catch (Throwable ignored) {
+        if (channel != null) channel.close();
+        channel = null;
+    }
+
+    /** 停掉服务并忘掉当前壳 jar（换配置时调用）。 */
+    public static void reset() {
+        synchronized (LOCK) {
+            stopLocked();
+            shellJar = null;
+            failures = 0;
+            cooldownUntil = 0;
         }
-        try {
-            if (fromServer != null) fromServer.close();
-        } catch (Throwable ignored) {
-        }
-        if (process != null) {
-            try {
-                process.destroy();
-                if (!process.waitFor(2, TimeUnit.SECONDS)) process.destroyForcibly();
-            } catch (Throwable ignored) {
-                process.destroyForcibly();
-            }
-        }
-        process = null;
-        toServer = null;
-        fromServer = null;
     }
 
     private static File selfClasspath() {

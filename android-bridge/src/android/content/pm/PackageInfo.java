@@ -10,6 +10,7 @@ public class PackageInfo {
 
     public ApplicationInfo applicationInfo;
     public Signature[] signatures;
+    public ProviderInfo[] providers;
     public String[] requestedPermissions;
 
     public long firstInstallTime;

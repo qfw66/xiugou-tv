@@ -31,6 +31,7 @@ import '../../../core/player/player_engine.dart';
 import '../../../core/player/player_settings_application.dart';
 import '../../../core/settings/models/config_source_entry.dart';
 import '../../../core/settings/models/history_preferences.dart';
+import '../../../core/settings/models/network_preferences.dart';
 import '../../../core/settings/models/search_preferences.dart';
 import '../../../core/settings/models/self_check_preferences.dart';
 import '../../../core/settings/models/startup_preferences.dart';
@@ -99,6 +100,10 @@ class SettingsPage extends StatefulWidget {
   /// §43 是否显示「弹幕」分组：缺省跟随本次构建是否配置了弹幕服务（可选功能，未配置就隐藏）
   final bool? danmakuAvailable;
 
+  /// 全局伴随服务客户端（与 SiteApi 共用）。自检开关与站点体检必须用它：
+  /// 自建实例会带一个孤立的进程管理器，`isRunning` 恒为 false，设置根本发不到运行中的服务。
+  final CompanionSpiderApi? companionSpiderApi;
+
   const SettingsPage({
     super.key,
     required this.configRepository,
@@ -121,6 +126,7 @@ class SettingsPage extends StatefulWidget {
     this.updateSection,
     this.onResetAll,
     this.danmakuAvailable,
+    this.companionSpiderApi,
   });
 
   @override
@@ -188,6 +194,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                 onAddConfig: widget.onAddConfig,
                                 selectDepot: widget.selectDepot,
                                 pickExportPath: widget.pickExportPath,
+                                companionSpiderApi: widget.companionSpiderApi,
                               ),
                             SettingsSection.general => GeneralSettingsPanel(
                                 key: const ValueKey('settings-general'),
@@ -199,6 +206,7 @@ class _SettingsPageState extends State<SettingsPage> {
                                 isPlaybackActive: widget.isPlaybackActive,
                                 pickBackupSavePath: widget.pickBackupSavePath,
                                 pickBackupOpenPath: widget.pickBackupOpenPath,
+                                companionSpiderApi: widget.companionSpiderApi,
                               ),
                             SettingsSection.appearance => AppearancePanel(
                                 key: const ValueKey('settings-appearance'),
@@ -499,6 +507,7 @@ class ConfigSourcesPanel extends StatefulWidget {
   final Future<void> Function(BuildContext context) onAddConfig;
   final DepotSelector? selectDepot;
   final Future<String?> Function(String suggestedName)? pickExportPath;
+  final CompanionSpiderApi? companionSpiderApi;
 
   const ConfigSourcesPanel({
     super.key,
@@ -507,6 +516,7 @@ class ConfigSourcesPanel extends StatefulWidget {
     required this.onAddConfig,
     this.selectDepot,
     this.pickExportPath,
+    this.companionSpiderApi,
   });
 
   @override
@@ -698,7 +708,8 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
         return;
       }
     }
-    final api = CompanionSpiderApi(processManager: manager);
+    // 复用全局客户端；为空时（仅测试）才临时创建
+    final api = widget.companionSpiderApi ?? CompanionSpiderApi(processManager: manager);
     // 服务刚启动时 Java 侧默认关闭自检：这里补一次下发，保证"能点按钮"就"能跑体检"。
     await api.configureSelfCheck(true);
 
@@ -1055,6 +1066,7 @@ class _StatChip extends StatelessWidget {
   }
 }
 
+/// 配置源行（配置源历史中的一条）
 class _SourceRow extends StatelessWidget {
   final ConfigSourceEntry entry;
   final bool isCurrent;
@@ -1064,8 +1076,8 @@ class _SourceRow extends StatelessWidget {
   final bool loadDisabled;
   final VoidCallback onUse;
   final VoidCallback onProbe;
-  final VoidCallback onRename;
-  final VoidCallback onRemove;
+  final VoidCallback? onRename;
+  final VoidCallback? onRemove;
 
   const _SourceRow({
     required this.entry,
@@ -1076,20 +1088,21 @@ class _SourceRow extends StatelessWidget {
     required this.loadDisabled,
     required this.onUse,
     required this.onProbe,
-    required this.onRename,
-    required this.onRemove,
+    this.onRename,
+    this.onRemove,
   });
 
   @override
   Widget build(BuildContext context) {
     final isFile = entry.kind == ConfigSourceKind.file;
+    final icon =
+        isFile ? Icons.insert_drive_file_outlined : Icons.link_rounded;
     return _card(
       context,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         children: [
-          Icon(isFile ? Icons.insert_drive_file_outlined : Icons.link_rounded,
-              size: 18, color: context.palette.textSub),
+          Icon(icon, size: 18, color: context.palette.textSub),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -1163,14 +1176,16 @@ class _SourceRow extends StatelessWidget {
             onPressed: probing ? null : onProbe,
             icon: const Icon(Icons.network_check_rounded, size: 18),
           ),
-          IconButton(
-              tooltip: '重命名',
-              onPressed: onRename,
-              icon: const Icon(Icons.edit_outlined, size: 18)),
-          IconButton(
-              tooltip: '移除',
-              onPressed: onRemove,
-              icon: const Icon(Icons.delete_outline_rounded, size: 18)),
+          if (onRename != null)
+            IconButton(
+                tooltip: '重命名',
+                onPressed: onRename,
+                icon: const Icon(Icons.edit_outlined, size: 18)),
+          if (onRemove != null)
+            IconButton(
+                tooltip: '移除',
+                onPressed: onRemove,
+                icon: const Icon(Icons.delete_outline_rounded, size: 18)),
         ],
       ),
     );
@@ -1389,7 +1404,7 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                   const _RowDivider(),
                   _SettingRow(
                     title: '默认倍速',
-                    description: '下次启动时的初始播放倍速',
+                    description: '每次起播时的播放倍速（直播固定 1x）',
                     trailing: _OptionDropdown(
                       key: const ValueKey('setting-rate'),
                       options: [
@@ -1401,22 +1416,92 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                           _update(s.copyWith(defaultRate: double.parse(v))),
                     ),
                   ),
+                  const _RowDivider(),
+                  _SettingRow(
+                    title: '长按倍速倍率',
+                    description: '播放页按住 → 键超过 0.4 秒临时加速，松开恢复原倍速；'
+                        '短按仍是快进 10 秒，直播不生效',
+                    trailing: _OptionDropdown(
+                      key: const ValueKey('setting-hold-rate'),
+                      options: [
+                        for (final r in PlayerSettings.holdRateOptions)
+                          PlayerOption('$r',
+                              '${r.toInt()}x${r == PlayerSettings.defaultHoldRate ? '（默认）' : ''}')
+                      ],
+                      value: '${s.holdRate}',
+                      onChanged: (v) =>
+                          _update(s.copyWith(holdRate: double.parse(v))),
+                    ),
+                  ),
                 ],
               ),
             ),
             const _GroupTitle('播放页'),
             _card(
               context,
-              child: _SettingRow(
-                title: '播放时隐藏标题栏',
-                description: '开启后播放页顶到窗口上沿（无边框观感）；'
-                    '鼠标移到窗口顶部会临时滑出标题栏，可用于拖动 / 最小化 / 关闭',
-                trailing: Switch(
-                  key: const ValueKey('setting-hide-window-title-bar'),
-                  value: s.hideWindowTitleBar,
-                  onChanged: (value) =>
-                      _update(s.copyWith(hideWindowTitleBar: value)),
-                ),
+              child: Column(
+                children: [
+                  _SettingRow(
+                    title: '播放时隐藏标题栏',
+                    description: '开启后播放页顶到窗口上沿（无边框观感）；'
+                        '鼠标移到窗口顶部会临时滑出标题栏，可用于拖动 / 最小化 / 关闭',
+                    trailing: Switch(
+                      key: const ValueKey('setting-hide-window-title-bar'),
+                      value: s.hideWindowTitleBar,
+                      onChanged: (value) =>
+                          _update(s.copyWith(hideWindowTitleBar: value)),
+                    ),
+                  ),
+                  const _RowDivider(),
+                  _SettingRow(
+                    title: '底部细进度条',
+                    description: '控制条收起后，在画面最下方显示一条细进度线；'
+                        '关闭后画面底部保持干净',
+                    trailing: Switch(
+                      key: const ValueKey('setting-show-mini-progress'),
+                      value: s.showMiniProgress,
+                      onChanged: (value) =>
+                          _update(s.copyWith(showMiniProgress: value)),
+                    ),
+                  ),
+                  const _RowDivider(),
+                  _SettingRow(
+                    title: '播放时自动隐藏鼠标',
+                    description: '播放中鼠标静止 5 秒后隐藏光标，一动立即出现；'
+                        '关闭后光标始终可见',
+                    trailing: Switch(
+                      key: const ValueKey('setting-auto-hide-cursor'),
+                      value: s.autoHideCursor,
+                      onChanged: (value) =>
+                          _update(s.copyWith(autoHideCursor: value)),
+                    ),
+                  ),
+                  const _RowDivider(),
+                  _SettingRow(
+                    title: '播放时补浏览器请求头',
+                    description: '站点没给 UA/Referer 时补浏览器默认值；'
+                        '有些源按 UA 拦截非浏览器请求（清单读一半就断）可开启。'
+                        '个别源若反而播不了，关掉即可回到原始请求头',
+                    trailing: Switch(
+                      key: const ValueKey('setting-browser-headers'),
+                      value: s.browserHeaders,
+                      onChanged: (value) =>
+                          _update(s.copyWith(browserHeaders: value)),
+                    ),
+                  ),
+                  const _RowDivider(),
+                  _SettingRow(
+                    title: '自动换线路',
+                    description: '起播早期出错时自动尝试同一集的其他线路；'
+                        '关闭后只提示错误，可在播放器「选集 / 线路」抽屉里手动换',
+                    trailing: Switch(
+                      key: const ValueKey('setting-auto-line-switch'),
+                      value: s.autoLineSwitch,
+                      onChanged: (value) =>
+                          _update(s.copyWith(autoLineSwitch: value)),
+                    ),
+                  ),
+                ],
               ),
             ),
             // §43 弹幕是可选功能：本次构建没配置弹幕服务时整组不出现
@@ -1927,6 +2012,7 @@ class GeneralSettingsPanel extends StatelessWidget {
   final bool Function()? isPlaybackActive;
   final Future<String?> Function(String suggestedName)? pickBackupSavePath;
   final Future<String?> Function()? pickBackupOpenPath;
+  final CompanionSpiderApi? companionSpiderApi;
 
   const GeneralSettingsPanel({
     super.key,
@@ -1938,6 +2024,7 @@ class GeneralSettingsPanel extends StatelessWidget {
     this.isPlaybackActive,
     this.pickBackupSavePath,
     this.pickBackupOpenPath,
+    this.companionSpiderApi,
   });
 
   Future<void> _setNextEntry(StartupEntry entry) {
@@ -1976,7 +2063,7 @@ class GeneralSettingsPanel extends StatelessWidget {
       // 落盘失败：保存横幅已提示，开关保持内存旧值对应的展示
       return;
     }
-    await CompanionSpiderApi().configureSelfCheck(enabled);
+    await (companionSpiderApi ?? CompanionSpiderApi()).configureSelfCheck(enabled);
   }
 
   Future<void> _setHistoryLimit(BuildContext context, int value) async {
@@ -2187,53 +2274,72 @@ class GeneralSettingsPanel extends StatelessWidget {
             ]..sort();
             return _card(
               context,
-              child: _SettingRow(
-                title: '历史记录数量',
-                description: readFailed
-                    ? '历史偏好读取失败，原文件已保留；当前按默认（150 条）运行。修复文件后可重新读取。'
-                    : '播放历史最多保留的条数；超出上限时自动删除最早的记录，降低上限会立即删除超出部分（先确认）。',
-                descriptionColor: readFailed ? context.palette.warning : null,
-                trailing: _boxedDropdown(
-                  context,
-                  child: Semantics(
-                    label: '历史记录数量',
-                    child: DropdownButton<int>(
-                      key: const ValueKey('history-limit'),
-                      value: preferences.limit,
-                      isExpanded: true,
-                      dropdownColor: context.palette.raised,
-                      style: TextStyle(
-                          fontSize: AppType.label,
-                          color: context.palette.textMain),
-                      items: [
-                        for (final option in displayValues)
-                          DropdownMenuItem(
-                            value: option,
-                            child: Text(
-                                option == HistoryPreferences.defaultLimit
-                                    ? '$option 条（默认）'
-                                    : '$option 条'),
-                          ),
-                      ],
+              child: Column(
+                children: [
+                  _SettingRow(
+                    title: '历史记录数量',
+                    description: readFailed
+                        ? '历史偏好读取失败，原文件已保留；当前按默认（150 条）运行。修复文件后可重新读取。'
+                        : '播放历史最多保留的条数；超出上限时自动删除最早的记录，降低上限会立即删除超出部分（先确认）。',
+                    descriptionColor: readFailed ? context.palette.warning : null,
+                    trailing: _boxedDropdown(
+                      context,
+                      child: Semantics(
+                        label: '历史记录数量',
+                        child: DropdownButton<int>(
+                          key: const ValueKey('history-limit'),
+                          value: preferences.limit,
+                          isExpanded: true,
+                          dropdownColor: context.palette.raised,
+                          style: TextStyle(
+                              fontSize: AppType.label,
+                              color: context.palette.textMain),
+                          items: [
+                            for (final option in displayValues)
+                              DropdownMenuItem(
+                                value: option,
+                                child: Text(
+                                    option == HistoryPreferences.defaultLimit
+                                        ? '$option 条（默认）'
+                                        : '$option 条'),
+                              ),
+                          ],
+                          onChanged: readFailed
+                              ? null
+                              : (value) {
+                                  if (value == null) return;
+                                  unawaited(_setHistoryLimit(context, value));
+                                },
+                        ),
+                      ),
+                    ),
+                    footer: readFailed
+                        ? Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton(
+                              onPressed: () => unawaited(_saveWithStatus(
+                                  repository.reloadHistoryPreferences())),
+                              child: const Text('重新读取历史偏好'),
+                            ),
+                          )
+                        : null,
+                  ),
+                  const _RowDivider(),
+                  _SettingRow(
+                    title: '无痕浏览',
+                    description: '开启后观看不写入播放历史、也不更新续播进度；'
+                        '已有历史不删除，可照常续播。仅影响本应用',
+                    trailing: Switch(
+                      key: const ValueKey('history-incognito'),
+                      value: preferences.incognito,
                       onChanged: readFailed
                           ? null
-                          : (value) {
-                              if (value == null) return;
-                              unawaited(_setHistoryLimit(context, value));
-                            },
+                          : (value) => unawaited(_saveWithStatus(
+                              repository.updateHistoryPreferences(
+                                  preferences.copyWith(incognito: value)))),
                     ),
                   ),
-                ),
-                footer: readFailed
-                    ? Align(
-                        alignment: Alignment.centerLeft,
-                        child: TextButton(
-                          onPressed: () => unawaited(_saveWithStatus(
-                              repository.reloadHistoryPreferences())),
-                          child: const Text('重新读取历史偏好'),
-                        ),
-                      )
-                    : null,
+                ],
               ),
             );
           },
@@ -2277,6 +2383,8 @@ class GeneralSettingsPanel extends StatelessWidget {
             );
           },
         ),
+        const _GroupTitle('网络'),
+        _SecureDnsCard(settingsRepository: settingsRepository),
         const SizedBox(height: 16),
         if (cacheMaintenance != null)
           _StorageCacheCard(
@@ -2292,6 +2400,144 @@ class GeneralSettingsPanel extends StatelessWidget {
             pickOpenPath: pickBackupOpenPath,
           ),
       ],
+    );
+  }
+}
+
+// =====================================================================
+// 安全 DNS（§14）
+// =====================================================================
+
+/// 选择 DoH 服务；「自定义」时展开地址输入框，校验通过（https）才保存。
+class _SecureDnsCard extends StatefulWidget {
+  final SettingsRepository settingsRepository;
+
+  const _SecureDnsCard({required this.settingsRepository});
+
+  @override
+  State<_SecureDnsCard> createState() => _SecureDnsCardState();
+}
+
+class _SecureDnsCardState extends State<_SecureDnsCard> {
+  late final TextEditingController _urlController = TextEditingController(
+      text: widget.settingsRepository.networkPreferences.customDohUrl);
+  late final Stream<NetworkPreferences> _stream =
+      widget.settingsRepository.networkPreferencesStream;
+
+  /// 选了「自定义」但地址尚未保存时的本地选择（避免下拉框跳回原值）
+  bool _customPending = false;
+  String? _urlError;
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    super.dispose();
+  }
+
+  void _pick(NetworkPreferences current, String value) {
+    if (value == NetworkPreferences.custom) {
+      // 已有合法地址：直接启用；否则等用户填写并点「应用」
+      if (NetworkPreferences.validateCustomUrl(current.customDohUrl) == null) {
+        _save(current.copyWith(dohProvider: value));
+      } else {
+        setState(() => _customPending = true);
+      }
+      return;
+    }
+    setState(() {
+      _customPending = false;
+      _urlError = null;
+    });
+    _save(current.copyWith(dohProvider: value));
+  }
+
+  void _applyCustom(NetworkPreferences current) {
+    final url = _urlController.text.trim();
+    final error = NetworkPreferences.validateCustomUrl(url);
+    setState(() => _urlError = error);
+    if (error != null) return;
+    setState(() => _customPending = false);
+    _save(current.copyWith(
+        dohProvider: NetworkPreferences.custom, customDohUrl: url));
+  }
+
+  void _save(NetworkPreferences next) => unawaited(_saveWithStatus(
+      widget.settingsRepository.updateNetworkPreferences(next)));
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<NetworkPreferences>(
+      stream: _stream,
+      initialData: widget.settingsRepository.networkPreferences,
+      builder: (context, snapshot) {
+        final repository = widget.settingsRepository;
+        final current = snapshot.data ?? repository.networkPreferences;
+        final readFailed = repository.networkReadFailed;
+        final selected =
+            _customPending ? NetworkPreferences.custom : current.dohProvider;
+        final showCustom = selected == NetworkPreferences.custom;
+        return _card(
+          context,
+          child: _SettingRow(
+            title: '安全 DNS（DoH）',
+            description: readFailed
+                ? '网络偏好读取失败，原文件已保留；当前按「关闭」运行。修复文件后可重新读取。'
+                : '用加密的 DNS 查询站源 / 配置 / 图片等应用内请求的域名，绕开被污染的运营商 DNS；'
+                    '查询失败自动回落系统 DNS。视频流（播放器）与 Java 爬虫暂不经过此设置',
+            descriptionColor: readFailed ? context.palette.warning : null,
+            trailing: IgnorePointer(
+              ignoring: readFailed,
+              child: _OptionDropdown(
+                key: const ValueKey('setting-doh-provider'),
+                options: [
+                  for (final o in NetworkPreferences.providers)
+                    PlayerOption(o.value, o.label)
+                ],
+                value: selected,
+                onChanged: (v) => _pick(current, v),
+              ),
+            ),
+            footer: readFailed
+                ? Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton(
+                      onPressed: () => unawaited(_saveWithStatus(
+                          repository.reloadNetworkPreferences())),
+                      child: const Text('重新读取网络偏好'),
+                    ),
+                  )
+                : showCustom
+                    ? Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              key: const ValueKey('setting-doh-custom-url'),
+                              controller: _urlController,
+                              style: TextStyle(
+                                  fontSize: AppType.label,
+                                  color: context.palette.textMain),
+                              decoration: InputDecoration(
+                                isDense: true,
+                                hintText: 'https://example.com/dns-query',
+                                errorText: _urlError,
+                              ),
+                              onSubmitted: (_) => _applyCustom(current),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          OutlinedButton(
+                            key: const ValueKey('setting-doh-custom-apply'),
+                            onPressed: () => _applyCustom(current),
+                            style: _outlinedStyle(context),
+                            child: const Text('应用'),
+                          ),
+                        ],
+                      )
+                    : null,
+          ),
+        );
+      },
     );
   }
 }
@@ -3494,7 +3740,7 @@ class _AboutPanelState extends State<AboutPanel> {
             style: TextStyle(color: context.palette.textTitle, fontSize: AppType.heading)),
         content: Text(
           '将清空修狗TV 的全部数据并恢复到刚安装的状态：所有设置、播放历史、收藏、配置源、直播源、'
-          '片头片尾记录、壁纸、本地备份与缓存都会被删除，且无法恢复。\n应用随后自动重启。是否继续？',
+          '片头片尾记录、壁纸、本地备份与缓存，以及各站源里的网盘登录状态（需重新扫码）都会被删除，且无法恢复。\n应用随后自动重启。是否继续？',
           style: TextStyle(color: context.palette.textBody, fontSize: AppType.label, height: 1.5),
         ),
         actions: [
@@ -3785,11 +4031,11 @@ class _PlayerApplicationStatus extends StatelessWidget {
                           ? context.palette.textMain
                           : context.palette.warning)),
               const SizedBox(height: 8),
-              Text('参数确认不代表正在使用硬解；实际解码与画面效果需播放验证。默认音量 / 倍速仅在初始化时应用。',
+              Text('参数确认不代表正在使用硬解；实际解码与画面效果需播放验证。默认音量仅在初始化时应用，默认倍速每次起播应用。',
                   style: TextStyle(
                       fontSize: AppType.body, color: context.palette.textSub)),
               if (state.defaultsPending)
-                Text('默认音量 / 倍速已修改，下次初始化播放器时应用，不改变当前播放。',
+                Text('默认音量已修改，下次初始化播放器时应用，不改变当前播放。',
                     style: TextStyle(
                         fontSize: AppType.body,
                         color: context.palette.textSub)),

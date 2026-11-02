@@ -58,7 +58,11 @@ class UpdateManifest {
   /// 解析后的三段版本；无法识别时为 null。
   AppVersion? get version => AppVersion.tryParse(tag);
 
-  /// 是否预发布（字段标记或 tag 带 `-`）。
+  /// 是否预发布：GitHub 显式标记 `prerelease`，或 tag 是 semver 预发布标识
+  /// （`-beta.1` / `-rc2` 等，见 [AppVersion.isPrereleaseTag]）。
+  ///
+  /// **只用于展示**（对话框里标注「预发布版本」），不参与「是否有更新」的判断：
+  /// 只要版本号比本地新就会提示更新。
   bool get isPrerelease => prerelease || AppVersion.isPrereleaseTag(tag);
 
   /// 挑选安装版资产：优先精确命名，其次任意 `*-setup.exe`（容忍发布时命名微调）。

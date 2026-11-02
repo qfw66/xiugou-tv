@@ -25,7 +25,32 @@ public class View {
     public static final int INVISIBLE = 4;
     public static final int GONE = 8;
 
+    public static final int FOCUS_BACKWARD = 1;
+    public static final int FOCUS_FORWARD = 2;
+    public static final int FOCUS_LEFT = 17;
+    public static final int FOCUS_UP = 33;
+    public static final int FOCUS_RIGHT = 66;
     public static final int FOCUS_DOWN = 130;
+    public static final int FOCUSABLES_ALL = 0;
+    public static final int FOCUSABLES_TOUCH_MODE = 1;
+    public static final int NO_ID = -1;
+    public static final int OVER_SCROLL_ALWAYS = 0;
+    public static final int OVER_SCROLL_IF_CONTENT_SCROLLS = 1;
+    public static final int OVER_SCROLL_NEVER = 2;
+    public static final int LAYER_TYPE_NONE = 0;
+    public static final int LAYER_TYPE_SOFTWARE = 1;
+    public static final int LAYER_TYPE_HARDWARE = 2;
+    public static final int SYSTEM_UI_FLAG_VISIBLE = 0;
+    public static final int SYSTEM_UI_FLAG_LOW_PROFILE = 0x00000001;
+    public static final int SYSTEM_UI_FLAG_HIDE_NAVIGATION = 0x00000002;
+    public static final int SYSTEM_UI_FLAG_FULLSCREEN = 0x00000004;
+    public static final int SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR = 0x00000010;
+    public static final int SYSTEM_UI_FLAG_LAYOUT_STABLE = 0x00000100;
+    public static final int SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION = 0x00000200;
+    public static final int SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN = 0x00000400;
+    public static final int SYSTEM_UI_FLAG_IMMERSIVE = 0x00000800;
+    public static final int SYSTEM_UI_FLAG_IMMERSIVE_STICKY = 0x00001000;
+    public static final int SYSTEM_UI_FLAG_LIGHT_STATUS_BAR = 0x00002000;
     public static final int IMPORTANT_FOR_ACCESSIBILITY_AUTO = 0;
     public static final int IMPORTANT_FOR_ACCESSIBILITY_YES = 1;
     public static final int IMPORTANT_FOR_ACCESSIBILITY_NO = 2;
@@ -43,6 +68,33 @@ public class View {
     private boolean clickable;
     private boolean selected;
     private boolean focused;
+    private boolean focusable;
+    private boolean focusableInTouchMode;
+    private boolean longClickable;
+    private CharSequence contentDescription;
+    private int nextFocusLeftId = NO_ID;
+    private int nextFocusUpId = NO_ID;
+    private int nextFocusRightId = NO_ID;
+    private int nextFocusDownId = NO_ID;
+    private int overScrollMode = OVER_SCROLL_IF_CONTENT_SCROLLS;
+    private int layerType = LAYER_TYPE_NONE;
+    private int systemUiVisibility;
+    private boolean fitsSystemWindows;
+    private boolean clipToOutline;
+    private float alpha = 1f;
+    private float scaleX = 1f;
+    private float scaleY = 1f;
+    private float translationX;
+    private float translationY;
+    private float translationZ;
+    private float rotation;
+    private float rotationX;
+    private float rotationY;
+    private float pivotX;
+    private float pivotY;
+    private ViewPropertyAnimator animator;
+    private volatile OnLongClickListener onLongClickListener;
+    private volatile OnFocusChangeListener onFocusChangeListener;
     private boolean attached;
     private Object tag;
     private Map<Integer, Object> keyedTags;
@@ -172,14 +224,132 @@ public class View {
     }
 
     public void setFocusable(boolean focusable) {
+        this.focusable = focusable;
+        if (!focusable) this.focusableInTouchMode = false;
+    }
+
+    public boolean isFocusable() {
+        return focusable;
     }
 
     public void setFocusableInTouchMode(boolean focusableInTouchMode) {
+        this.focusableInTouchMode = focusableInTouchMode;
+        if (focusableInTouchMode) this.focusable = true;
     }
 
+    public boolean isFocusableInTouchMode() {
+        return focusableInTouchMode;
+    }
+
+    /** 电视遥控器操作，始终不是触摸模式。 */
+    public boolean isInTouchMode() {
+        return false;
+    }
+
+    /**
+     * 桌面端由宿主管理真实焦点，这里只记录载荷视角的焦点：同一棵树里同时只有一个控件持有焦点，
+     * 变化时回调 {@link OnFocusChangeListener}。
+     */
     public boolean requestFocus() {
-        focused = true;
+        if (focused) return true;
+        View old = getRootView().findFocus();
+        if (old != null && old != this) old.setFocusedInternal(false);
+        setFocusedInternal(true);
         return true;
+    }
+
+    public void clearFocus() {
+        if (focused) setFocusedInternal(false);
+    }
+
+    private void setFocusedInternal(boolean value) {
+        focused = value;
+        OnFocusChangeListener l = onFocusChangeListener;
+        if (l != null) l.onFocusChange(this, value);
+    }
+
+    public boolean hasFocus() {
+        return focused;
+    }
+
+    public View findFocus() {
+        return focused ? this : null;
+    }
+
+    /** 能接收焦点的控件：可聚焦、可见且启用。 */
+    public void addFocusables(java.util.ArrayList<View> views, int direction) {
+        addFocusables(views, direction, FOCUSABLES_ALL);
+    }
+
+    public void addFocusables(java.util.ArrayList<View> views, int direction, int focusableMode) {
+        if (views == null || !focusable || visibility != VISIBLE || !enabled) return;
+        if (focusableMode == FOCUSABLES_TOUCH_MODE && !focusableInTouchMode) return;
+        views.add(this);
+    }
+
+    public java.util.ArrayList<View> getFocusables(int direction) {
+        java.util.ArrayList<View> result = new java.util.ArrayList<>();
+        addFocusables(result, direction);
+        return result;
+    }
+
+    /** 没有几何布局：优先按 nextFocus*Id，其次按控件树顺序取上一个 / 下一个可聚焦控件。 */
+    public View focusSearch(int direction) {
+        View root = getRootView();
+        int explicit = direction == FOCUS_LEFT ? nextFocusLeftId
+                : direction == FOCUS_UP ? nextFocusUpId
+                : direction == FOCUS_RIGHT ? nextFocusRightId
+                : direction == FOCUS_DOWN ? nextFocusDownId : NO_ID;
+        if (explicit != NO_ID) {
+            View target = root.findViewById(explicit);
+            if (target != null) return target;
+        }
+        java.util.ArrayList<View> all = root.getFocusables(direction);
+        if (all.isEmpty()) return null;
+        int index = all.indexOf(this);
+        boolean backward = direction == FOCUS_LEFT || direction == FOCUS_UP || direction == FOCUS_BACKWARD;
+        int next = index < 0 ? 0 : backward ? index - 1 : index + 1;
+        return next >= 0 && next < all.size() ? all.get(next) : null;
+    }
+
+    public void setNextFocusLeftId(int id) {
+        this.nextFocusLeftId = id;
+    }
+
+    public int getNextFocusLeftId() {
+        return nextFocusLeftId;
+    }
+
+    public void setNextFocusUpId(int id) {
+        this.nextFocusUpId = id;
+    }
+
+    public int getNextFocusUpId() {
+        return nextFocusUpId;
+    }
+
+    public void setNextFocusRightId(int id) {
+        this.nextFocusRightId = id;
+    }
+
+    public int getNextFocusRightId() {
+        return nextFocusRightId;
+    }
+
+    public void setNextFocusDownId(int id) {
+        this.nextFocusDownId = id;
+    }
+
+    public int getNextFocusDownId() {
+        return nextFocusDownId;
+    }
+
+    public void setContentDescription(CharSequence contentDescription) {
+        this.contentDescription = contentDescription;
+    }
+
+    public CharSequence getContentDescription() {
+        return contentDescription;
     }
 
     public boolean requestFocus(int direction) {
@@ -235,6 +405,30 @@ public class View {
     }
 
     public void setOnLongClickListener(OnLongClickListener l) {
+        if (l != null) longClickable = true;
+        this.onLongClickListener = l;
+    }
+
+    public void setLongClickable(boolean longClickable) {
+        this.longClickable = longClickable;
+    }
+
+    public boolean isLongClickable() {
+        return longClickable;
+    }
+
+    public boolean performLongClick() {
+        OnLongClickListener l = onLongClickListener;
+        return l != null && l.onLongClick(this);
+    }
+
+    /** 桌面端不产生触摸事件；子类 super 调用时只按可点击性报告是否消费。 */
+    public boolean onTouchEvent(MotionEvent event) {
+        return isClickable() || longClickable;
+    }
+
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        return onTouchEvent(event);
     }
 
     public void setOnTouchListener(OnTouchListener l) {
@@ -244,6 +438,11 @@ public class View {
     }
 
     public void setOnFocusChangeListener(OnFocusChangeListener l) {
+        this.onFocusChangeListener = l;
+    }
+
+    public OnFocusChangeListener getOnFocusChangeListener() {
+        return onFocusChangeListener;
     }
 
     public boolean post(Runnable action) {
@@ -369,13 +568,153 @@ public class View {
     public void setElevation(float elevation) {
     }
 
+    // 变换属性只保存（供动画与载荷读回），宿主不据此渲染
+
     public void setScaleX(float scaleX) {
+        this.scaleX = scaleX;
+    }
+
+    public float getScaleX() {
+        return scaleX;
     }
 
     public void setScaleY(float scaleY) {
+        this.scaleY = scaleY;
+    }
+
+    public float getScaleY() {
+        return scaleY;
     }
 
     public void setAlpha(float alpha) {
+        this.alpha = alpha;
+    }
+
+    public float getAlpha() {
+        return alpha;
+    }
+
+    public void setTranslationX(float translationX) {
+        this.translationX = translationX;
+    }
+
+    public float getTranslationX() {
+        return translationX;
+    }
+
+    public void setTranslationY(float translationY) {
+        this.translationY = translationY;
+    }
+
+    public float getTranslationY() {
+        return translationY;
+    }
+
+    public void setTranslationZ(float translationZ) {
+        this.translationZ = translationZ;
+    }
+
+    public float getTranslationZ() {
+        return translationZ;
+    }
+
+    public void setRotation(float rotation) {
+        this.rotation = rotation;
+    }
+
+    public float getRotation() {
+        return rotation;
+    }
+
+    public void setRotationX(float rotationX) {
+        this.rotationX = rotationX;
+    }
+
+    public float getRotationX() {
+        return rotationX;
+    }
+
+    public void setRotationY(float rotationY) {
+        this.rotationY = rotationY;
+    }
+
+    public float getRotationY() {
+        return rotationY;
+    }
+
+    public void setPivotX(float pivotX) {
+        this.pivotX = pivotX;
+    }
+
+    public float getPivotX() {
+        return pivotX;
+    }
+
+    public void setPivotY(float pivotY) {
+        this.pivotY = pivotY;
+    }
+
+    public float getPivotY() {
+        return pivotY;
+    }
+
+    /** 每个控件复用同一个属性动画器，与 Android 一致。 */
+    public ViewPropertyAnimator animate() {
+        synchronized (this) {
+            if (animator == null) animator = new ViewPropertyAnimator(this);
+            return animator;
+        }
+    }
+
+    public void clearAnimation() {
+    }
+
+    public void setLayerType(int layerType, android.graphics.Paint paint) {
+        this.layerType = layerType;
+    }
+
+    public int getLayerType() {
+        return layerType;
+    }
+
+    public void setOverScrollMode(int overScrollMode) {
+        this.overScrollMode = overScrollMode;
+    }
+
+    public int getOverScrollMode() {
+        return overScrollMode;
+    }
+
+    public void setSystemUiVisibility(int visibility) {
+        this.systemUiVisibility = visibility;
+    }
+
+    public int getSystemUiVisibility() {
+        return systemUiVisibility;
+    }
+
+    public void setFitsSystemWindows(boolean fitSystemWindows) {
+        this.fitsSystemWindows = fitSystemWindows;
+    }
+
+    public boolean getFitsSystemWindows() {
+        return fitsSystemWindows;
+    }
+
+    public void setClipToOutline(boolean clipToOutline) {
+        this.clipToOutline = clipToOutline;
+    }
+
+    public boolean getClipToOutline() {
+        return clipToOutline;
+    }
+
+    /** 桌面窗口没有状态栏 / 导航栏，系统栏占用一律为 0；未挂到窗口时与 Android 一样返回 null。 */
+    public WindowInsets getRootWindowInsets() {
+        return attached ? WindowInsets.CONSUMED : null;
+    }
+
+    public void computeScroll() {
     }
 
     public void setX(float x) {

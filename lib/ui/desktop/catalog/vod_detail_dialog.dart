@@ -1,8 +1,11 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../../core/api/models/vod_models.dart';
+import '../../../core/api/netdisk_share_links.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
+import '../widgets/app_message.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/horizontal_scroll_area.dart';
 import 'poster_image.dart';
@@ -93,6 +96,65 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
 
   /// 播放源横栏的横向滚动控制器（滚轮 / 拖拽共用）。
   final ScrollController _sourceScrollController = ScrollController();
+
+  /// §49：详情里出现的网盘分享链接；为空时不显示「复制分享链接」
+  late final List<NetdiskShareLink> _shareLinks =
+      extractNetdiskShareLinks(widget.detail);
+
+  Future<void> _copyShareLinks(List<NetdiskShareLink> links) async {
+    await Clipboard.setData(
+        ClipboardData(text: links.map((link) => link.url).join('\n')));
+    if (!mounted) return;
+    showAppMessage(
+        links.length == 1
+            ? '已复制${links.single.provider}分享链接'
+            : '已复制 ${links.length} 条分享链接',
+        type: AppMessageType.success);
+  }
+
+  /// 单条直接复制；多条弹菜单逐条选或全部复制
+  Widget _buildShareLinkButton(AppPalette palette) {
+    final icon = Icon(Icons.link_rounded, color: palette.textSub, size: 22);
+    if (_shareLinks.length == 1) {
+      return IconButton(
+        key: const ValueKey('detail-copy-share-link'),
+        icon: icon,
+        tooltip: '复制分享链接',
+        onPressed: () => _copyShareLinks(_shareLinks),
+      );
+    }
+    return PopupMenuButton<int>(
+      key: const ValueKey('detail-copy-share-link'),
+      icon: icon,
+      tooltip: '复制分享链接',
+      color: palette.raised,
+      onSelected: (index) =>
+          _copyShareLinks(index < 0 ? _shareLinks : [_shareLinks[index]]),
+      itemBuilder: (_) => [
+        PopupMenuItem<int>(
+          value: -1,
+          child: Text('全部复制（${_shareLinks.length} 条）',
+              style: TextStyle(
+                  fontSize: AppType.label,
+                  fontWeight: FontWeight.w600,
+                  color: palette.textMain)),
+        ),
+        const PopupMenuDivider(),
+        for (var i = 0; i < _shareLinks.length; i++)
+          PopupMenuItem<int>(
+            value: i,
+            child: SizedBox(
+              width: 360,
+              child: Text('${_shareLinks[i].provider}  ${_shareLinks[i].url}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: AppType.label, color: palette.textBody)),
+            ),
+          ),
+      ],
+    );
+  }
 
   @override
   void initState() {
@@ -344,6 +406,10 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                       ),
                       const Spacer(),
 
+                      // §49 复制网盘分享链接（详情里有链接才显示）
+                      if (_shareLinks.isNotEmpty)
+                        _buildShareLinkButton(palette),
+
                       // 收藏按钮
                       if (widget.onToggleFavorite != null)
                         FocusRing(
@@ -437,14 +503,13 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                           dragStartBehavior: DragStartBehavior.down,
                           scrollDirection: Axis.horizontal,
                           itemCount: sources.length,
-                          separatorBuilder: (_, __) =>
-                              const SizedBox(width: 8),
+                          separatorBuilder: (_, __) => const SizedBox(width: 8),
                           itemBuilder: (context, index) {
                             return _SourcePill(
                               label: sources[index].name,
                               isSelected: index == _selectedSourceIndex,
-                              onTap: () => setState(
-                                  () => _selectedSourceIndex = index),
+                              onTap: () =>
+                                  setState(() => _selectedSourceIndex = index),
                             );
                           },
                         ),
@@ -461,10 +526,13 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                                 style: TextStyle(color: palette.textDim)),
                           )
                         : GridView.builder(
+                            key: const ValueKey('detail-episode-grid'),
                             gridDelegate:
-                                const SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: 5,
-                              childAspectRatio: 2.3,
+                                const SliverGridDelegateWithMaxCrossAxisExtent(
+                              // 右侧内容区约 495px：最多三列，让长集名保留两行，
+                              // 也能随更窄的测试/未来布局自动降为两列。
+                              maxCrossAxisExtent: 165,
+                              mainAxisExtent: 58,
                               crossAxisSpacing: 8,
                               mainAxisSpacing: 8,
                             ),
@@ -657,8 +725,9 @@ class _EpisodeButton extends StatelessWidget {
                     fontSize: AppType.body,
                     fontWeight: FontWeight.bold,
                   ),
-                  maxLines: 1,
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
                 ),
               ),
             ],
@@ -669,8 +738,9 @@ class _EpisodeButton extends StatelessWidget {
               fontSize: AppType.body,
               fontWeight: FontWeight.w500,
             ),
-            maxLines: 1,
+            maxLines: 2,
             overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
           );
 
     final button = OutlinedButton(
@@ -709,8 +779,11 @@ class _EpisodeButton extends StatelessWidget {
       child: Semantics(selected: isCurrent, child: content),
     );
 
-    if (!isCurrent) return button;
+    final withFullLabel = Tooltip(message: label, child: button);
+    if (!isCurrent) return withFullLabel;
     // 合并成一个语义节点：按钮 + 集名 + selected 一起播报（否则 selected 只落在文本子节点）。
-    return MergeSemantics(child: Tooltip(message: '当前播放集', child: button));
+    return MergeSemantics(
+      child: Tooltip(message: '当前播放集：$label', child: button),
+    );
   }
 }

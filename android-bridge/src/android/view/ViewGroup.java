@@ -11,6 +11,12 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 public class ViewGroup extends View implements ViewParent {
 
+    public static final int FOCUS_BEFORE_DESCENDANTS = 0x20000;
+    public static final int FOCUS_AFTER_DESCENDANTS = 0x40000;
+    public static final int FOCUS_BLOCK_DESCENDANTS = 0x60000;
+
+    private int descendantFocusability = FOCUS_BEFORE_DESCENDANTS;
+
     /** 宿主线程读快照时载荷线程可能还在 addView，用写时复制避免并发修改异常。 */
     private final List<View> children = new CopyOnWriteArrayList<>();
 
@@ -114,6 +120,53 @@ public class ViewGroup extends View implements ViewParent {
     public void dispatchAttached(boolean attached) {
         super.dispatchAttached(attached);
         for (View child : children) child.dispatchAttached(attached);
+    }
+
+    public void setDescendantFocusability(int focusability) {
+        this.descendantFocusability = focusability;
+    }
+
+    public int getDescendantFocusability() {
+        return descendantFocusability;
+    }
+
+    @Override
+    public View findFocus() {
+        View self = super.findFocus();
+        if (self != null) return self;
+        for (View child : children) {
+            View found = child.findFocus();
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    @Override
+    public boolean hasFocus() {
+        return findFocus() != null;
+    }
+
+    public View getFocusedChild() {
+        for (View child : children) {
+            if (child.hasFocus()) return child;
+        }
+        return null;
+    }
+
+    /** 按 descendantFocusability 决定自身与子控件谁进入焦点候选；不可见的容器整体跳过。 */
+    @Override
+    public void addFocusables(java.util.ArrayList<View> views, int direction, int focusableMode) {
+        if (views == null || getVisibility() != VISIBLE) return;
+        if (descendantFocusability == FOCUS_BLOCK_DESCENDANTS) {
+            super.addFocusables(views, direction, focusableMode);
+            return;
+        }
+        int before = views.size();
+        if (descendantFocusability == FOCUS_BEFORE_DESCENDANTS) super.addFocusables(views, direction, focusableMode);
+        for (View child : children) child.addFocusables(views, direction, focusableMode);
+        if (descendantFocusability == FOCUS_AFTER_DESCENDANTS && views.size() == before) {
+            super.addFocusables(views, direction, focusableMode);
+        }
     }
 
     public void measureChildren(int widthMeasureSpec, int heightMeasureSpec) {

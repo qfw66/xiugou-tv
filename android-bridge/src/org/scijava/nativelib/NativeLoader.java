@@ -1,15 +1,15 @@
 package org.scijava.nativelib;
 
+import com.fongmi.companion.fs.NativeCache;
+
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 
 /**
  * 简化版 scijava-nativelib 的 NativeLoader（本机未发布到 Maven Central）。
- * 行为等价：按平台从 classpath（unicorn jar 的 natives/&lt;platform&gt;/ 目录）
- * 提取原生库到临时文件并 System.load。
+ * 按平台从 classpath（unicorn jar 的 natives/&lt;platform&gt;/ 目录）取出原生库，
+ * 经 {@link NativeCache} 按内容哈希落地复用后 System.load——不再每次在 %TEMP% 留一份随机名副本。
  */
 public class NativeLoader {
 
@@ -34,17 +34,9 @@ public class NativeLoader {
         if (in == null) {
             throw new IOException("native library not found on classpath: " + resource);
         }
-        String suffix = fileName.substring(fileName.lastIndexOf('.'));
-        File tmp = File.createTempFile(libName + "_", suffix);
-        tmp.deleteOnExit();
-        try (OutputStream out = new FileOutputStream(tmp)) {
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
-        } finally {
-            in.close();
-        }
-        System.load(tmp.getAbsolutePath());
-        System.out.println("[NativeLoader] loaded " + resource + " -> " + tmp.getAbsolutePath());
+        NativeCache.sweepLegacyTemp();
+        File lib = NativeCache.materialize(fileName, in);
+        System.load(lib.getAbsolutePath());
+        System.out.println("[NativeLoader] loaded " + resource + " -> " + lib.getAbsolutePath());
     }
 }

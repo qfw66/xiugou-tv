@@ -4,8 +4,13 @@ import android.content.Context;
 import com.github.catvod.crawler.Spider;
 import com.github.catvod.crawler.SpiderNull;
 import com.github.catvod.spider.UnsupportedGuardSpider;
+import com.fongmi.companion.hardshell.HardshellPipeline;
+import com.fongmi.companion.py.PySpider;
 import com.fongmi.companion.d2j.PreciseDex2jar;
 import com.fongmi.companion.guard.GuardCryptoService;
+import com.fongmi.companion.source.SourceRules;
+import com.fongmi.companion.source.SpiderFactoryRegistry;
+import com.fongmi.companion.source.SpiderRequest;
 
 import java.io.*;
 import java.lang.reflect.Method;
@@ -26,92 +31,57 @@ import java.util.concurrent.ConcurrentHashMap;
 public class DexSpiderLoader {
 
     private final ConcurrentHashMap<String, ClassLoader> loaders = new ConcurrentHashMap<>();
+    /** 正在准备中的 jar（按 jarKey 单飞）：同一个 jar 只让一个线程下载/解密/转换。 */
+    private final ConcurrentHashMap<String, java.util.concurrent.CompletableFuture<JarOutcome>> JAR_LOADING =
+            new ConcurrentHashMap<>();
+    private record JarOutcome(ClassLoader loader, ParseStage.Failure failure) {}
+    private static final class SpiderAttempt {
+        ParseStage.Failure failure;
+    }
+    private final ThreadLocal<SpiderAttempt> spiderAttempt = new ThreadLocal<>();
+    /**
+     * 同时进行「准备」的 jar 上限。
+     *
+     * <p>全串行会让多个源的首次加载互相排队（3 个 jar 就是 3×10 秒）；
+     * 完全不限又会叠加 dex2jar 的 CPU/内存峰值。取中间：最多 2 个并行。
+     */
+    private static final java.util.concurrent.Semaphore JAR_PREP_SLOTS =
+            new java.util.concurrent.Semaphore(2);
+    /** dex→JVM 转换最近一次失败的时间（按 jarKey）：冷却期内不重试转换，直接退回宿主。 */
+    private final ConcurrentHashMap<String, Long> jvmJarFailures = new ConcurrentHashMap<>();
+    /** 按目标文件加锁：不同 jarKey 可能落到同一个缓存文件（同 URL 带 / 不带 md5）。 */
+    private static final ConcurrentHashMap<String, Object> FILE_LOCKS = new ConcurrentHashMap<>();
+    /** dex→JVM 转换失败后的重试冷却。 */
+    private static final long JVM_JAR_RETRY_MS = 30_000L;
+    /** 下载 / 转换的独占工作目录前缀（cacheDir 下），完成后原子发布到正式文件名。 */
+    private static final String WORK_PREFIX = ".xgtmp-";
+    /** 工作目录超过这个时长没有任何写入，视为进程异常退出的残留。 */
+    private static final long STALE_WORK_MS = 10 * 60_000L;
     private final ConcurrentHashMap<String, Spider> spiders = new ConcurrentHashMap<>();
+    /**
+     * 按 spider 缓存键的创建锁：同一站点并发加载（如 /spider/load 与 /spider/call 同时到达）只创建一个实例。
+     * 不同站点互不阻塞（加固载荷首次解密约 10 s，不能让其它站点排队）。
+     */
+    private final ConcurrentHashMap<String, Object> spiderLocks = new ConcurrentHashMap<>();
     /** 载荷内 Spider 子类扫描缓存（按 loader）——类发现兜底用，避免每次调用扫 zip。 */
     private static final Map<ClassLoader, List<String>> SPIDER_CLASSES =
             java.util.Collections.synchronizedMap(new java.util.WeakHashMap<ClassLoader, List<String>>());
     private final File cacheDir;
 
-    private static final Map<String, String> ALIAS_MAP = new HashMap<>();
-    static {
-        // Bilibili family
-        ALIAS_MAP.put("bili", "Bili");
-        ALIAS_MAP.put("biliguard", "Bili");
-        ALIAS_MAP.put("biliych", "Bili");
-        ALIAS_MAP.put("bilibili", "Bili");
-
-        // Kanqiu / Live family
-        ALIAS_MAP.put("kanqiu", "Kanqiu");
-        ALIAS_MAP.put("kanqiuguard", "Kanqiu");
-        ALIAS_MAP.put("livekanqiu", "Kanqiu");
-
-        // Push / Streaming
-        ALIAS_MAP.put("push", "Push");
-        ALIAS_MAP.put("pushguard", "Push");
-        ALIAS_MAP.put("push_agent", "Push");
-
-        // AList / Cloud Drive
-        ALIAS_MAP.put("alist", "AList");
-        ALIAS_MAP.put("alistguard", "AList");
-
-        // Fy 继承载荷里的 Pan，Pan.init 在 HotSpot 21 上会稳定触发
-        // EXCEPTION_ACCESS_VIOLATION（-Xint 纯解释执行同样复现，排除 JIT 误编译）。
-        // 但它走的是 Level 0「Guard 站点优先从载荷加载」，比 ALIAS_MAP 更早命中，
-        // 所以拦截必须用 BLOCKED_API 在主流程之前完成（见 isBlockedByCrash）。
-
-        // DouDouGuard is an Android-native protected wrapper. It is not Douban.
-        // Keep the distinction explicit so the desktop bridge does not fabricate
-        // categories while silently returning an empty video list.
-        ALIAS_MAP.put("doudouguard", "UnsupportedGuardSpider");
-        ALIAS_MAP.put("doudou", "UnsupportedGuardSpider");
-
-        // Nmys / Nuomi family
-        ALIAS_MAP.put("nmys", "Nmys");
-        ALIAS_MAP.put("nmysguard", "Nmys");
-        ALIAS_MAP.put("nmyswv", "Nmys");
-        ALIAS_MAP.put("nmyswvguard", "Nmys");
-        ALIAS_MAP.put("nuomi", "Nmys");
-
-        // AppYsV2 / CMS Web App family
-        ALIAS_MAP.put("appysv2", "AppYsV2");
-        ALIAS_MAP.put("appttguard", "AppYsV2");
-        ALIAS_MAP.put("app99guard", "AppYsV2");
-        ALIAS_MAP.put("appsxguard", "AppYsV2");
-        ALIAS_MAP.put("appgzguard", "AppYsV2");
-        ALIAS_MAP.put("hmysguard", "AppYsV2");
-        ALIAS_MAP.put("newczguard", "AppYsV2");
-        ALIAS_MAP.put("bttwooguard", "AppYsV2");
-        ALIAS_MAP.put("jpysguard", "AppYsV2");
-        ALIAS_MAP.put("ycyzguard", "AppYsV2");
-    }
-
     /**
-     * 部分站点在配置源里缺少 ext，而载荷爬虫把 ext 当成 baseUrl 的唯一来源，
-     * 空 ext 会让 homeContent 直接返回空串（表现为整站 0 分类 0 视频，且没有任何异常）。
-     * 典型：饭太硬配置的 csp_NewCzGuard 没有 ext，实测只返回 {"code":0,"data":""}；
-     * 官方 csp_NewCz 条目用的就是这个地址，补上后同一份载荷立刻返回 11 分类 / 57 部。
-     * 只对"ext 为空"生效，配置源给了 ext 时不干预。
+     * 已完成 jar 级初始化（代理服务 + Init/InitOrigin/载荷入口）的 loader。
+     * 弱引用：loader 被丢弃后自动移除，不延长其生命周期。
      */
-    private static final Map<String, String> DEFAULT_EXT = new HashMap<>();
+    private static final Set<ClassLoader> PREPARED =
+            java.util.Collections.synchronizedSet(java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>()));
+    /** loader → 加固载荷的初始化入口类（见 ShellProfile#payloadInit）。 */
+    private static final Map<ClassLoader, String> PAYLOAD_INIT =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
-    static {
-        DEFAULT_EXT.put("NewCzGuard", "https://www.czzy77.com/");
-    }
-
-    /**
-     * 桌面端必须在加载前拒绝的载荷：它们的 init 会让 HotSpot 直接段错误
-     * （EXCEPTION_ACCESS_VIOLATION），而 Java 层捕获不到 SIGSEGV——
-     * 放进来一个，整个 companion 连同其它站一起死。
-     *
-     * 实测：csp_FyGuard → 载荷类 Fy（继承 Pan）→ Pan.init +6 崩，-Xint 同样崩，
-     * 去掉 -noverify 也照崩，只在 Windows JDK21 复现。只能不加载。
-     */
-    private static final java.util.Set<String> BLOCKED_API = new java.util.HashSet<>();
-
-    static {
-        BLOCKED_API.add("fyguard");
-        BLOCKED_API.add("fy");
-    }
+    /** 例外规则（别名 / 默认 ext / 拦截），全部来自数据文件，见 {@link SourceRules}。 */
+    private final SourceRules rules;
+    /** spider 工厂链：新增源类型在这里注册，不改 {@link #getSpider}。 */
+    private final SpiderFactoryRegistry factories = new SpiderFactoryRegistry();
 
     public DexSpiderLoader() {
         String userHome = System.getProperty("user.home", ".");
@@ -119,36 +89,165 @@ public class DexSpiderLoader {
         if (!cacheDir.exists()) {
             cacheDir.mkdirs();
         }
+        purgeObsoleteArtifacts(cacheDir);
+        this.rules = SourceRules.load(cacheDir.getParentFile());
+        System.out.println("[DexSpiderLoader] " + rules);
+        registerBuiltinFactories();
+    }
+
+    /** 作废的旧转换产物：-jvm.jar ~ -jvm6.jar（转换器已升级到 -jvm7）。 */
+    private static final java.util.regex.Pattern OBSOLETE_JVM =
+            java.util.regex.Pattern.compile(".*-jvm[0-6]?\\.jar");
+    /** 临时产物只清理足够旧的，避免误删另一实例正在写的文件。 */
+    private static final long STALE_TMP_MS = 10 * 60_000L;
+
+    /**
+     * 启动时清理 jars 缓存里的作废产物，只删三类：旧版本转换产物、残留的 *.tmp.jar、
+     * 已有带修补戳版本时的无戳 -jvm7.jar。此时本进程尚未加载任何 jar；
+     * 被其它进程占用的文件在 Windows 上删除会失败，直接跳过。其余缓存（原始 jar 等）不动。
+     */
+    static int purgeObsoleteArtifacts(File dir) {
+        File[] files = dir.listFiles();
+        if (files == null) return 0;
+        java.util.Set<String> names = new java.util.HashSet<>();
+        for (File f : files) names.add(f.getName());
+        long now = System.currentTimeMillis();
+        int removed = 0;
+        long bytes = 0;
+        for (File f : files) {
+            if (!f.isFile()) continue;
+            String name = f.getName();
+            boolean obsolete;
+            if (name.endsWith(".tmp.jar")) {
+                obsolete = now - f.lastModified() > STALE_TMP_MS;
+            } else if (OBSOLETE_JVM.matcher(name).matches()) {
+                obsolete = true;
+            } else if (name.endsWith("-jvm7.jar")) {
+                String prefix = name.substring(0, name.length() - ".jar".length()) + "-";
+                obsolete = false;
+                for (String other : names) {
+                    if (other.startsWith(prefix) && other.endsWith(".jar") && !other.endsWith(".tmp.jar")) {
+                        obsolete = true;
+                        break;
+                    }
+                }
+            } else {
+                obsolete = false;
+            }
+            if (!obsolete) continue;
+            long len = f.length();
+            if (f.delete()) {
+                removed++;
+                bytes += len;
+            }
+        }
+        if (removed > 0) {
+            System.out.println("[DexSpiderLoader] 清理作废缓存 " + removed + " 个，释放 " + (bytes >> 10) + " KB");
+        }
+        return removed;
+    }
+
+    /** 工厂链（可追加新的源类型）。 */
+    public SpiderFactoryRegistry factories() {
+        return factories;
+    }
+
+    /**
+     * 内置工厂，顺序即历史上的加载层级（数字留间隔，新类型可插在任意两层之间）。
+     *
+     * <ol>
+     *   <li>100 py：api 指向 .py，交给子进程 CPython，与 jar/JS 无关；判定只看后缀。</li>
+     *   <li>200 js：ext 里带 {@code "js"} 的 extra.js 适配格式。</li>
+     *   <li>300 guard-jar：{@code csp_XxxGuard} 优先从外部载荷加载。必须早于内置别名，
+     *       否则会被 appttguard → AppYsV2 这类兼容映射劫持，拿不到载荷里的真实爬虫。</li>
+     *   <li>400 jar-discover-early：载荷类名不带 Guard 后缀（Bili / Nmyswv…）时按结构发现。
+     *       同样必须早于内置别名：内置 Bili 只有硬编码分类，DouDou 直接不支持，
+     *       落到别名就会「首页有分类、点进去列表恒空」。</li>
+     *   <li>500 builtin：companion 自带的实现（含 {@link SourceRules} 别名）。</li>
+     *   <li>600 jar：普通外部 jar 按类名加载。</li>
+     *   <li>700 jar-discover：精确名全失败后的类发现兜底，多候选一律放弃。</li>
+     * </ol>
+     * 下载/校验/解密这类与类名无关的硬失败（{@link #hardStop}）之后，jar 相关工厂不再重试同一 jar。
+     */
+    private void registerBuiltinFactories() {
+        factories.register("py", 100,
+                r -> PySpider.isPythonApi(r.api()) ? new PySpider(r.api(), r.ext(), cacheDir) : null);
+        factories.register("js", 200,
+                r -> r.ext() != null && r.ext().contains("\"js\"") ? new JavaScriptSpider(r.api(), r.ext()) : null);
+        // py/js may inherit a global jar without using it; prepare only after those factories.
+        factories.register("jar-prepare", 250, r -> {
+            if (r.hasJar()) loadJar(r.jar());
+            return null;
+        });
+        factories.register("guard-jar", 300,
+                r -> r.cleanApi().endsWith("Guard") && r.hasJar() && !hardStop()
+                        ? attemptJar(() -> tryLoadFromJar(r.siteKey(), r.cleanApi(), r.ext(), r.jar(), true)) : null);
+        factories.register("jar-discover-early", 400,
+                r -> r.hasJar() && !hardStop()
+                        ? attemptJar(() -> tryDiscoverFromJar(r.siteKey(), r.cleanApi(), r.ext(), r.jar())) : null);
+        factories.register("builtin", 500, r -> !r.hasJar() || !hardStop() ? createBuiltin(r) : null);
+        factories.register("jar", 600,
+                r -> r.hasJar() && !hardStop()
+                        ? attemptJar(() -> tryLoadFromJar(r.siteKey(), r.cleanApi(), r.ext(), r.jar(), false)) : null);
+        factories.register("jar-discover", 700,
+                r -> r.hasJar() && !hardStop()
+                        ? attemptJar(() -> tryDiscoverFromJar(r.siteKey(), r.cleanApi(), r.ext(), r.jar())) : null);
     }
 
     public File getCacheDir() {
         return cacheDir;
     }
 
-    public void clear() {
-        for (Spider spider : spiders.values()) {
+    /**
+     * 释放全部 spider 与类加载器（换配置 / 停机时调用）。
+     *
+     * <p>先从缓存摘下再销毁：并发的新请求只会看到空缓存并重建，不会拿到正在销毁的实例。
+     * {@code URLClassLoader} 必须 close：否则 jar 文件句柄一直开着（Windows 下锁文件，
+     * 换配置后删不掉、覆盖不了旧 jar），元空间也要等 GC 碰巧回收。
+     *
+     * @return 释放的 spider 个数
+     */
+    public int clear() {
+        List<Spider> oldSpiders = new ArrayList<>(spiders.values());
+        List<ClassLoader> oldLoaders = new ArrayList<>(loaders.values());
+        spiders.clear();
+        loaders.clear();
+        spiderLocks.clear();
+        for (Spider spider : oldSpiders) {
             try {
                 spider.destroy();
             } catch (Throwable ignored) {}
         }
-        loaders.clear();
-        spiders.clear();
+        for (ClassLoader cl : oldLoaders) {
+            // 先停掉该载荷投递的心跳 / 延迟任务：自我重投的任务若不取消会永远循环，
+            // 关闭类加载器也释放不了它（任务对象本身就引用着载荷类）
+            int cancelled = android.os.Handler.cancelAll(cl);
+            if (cancelled > 0) {
+                System.out.println("[DexSpiderLoader] 已取消旧载荷的异步任务 " + cancelled + " 个");
+            }
+            if (cl instanceof URLClassLoader) {
+                try {
+                    ((URLClassLoader) cl).close();
+                } catch (Throwable ignored) {}
+            }
+        }
         // 本地代理持有端口与线程；配置切换后旧 loader 不再使用，必须一并释放
         GuardProxyServer.releaseAll();
         ParseStage.reset();
         SPIDER_CLASSES.clear();
+        return oldSpiders.size();
     }
 
     public Spider getSpider(String siteKey, String api, String ext, String jar) {
         String cleanApi = normalizeApiName(api);
         // 崩溃站必须在 Level 0（载荷加载）之前短路，否则进程直接消失。
-        if (BLOCKED_API.contains(cleanApi.toLowerCase(java.util.Locale.ROOT))) {
+        if (rules.isBlocked(cleanApi)) {
             System.err.println("[DexSpiderLoader] 已禁用会在本机 JDK 上崩溃的载荷: api=" + api
                     + " site=" + siteKey + "（加载它会触发 SIGSEGV，拖死整个 companion）");
             return new UnsupportedGuardSpider();
         }
         if (ext == null || ext.trim().isEmpty()) {
-            String fallback = DEFAULT_EXT.get(cleanApi);
+            String fallback = rules.defaultExt(cleanApi);
             if (fallback != null) {
                 ext = fallback;
             }
@@ -159,21 +258,44 @@ public class DexSpiderLoader {
         Spider cached = spiders.get(spKey);
         if (cached != null) return cached;
 
-        Spider spider = null;
-        try {
-            spider = resolveSpiderInstance(siteKey, api, cleanApi, ext, jar);
-            if (spider != null) {
-                spider.siteKey = siteKey;
-                spider.init(Context.get(), ext != null ? ext : "");
-                System.out.println("[DexSpiderLoader] Successfully initialized spider: " + cleanApi + " for site: " + siteKey);
-                spiders.put(spKey, spider);
-                return spider;
+        synchronized (spiderLocks.computeIfAbsent(spKey, k -> new Object())) {
+            // 锁内复查：并发的另一请求可能已经建好
+            cached = spiders.get(spKey);
+            if (cached != null) return cached;
+            Spider spider = null;
+            SpiderAttempt previousAttempt = spiderAttempt.get();
+            spiderAttempt.set(new SpiderAttempt());
+            try {
+                spider = factories.create(new SpiderRequest(siteKey, api, cleanApi, ext, jar));
+                if (spider != null) {
+                    spider.siteKey = siteKey;
+                    spider.init(Context.get(), ext != null ? ext : "");
+                    ParseStage.clearFailure();
+                    System.out.println("[DexSpiderLoader] Successfully initialized spider: " + cleanApi + " for site: " + siteKey);
+                    spiders.put(spKey, spider);
+                    return spider;
+                }
+            } catch (Throwable t) {
+                ParseStage.fail(spider != null ? ParseStage.INIT : ParseStage.INSTANTIATE, cleanApi + ": " + t);
+                ParseStage.Failure stage = ParseStage.current();
+                System.err.println("[DexSpiderLoader] Error instantiating spider " + cleanApi + ": " + t.getMessage()
+                        + (stage != null ? "（阶段=" + stage.stage + "）" : ""));
+                t.printStackTrace();
+                // 失败不缓存，下次会重建：已创建的实例必须当场销毁，否则 python 子进程 / JS 上下文每次失败都泄漏一份
+                if (spider != null) {
+                    try {
+                        spider.destroy();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            } finally {
+                SpiderAttempt attempt = spiderAttempt.get();
+                if (attempt != null && attempt.failure != null) {
+                    ParseStage.fail(attempt.failure.stage, attempt.failure.detail);
+                }
+                if (previousAttempt == null) spiderAttempt.remove();
+                else spiderAttempt.set(previousAttempt);
             }
-        } catch (Throwable t) {
-            ParseStage.Failure stage = ParseStage.current();
-            System.err.println("[DexSpiderLoader] Error instantiating spider " + cleanApi + ": " + t.getMessage()
-                    + (stage != null ? "（阶段=" + stage.stage + "）" : ""));
-            t.printStackTrace();
         }
         // 失败结果**不进缓存**：加固载荷可能是首次自动解密（约 10 s）尚未就绪，
         // 或者 jar 还没下载完；一旦把 SpiderNull 缓存住，该站点会一直空白直到进程重启
@@ -185,85 +307,95 @@ public class DexSpiderLoader {
         return new SpiderNull();
     }
 
-    private Spider resolveSpiderInstance(String siteKey, String api, String cleanApi, String ext, String jar) {
-        // JavaScript source adapters arrive in ext as an object containing extra.js.
-        if (ext != null && ext.contains("\"js\"")) {
-            try {
-                return new JavaScriptSpider(api, ext);
-            } catch (Throwable t) {
-                System.err.println("[DexSpiderLoader] Failed to create JavaScript source adapter: " + t.getMessage());
-            }
-        }
-
-        // Level 0: 加固(Guard)站点优先从外部 jar（守卫载荷）加载。
-        // 必须优先于内置别名（ALIAS_MAP 里 appttguard -> AppYsV2 等兼容映射），
-        // 否则 csp_XxxGuard 站点会被内置兼容实现劫持，拿不到载荷里的真实爬虫。
-        if (cleanApi.endsWith("Guard") && jar != null && !jar.trim().isEmpty()) {
-            Spider fromJar = tryLoadFromJar(siteKey, cleanApi, ext, jar, true);
-            if (fromJar != null) {
-                return fromJar;
-            }
-        }
-
-        // Level 0.5: 载荷内「去 Guard 后缀」的类发现。
-        //
-        // 载荷里的类名不带 Guard 后缀（Bili / Nmyswv / DouDou …），而配置里的 api
-        // 是 csp_BiliGuard / csp_DouDouGuard，Level 0 的精确匹配必然落空。若此时
-        // 直接落到 Level 1，ALIAS_MAP 会命中 companion 内置的**简化兼容实现**
-        // （Bili 只返回硬编码分类 + B 站搜索、DouDou 直接是 UnsupportedGuardSpider），
-        // 真正的载荷爬虫永远不会被实例化——实测表现就是首页有分类、点进去列表恒空。
-        //
-        // 因此类发现必须先于内置别名执行，与 Level 0 的注释保持同一意图。
-        if (jar != null && !jar.trim().isEmpty() && !hardStop()) {
-            Spider discovered = tryDiscoverFromJar(siteKey, cleanApi, ext, jar);
-            if (discovered != null) {
-                return discovered;
-            }
-        }
-
-        // Level 1: Try built-in Spiders in companion classpath
-        Class<?> builtinClass = findBuiltinSpiderClass(cleanApi);
-        if (builtinClass != null) {
-            try {
-                Object instance = builtinClass.getDeclaredConstructor().newInstance();
-                if (instance instanceof Spider) {
-                    return (Spider) instance;
+    /**
+     * 把原始 jar 里的非 class 条目（assets 等资源）补进转换产物。
+     *
+     * <p>dex2jar 只产出 {@code .class}，载荷自己带的 {@code assets/*.so}、{@code *.html}
+     * 会被整包丢掉，运行期就变成「Resource not found: assets/xxx.so」。
+     * 这类资源是载荷的一部分，不是构建产物，必须原样带过去。
+     */
+    private static void mergePayloadAssets(File source, File target) {
+        if (source == null || target == null || !source.isFile() || !target.isFile()) return;
+        try {
+            Map<String, String> env = new HashMap<>();
+            env.put("create", "false");
+            URI uri = URI.create("jar:" + target.toPath().toAbsolutePath().toUri());
+            int added = 0;
+            try (java.util.zip.ZipFile src = new java.util.zip.ZipFile(source);
+                 java.nio.file.FileSystem zip = java.nio.file.FileSystems.newFileSystem(uri, env)) {
+                java.nio.file.Path root = zip.getPath("/");
+                java.util.Enumeration<? extends java.util.zip.ZipEntry> en = src.entries();
+                while (en.hasMoreElements()) {
+                    java.util.zip.ZipEntry entry = en.nextElement();
+                    if (entry.isDirectory()) continue;
+                    String name = entry.getName();
+                    if (name.endsWith(".class") || name.startsWith("META-INF/")
+                            || name.equals("classes.dex") || name.endsWith(".dex")) {
+                        continue;
+                    }
+                    java.nio.file.Path out = root.resolve(name);
+                    if (java.nio.file.Files.exists(out)) continue;
+                    java.nio.file.Path dir = out.getParent();
+                    if (dir != null) java.nio.file.Files.createDirectories(dir);
+                    try (InputStream in = src.getInputStream(entry)) {
+                        java.nio.file.Files.copy(in, out);
+                    }
+                    added++;
                 }
-                return new GenericSpiderWrapper(instance, siteKey, ext);
-            } catch (Throwable t) {
-                System.err.println("[DexSpiderLoader] Failed to create built-in instance for " + cleanApi + ": " + t.getMessage());
             }
+            if (added > 0) {
+                System.out.println("[DexSpiderLoader] 补回载荷资源 " + added + " 个 -> " + target.getName());
+            }
+        } catch (Throwable t) {
+            // 补资源失败不该拖死站点：最多是运行期缺 so，交给上层报错
+            System.err.println("[DexSpiderLoader] 补回载荷资源失败（忽略）: " + t);
         }
-
-        // Level 2: Try loading from external Jar if specified
-        if (jar != null && !jar.trim().isEmpty()) {
-            // 下载/校验/解密这类「与类名无关」的硬失败，后续尝试必然同样失败：
-            // 直接短路，避免一次 getSpider 触发 3 次重复下载。
-            if (hardStop()) return null;
-            Spider fromJar = tryLoadFromJar(siteKey, cleanApi, ext, jar, false);
-            if (fromJar != null) {
-                return fromJar;
-            }
-            if (hardStop()) return null;
-            // Level 3: 类发现兜底。精确名（Xxx / XxxGuard / 裸名）全失败时，
-            // 扫描载荷内的 Spider 子类；**多候选一律放弃**，绝不「随便挑一个」。
-            Spider discovered = tryDiscoverFromJar(siteKey, cleanApi, ext, jar);
-            if (discovered != null) {
-                return discovered;
-            }
-        }
-
-        return null;
     }
 
-    /** 已记录「与类名无关」的硬失败阶段时，本次调用不再重试同一 jar。 */
+    /** 内置实现（companion classpath 里的 spider，含别名）；找不到返回 null。 */
+    private Spider createBuiltin(SpiderRequest r) throws Exception {
+        Class<?> builtinClass = findBuiltinSpiderClass(r.cleanApi());
+        if (builtinClass == null) return null;
+        Object instance = builtinClass.getDeclaredConstructor().newInstance();
+        if (instance instanceof Spider) return (Spider) instance;
+        return new GenericSpiderWrapper(instance, r.siteKey(), r.ext());
+    }
+
     private boolean hardStop() {
-        ParseStage.Failure failure = ParseStage.current();
-        if (failure == null) return false;
-        return ParseStage.DOWNLOAD.equals(failure.stage)
-                || ParseStage.MD5.equals(failure.stage)
-                || ParseStage.DECRYPT.equals(failure.stage)
-                || ParseStage.RESOLVE.equals(failure.stage);
+        SpiderAttempt attempt = spiderAttempt.get();
+        return Thread.currentThread().isInterrupted() || (attempt != null && attempt.failure != null);
+    }
+
+    private void blockAttempt(ParseStage.Failure failure) {
+        SpiderAttempt attempt = spiderAttempt.get();
+        if (attempt != null && attempt.failure == null) attempt.failure = failure;
+    }
+
+    private Spider attemptJar(java.util.concurrent.Callable<Spider> factory) {
+        ParseStage.Failure before = ParseStage.current();
+        try {
+            Spider result = factory.call();
+            ParseStage.Failure failure = ParseStage.current();
+            // A missing class can legitimately use an explicit builtin alias; a broken implementation cannot.
+            if (result == null && failure != null && failure != before && ParseStage.INSTANTIATE.equals(failure.stage)) {
+                blockAttempt(failure);
+            }
+            return result;
+        } catch (Throwable error) {
+            ParseStage.fail(ParseStage.INSTANTIATE, String.valueOf(error));
+            blockAttempt(ParseStage.current());
+            return null;
+        }
+    }
+
+    private ClassLoader acceptJarOutcome(JarOutcome outcome) {
+        if (outcome.failure != null) {
+            ParseStage.fail(outcome.failure.stage, outcome.failure.detail);
+            blockAttempt(outcome.failure);
+        } else {
+            ParseStage.clearFailure();
+        }
+        return outcome.loader;
     }
 
     /**
@@ -280,10 +412,7 @@ public class DexSpiderLoader {
         //   1) 服务先于 init 可用，init 里的 getOwnProxyUrl() 才有值可取；
         //   2) 即使端口注入失败（wexguard 的端口字段名与 yq 不同），服务本身仍然活着，
         //      载荷的端口探测（9978→10000）仍可能命中我们。
-        GuardProxyServer.ensureStarted(loader);
-        invokeSpiderJarInit(loader);
-        // InitOrigin.init 可能重写端口字段：幂等复核一次（见 GuardProxyServer.reassertPort）
-        GuardProxyServer.ensureStarted(loader);
+        if (!prepareLoader(loader)) return null;
 
         String stripped = cleanApi.endsWith("Guard") ? cleanApi.substring(0, cleanApi.length() - 5) : null;
         Class<?> spiderClass = null;
@@ -345,6 +474,8 @@ public class DexSpiderLoader {
         if (loader == null || loader == getClass().getClassLoader()) {
             return null;
         }
+        // 类发现命中的载荷与按名加载的同样需要 jar 级初始化，否则载荷静态状态为空
+        if (!prepareLoader(loader)) return null;
         List<String> names = spiderClasses(loader);
         if (names.isEmpty()) {
             return null;
@@ -472,12 +603,44 @@ public class DexSpiderLoader {
      * 加固(ftyguard/wexguard)解密载荷中没有 Init，但框架入口为 InitOrigin.init(Context)，
      * 必须同样注入，否则框架状态（Context/executor/本地代理）为 null，深层路径（播放/网盘）异常。
      */
-    private void invokeSpiderJarInit(ClassLoader loader) {
+    /**
+     * jar 级初始化，每个 loader 只做一次；按名加载与类发现两条路径都必须先经过这里。
+     *
+     * <p>加固载荷的播放地址是 {@code http://127.0.0.1:<ProxyOrigin 端口>/proxy?...}，手机端由宿主起本地服务；
+     * 桌面端必须先把服务起起来：服务先于 init 可用，init 里的 {@code getOwnProxyUrl()} 才有值可取；
+     * 即使端口注入失败，服务本身仍活着，载荷的端口探测（9978→10000）仍可能命中。
+     */
+    private boolean prepareLoader(ClassLoader loader) {
+        synchronized (loader) {
+            if (PREPARED.contains(loader)) return true;
+            GuardProxyServer.ensureStarted(loader);
+            // Proxy port injection is advisory: payloads can discover the running proxy themselves.
+            ParseStage.clearFailure();
+            if (!invokeSpiderJarInit(loader)) {
+                blockAttempt(ParseStage.current());
+                return false;
+            }
+            GuardProxyServer.ensureStarted(loader);
+            ParseStage.clearFailure();
+            PREPARED.add(loader);
+            return true;
+        }
+    }
+
+    private boolean invokeSpiderJarInit(ClassLoader loader) {
         if (!invokeStaticInit(loader, "com.github.catvod.spider.Init")) {
-            invokeStaticInit(loader, "com.github.catvod.spider.InitOrigin");
+            boolean recovered = invokeStaticInit(loader, "com.github.catvod.spider.InitOrigin");
+            if (!recovered && ParseStage.current() != null) return false;
+            ParseStage.clearFailure();
             injectGuardHostClass(loader);
             enableGuardHideUtils(loader);
         }
+        String payloadInit = PAYLOAD_INIT.get(loader);
+        if (payloadInit != null && !invokeStaticInit(loader, payloadInit)) {
+            if (ParseStage.current() == null) ParseStage.fail(ParseStage.INIT, "缺少载荷初始化入口: " + payloadInit);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -724,7 +887,7 @@ public class DexSpiderLoader {
         }
 
         // Try alias lookup
-        String alias = ALIAS_MAP.get(cleanApi.toLowerCase(Locale.ROOT));
+        String alias = rules.alias(cleanApi);
         if (alias != null) {
             try {
                 return Class.forName("com.github.catvod.spider." + alias);
@@ -759,10 +922,73 @@ public class DexSpiderLoader {
         ClassLoader cached = loaders.get(jarKey);
         if (cached != null) return cached;
 
+        java.util.concurrent.CompletableFuture<JarOutcome> mine = new java.util.concurrent.CompletableFuture<>();
+        java.util.concurrent.CompletableFuture<JarOutcome> running = JAR_LOADING.putIfAbsent(jarKey, mine);
+        if (running != null) {
+            try {
+                return acceptJarOutcome(running.get());
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return acceptJarOutcome(new JarOutcome(getClass().getClassLoader(),
+                        new ParseStage.Failure(ParseStage.RESOLVE, "等待载荷准备时已中止")));
+            } catch (java.util.concurrent.ExecutionException | java.util.concurrent.CancellationException ee) {
+                return acceptJarOutcome(new JarOutcome(getClass().getClassLoader(),
+                        new ParseStage.Failure(ParseStage.RESOLVE, "载荷准备失败: " + ee)));
+            }
+        }
+
+        JarOutcome outcome = null;
+        try {
+            cached = loaders.get(jarKey);
+            if (cached != null) {
+                outcome = new JarOutcome(cached, null);
+            } else {
+                JAR_PREP_SLOTS.acquire();
+                try {
+                    ParseStage.clearFailure();
+                    ClassLoader result = createLoader(jarSpec, jarKey);
+                    ParseStage.Failure failure = null;
+                    if (result == null || result == getClass().getClassLoader()) {
+                        failure = ParseStage.current();
+                        if (failure == null) failure = new ParseStage.Failure(ParseStage.RESOLVE, "载荷未准备完成");
+                    }
+                    outcome = new JarOutcome(result != null ? result : getClass().getClassLoader(), failure);
+                } finally {
+                    JAR_PREP_SLOTS.release();
+                }
+            }
+            return acceptJarOutcome(outcome);
+        } catch (Throwable error) {
+            if (error instanceof InterruptedException) Thread.currentThread().interrupt();
+            outcome = new JarOutcome(getClass().getClassLoader(),
+                    new ParseStage.Failure(ParseStage.RESOLVE, "载荷准备失败: " + error));
+            return acceptJarOutcome(outcome);
+        } finally {
+            // Failure travels with the singleflight result, not with its leader's ThreadLocal.
+            mine.complete(outcome != null ? outcome : new JarOutcome(getClass().getClassLoader(),
+                    new ParseStage.Failure(ParseStage.RESOLVE, "载荷准备中断")));
+            JAR_LOADING.remove(jarKey, mine);
+        }
+    }
+
+    private ClassLoader createLoader(String jarSpec, String jarKey) {
+        // 刚失败过的转换不重试：一次转换是 CPU/IO 重活，失败常在（磁盘、杀软、并发）。
+        // 冷却期内直接退回宿主 ClassLoader，具体原因由 ParseStage 记录给体检/日志。
+        Long failedAt = jvmJarFailures.get(jarKey);
+        if (failedAt != null) {
+            long left = JVM_JAR_RETRY_MS - (System.currentTimeMillis() - failedAt);
+            if (left > 0) {
+                ParseStage.fail(ParseStage.DEX2JAR,
+                        "dex→JVM 转换刚失败过，" + (left / 1000 + 1) + "s 后重试: " + jarSpec);
+                return getClass().getClassLoader();
+            }
+            jvmJarFailures.remove(jarKey, failedAt);
+        }
         URLClassLoader created;
         try {
             File localJar = resolveJarFile(jarSpec);
-            if (localJar == null || !localJar.exists()) {
+            if (localJar == null || !localJar.exists()
+                    || (ParseStage.current() != null && ParseStage.DECRYPT.equals(ParseStage.current().stage))) {
                 // **失败结果不缓存**：下载/解密可能是暂时性的（网络抖动、首次解密未完成）。
                 // 缓存成父加载器会让该 jar 在进程存活期内永远加载不到，表现为「站点一直空白」。
                 System.err.println("[DexSpiderLoader] Jar file could not be resolved: " + jarSpec);
@@ -770,19 +996,33 @@ public class DexSpiderLoader {
             }
 
             File usableJar = ensureJvmJar(localJar);
+            // 载荷若声明了 native 库（hardshell profile 的 crypto.*），登记给代调服务；其余 jar 直接忽略。
+            com.fongmi.companion.hardshell.PayloadCryptoService.remember(localJar);
             // 静态体检：载荷里若含 ARM-only 原生库（如壳的 libLoadNiMa.so），
             // 依赖它的站点在本机必然是 0 数据。这里只做一次、不阻塞加载。
             try {
                 com.fongmi.companion.selfcheck.PayloadInspector.reportOnce(localJar);
             } catch (Throwable ignored) {
             }
+            if (usableJar == null) {
+                // dex 容器没能转成 JVM jar：不能拿原始 dex 建 ClassLoader（里面没有 .class，
+                // 以前这样做还会被缓存住，整站在进程存活期内恒空）。退回宿主、不缓存，冷却后重试。
+                // 被看门狗中断导致的失败与载荷无关，不进冷却。
+                if (!Thread.currentThread().isInterrupted()) {
+                    jvmJarFailures.put(jarKey, System.currentTimeMillis());
+                }
+                return getClass().getClassLoader();
+            }
             created = new URLClassLoader(new URL[]{usableJar.toURI().toURL()}, getClass().getClassLoader());
+            String payloadInit = HardshellPipeline.payloadInit(localJar);
+            if (payloadInit != null) PAYLOAD_INIT.put(created, payloadInit);
         } catch (Throwable t) {
+            if (ParseStage.current() == null) ParseStage.fail(ParseStage.RESOLVE, jarSpec + ": " + t);
             System.err.println("[DexSpiderLoader] Failed to load jar: " + jarSpec + ", err: " + t.getMessage());
             return getClass().getClassLoader();
         }
-        ClassLoader existing = loaders.putIfAbsent(jarKey, created);
-        return existing != null ? existing : created;
+        loaders.put(jarKey, created);
+        return created;
     }
 
     /**
@@ -791,6 +1031,32 @@ public class DexSpiderLoader {
      * JVM class jar（dex2jar）。转换结果按源文件 md5 缓存，避免重复转换。
      */
     private File ensureJvmJar(File jarFile) {
+        // 同一个产物文件同时只允许一个线程转换；不同 jar 互不阻塞。
+        File jvmJar = jvmJarOf(jarFile);
+        synchronized (fileLock(jvmJar)) {
+            return convertToJvmJar(jarFile, jvmJar);
+        }
+    }
+
+    /** 转换产物路径：{@code <源名去 .jar>-jvm7<修补链戳>.jar}，放在 cacheDir。 */
+    private File jvmJarOf(File jarFile) {
+        String base = jarFile.getName();
+        if (base.endsWith(".jar")) base = base.substring(0, base.length() - 4);
+        // -jvm7：转换器改为 PreciseDex2jar（保留 new-instance 的真实分配类型，不再塌缩成父类）。
+        // 旧缓存（-jvm 至 -jvm6）是塌缩产物或基于启发式补点位的产物，直接换名作废。
+        // 加固载荷再带上修补链版本戳：修补器升级后旧产物自动作废（普通 jar 戳为空，缓存名不变）。
+        String stamp = HardshellPipeline.repairStamp(jarFile);
+        return new File(cacheDir, base + "-jvm7" + stamp + ".jar");
+    }
+
+    /**
+     * 只能在持有 {@code fileLock(jvmJar)} 时调用。转换与后处理都在独占工作目录里做，
+     * 全部完成后才原子发布为 {@code jvmJar}：读者只会看到「没有」或「完整」两种状态。
+     *
+     * @return 可直接加载的 jar（非 dex 容器原样返回）；转换失败返回 null（调用方不缓存）
+     */
+    private File convertToJvmJar(File jarFile, File jvmJar) {
+        File work = null;
         try {
             boolean hasDex = false;
             boolean hasClass = false;
@@ -809,19 +1075,18 @@ public class DexSpiderLoader {
                 return jarFile; // 标准 JVM jar 或非 dex 容器，直接使用
             }
 
-            String base = jarFile.getName();
-            if (base.endsWith(".jar")) base = base.substring(0, base.length() - 4);
-            // -jvm7：转换器改为 PreciseDex2jar（保留 new-instance 的真实分配类型，不再塌缩成父类）。
-            // 旧缓存（-jvm 至 -jvm6）是塌缩产物或基于启发式补点位的产物，直接换名作废。
-            File converted = new File(cacheDir, base + "-jvm7.jar");
-            if (converted.exists() && converted.length() > 0
-                    && converted.lastModified() >= jarFile.lastModified()) {
-                return converted;
+            if (jvmJar.exists() && jvmJar.length() > 0
+                    && jvmJar.lastModified() >= jarFile.lastModified()) {
+                return jvmJar;
             }
 
             System.out.println("[DexSpiderLoader] Converting dex jar to JVM jar: " + jarFile.getName());
             long t0 = System.currentTimeMillis();
-            File tmp = new File(cacheDir, base + "-jvm7.tmp.jar");
+            // 每次转换用自己的工作目录。以前所有线程共用同一个 tmp 与正式文件名，
+            // 并发 / 中断时互相截断、删除对方产物（日志里的 Dex2jar failed: null）。
+            work = newWorkDir(jvmJar.getName());
+            File converted = new File(work, jvmJar.getName());
+            File tmp = new File(work, "dex2jar.jar");
             PreciseDex2jar.Result result = PreciseDex2jar.convert(jarFile, tmp.toPath());
             if (tmp.exists() && tmp.length() > 0) {
                 // 修补 dex2jar 十六进制字符串表还原产生的 arraycopy 反向；
@@ -830,22 +1095,79 @@ public class DexSpiderLoader {
                     java.nio.file.Files.move(tmp.toPath(), converted.toPath(),
                             java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 }
+                // 载荷里的 assets（.so 等）不是 class，dex2jar 不会带出来，但载荷运行期依赖它们
+                // （aowu 的 MyCrypto 要从 assets/awenc-v8.so 加载 native），必须补回。
+                mergePayloadAssets(jarFile, converted);
+                // 加固载荷的 dex2jar 坍塌按「源声明的修补器链」修；哪些源需要修、
+                // 用哪几个修补器，全部由 hardshell 注册表的数据决定，这里不判断源。
+                // 未声明修补器的载荷一次都不跑，既有站点行为不变。
+                HardshellPipeline.repair(converted, jarFile);
                 tmp.delete();
-                System.out.println("[DexSpiderLoader] Dex2jar done in " + (System.currentTimeMillis() - t0)
-                        + "ms -> " + converted.getName() + " (" + converted.length() + " bytes, "
-                        + result.classes + " classes, 保留真实分配类型 " + result.keptMismatchedNew + " 处)");
                 converted.setLastModified(System.currentTimeMillis());
-                return converted;
+                publish(converted, jvmJar);
+                reportDegradedMethods(jvmJar);
+                System.out.println("[DexSpiderLoader] Dex2jar done in " + (System.currentTimeMillis() - t0)
+                        + "ms -> " + jvmJar.getName() + " (" + jvmJar.length() + " bytes, "
+                        + result.classes + " classes, 保留真实分配类型 " + result.keptMismatchedNew + " 处)");
+                return jvmJar;
             }
             ParseStage.fail(ParseStage.DEX2JAR, "dex2jar 输出为空: " + jarFile.getName());
             System.err.println("[DexSpiderLoader] Dex2jar produced empty output for: " + jarFile);
-            return jarFile;
+            return null;
         } catch (Throwable t) {
             ParseStage.fail(ParseStage.DEX2JAR, jarFile.getName() + ": " + t);
-            System.err.println("[DexSpiderLoader] Dex2jar failed: " + t.getMessage()
-                    + " (falling back to raw jar)");
-            return jarFile;
+            // 打印异常本身：并发失败时 getMessage() 常为 null，看不出是哪类错误。
+            System.err.println("[DexSpiderLoader] Dex2jar failed: " + t
+                    + "（本次不缓存，" + (JVM_JAR_RETRY_MS / 1000) + "s 后重试）");
+            return null;
+        } finally {
+            deleteWork(work);
         }
+    }
+
+    /**
+     * 转换产物体检：dex2jar 把转不出来的方法降级成「抛异常的桩」，桩里带 {@code d2j: } 原因文本。
+     * 这类方法只有运行期被调用才炸（实测表现为 /proxy 500 VerifyError），所以转换完就统计一次，
+     * 让日志里能直接看到「这份载荷有多少方法不可用、是哪些类」，不用等用户点播放才暴露。
+     */
+    private void reportDegradedMethods(File jar) {
+        if (jar == null || !jar.isFile()) return;
+        java.util.List<String> classes = new java.util.ArrayList<>();
+        int hits = 0;
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(jar)) {
+            java.util.Enumeration<? extends java.util.zip.ZipEntry> en = zip.entries();
+            while (en.hasMoreElements()) {
+                java.util.zip.ZipEntry e = en.nextElement();
+                if (e.isDirectory() || !e.getName().endsWith(".class")) continue;
+                byte[] b;
+                try (InputStream in = zip.getInputStream(e)) {
+                    b = readFully(in);
+                }
+                if (indexOfStubMarker(b) >= 0) {
+                    hits++;
+                    if (classes.size() < 8) classes.add(e.getName());
+                }
+            }
+        } catch (Throwable t) {
+            return; // 体检失败不影响加载
+        }
+        if (hits > 0) {
+            System.err.println("[DexSpiderLoader] 转换产物含 " + hits + " 个降级桩方法（运行期调用会抛 VerifyError）: "
+                    + classes);
+        }
+    }
+
+    /** 在 class 常量池里找 {@code d2j: } 字面量（降级桩的标志）。只做字节匹配，不解析 class。 */
+    private static int indexOfStubMarker(byte[] bytes) {
+        byte[] needle = {'d', '2', 'j', ':', ' '};
+        outer:
+        for (int i = 0; i <= bytes.length - needle.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (bytes[i + j] != needle[j]) continue outer;
+            }
+            return i;
+        }
+        return -1;
     }
 
     private File resolveJarFile(String jarSpec) {
@@ -886,6 +1208,13 @@ public class DexSpiderLoader {
                     System.out.println("[DexSpiderLoader] 命中本地守卫载荷: " + guardJar.getName());
                     return guardJar;
                 }
+                // 加固壳：逻辑在 native so 里，需先解出载荷 jar。
+                // 这里只查已解包缓存（壳 jar 还没下载），命中即免下载；不区分具体源。
+                File shellCached = HardshellPipeline.cached(cacheDir, md5(rawUrl));
+                if (shellCached != null) {
+                    System.out.println("[DexSpiderLoader] 命中本地加固载荷: " + shellCached.getName());
+                    return shellCached;
+                }
 
                 String filename = md5(rawUrl) + ".jar";
                 File cachedFile = new File(cacheDir, filename);
@@ -893,6 +1222,9 @@ public class DexSpiderLoader {
                     if (expectedMd5.isEmpty() || md5File(cachedFile).equalsIgnoreCase(expectedMd5)) {
                         // 壳已缓存但载荷还没解出来（老版本遗留 / 上次解密失败）→ 就地补解
                         GuardCryptoService.rememberShellJar(cachedFile);
+                        File shellPayload = HardshellPipeline.resolve(cacheDir, cachedFile,
+                                md5(rawUrl));
+                        if (shellPayload != null) return shellPayload;
                         File provisioned = GuardPayloadProvisioner.ensure(cacheDir, cachedFile, expectedMd5, rawUrl);
                         if (provisioned != null) return provisioned;
                         return cachedFile;
@@ -906,14 +1238,10 @@ public class DexSpiderLoader {
                     cachedFile.delete();
                 }
 
-                System.out.println("[DexSpiderLoader] Downloading jar from: " + rawUrl);
-                URL url = URI.create(rawUrl).toURL();
-                java.net.URLConnection conn = url.openConnection();
-                conn.setConnectTimeout(15000);
-                conn.setReadTimeout(60000);
-                try (InputStream in = conn.getInputStream()) {
-                    Files.copy(in, cachedFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                }
+                // 下载到独占临时文件、完成后原子发布。以前多个线程同时往同一个缓存文件
+                // Files.copy(REPLACE_EXISTING)，互相截断，表现为 Resolve error / md5 不符 /
+                // zip END header not found。
+                downloadTo(rawUrl, cachedFile, expectedMd5);
                 // 配置里带 ;md5; 就必须核对：否则「配置写错」会拿着一份错误内容一路跑到
                 // dex2jar/类加载才炸，定位成本极高（见方案 P1-1 的 md5 阶段）。
                 verifyDownloadedMd5(cachedFile, expectedMd5, rawUrl);
@@ -922,6 +1250,8 @@ public class DexSpiderLoader {
                 }
                 // 下载完才发现是加固壳：就地自动解密出载荷（首次约 10 s，之后按壳 md5 复用）
                 GuardCryptoService.rememberShellJar(cachedFile);
+                File shellPayload = HardshellPipeline.resolve(cacheDir, cachedFile, md5(rawUrl));
+                if (shellPayload != null) return shellPayload;
                 File provisioned = GuardPayloadProvisioner.ensure(cacheDir, cachedFile, expectedMd5, rawUrl);
                 if (provisioned != null) return provisioned;
                 return cachedFile;
@@ -935,6 +1265,100 @@ public class DexSpiderLoader {
             ParseStage.fail(ParseStage.RESOLVE, "jar 无法解析: " + jarSpec);
         }
         return null;
+    }
+
+    /**
+     * 下载到独占工作目录，完成后原子发布为 {@code target}。按目标文件加锁：等锁的线程
+     * 进来时先按缓存命中规则复查，前一个线程刚下好的就不再重下。
+     */
+    private void downloadTo(String rawUrl, File target, String expectedMd5) throws IOException {
+        synchronized (fileLock(target)) {
+            if (target.isFile() && target.length() > 0
+                    && (expectedMd5.isEmpty() || md5File(target).equalsIgnoreCase(expectedMd5))) {
+                return;
+            }
+            System.out.println("[DexSpiderLoader] Downloading jar from: " + rawUrl);
+            File work = newWorkDir(target.getName());
+            try {
+                File part = new File(work, target.getName());
+                URL url = URI.create(rawUrl).toURL();
+                java.net.URLConnection conn = url.openConnection();
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(60000);
+                try (InputStream in = conn.getInputStream()) {
+                    Files.copy(in, part.toPath());
+                }
+                publish(part, target);
+            } finally {
+                deleteWork(work);
+            }
+        }
+    }
+
+    private static Object fileLock(File target) {
+        return FILE_LOCKS.computeIfAbsent(target.getAbsolutePath(), k -> new Object());
+    }
+
+    /** 同卷原子改名；文件系统不支持原子移动时退回普通覆盖。 */
+    private static void publish(File done, File target) throws IOException {
+        try {
+            Files.move(done.toPath(), target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+            Files.move(done.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /** 在 cacheDir 下新建独占工作目录（顺手清掉异常退出留下的旧工作目录）。 */
+    private File newWorkDir(String label) throws IOException {
+        sweepStaleWork();
+        return Files.createTempDirectory(cacheDir.toPath(), WORK_PREFIX + label + "-").toFile();
+    }
+
+    /** 工作目录里只有本次写入的普通文件；删不掉的留给下次 {@link #sweepStaleWork}。 */
+    private static void deleteWork(File work) {
+        if (work == null) return;
+        File[] kids = work.listFiles();
+        if (kids != null) {
+            for (File kid : kids) {
+                kid.delete();
+            }
+        }
+        work.delete();
+    }
+
+    /**
+     * 清理超过 {@link #STALE_WORK_MS} 没有写入的工作目录（进程被杀 / 断电的残留），以及
+     * 旧版本固定文件名的转换临时文件。跳过符号链接与目录联接，不跟随。
+     */
+    private void sweepStaleWork() {
+        File[] entries = cacheDir.listFiles();
+        if (entries == null) return;
+        long cutoff = System.currentTimeMillis() - STALE_WORK_MS;
+        for (File entry : entries) {
+            String name = entry.getName();
+            boolean ours = name.startsWith(WORK_PREFIX);
+            boolean legacy = name.contains("-jvm7")
+                    && (name.endsWith(".tmp.jar") || name.endsWith(".tmp"));
+            if (!ours && !legacy) continue;
+            try {
+                java.nio.file.attribute.BasicFileAttributes attrs = Files.readAttributes(entry.toPath(),
+                        java.nio.file.attribute.BasicFileAttributes.class, java.nio.file.LinkOption.NOFOLLOW_LINKS);
+                if (attrs.isSymbolicLink() || attrs.isOther()) continue;
+                long newest = attrs.lastModifiedTime().toMillis();
+                File[] kids = attrs.isDirectory() ? entry.listFiles() : null;
+                if (kids != null) {
+                    for (File kid : kids) newest = Math.max(newest, kid.lastModified());
+                }
+                if (newest >= cutoff) continue;
+                if (attrs.isDirectory()) {
+                    if (ours) deleteWork(entry);
+                } else {
+                    entry.delete();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     /**

@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:ui';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:screen_retriever/screen_retriever.dart';
 import 'package:window_manager/window_manager.dart';
 import '../../../core/config/config_repository.dart';
@@ -12,6 +12,10 @@ import 'window_geometry_guard.dart';
 class DesktopWindowManager with WindowListener {
   final ConfigRepository _configRepository;
   final Future<void> Function()? beforeClose;
+
+  /// [beforeClose] 的总时限。窗口此时已经隐藏：钩子一旦卡住而不设上限，`destroy` 永远执行不到，
+  /// 用户以为软件关了、进程却一直留在后台。超时只记日志并继续关闭（抛错仍走「恢复窗口、可重试」）。
+  final Duration beforeCloseTimeout;
 
   final ValueNotifier<bool> isFullScreenNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<bool> isMaximizedNotifier = ValueNotifier<bool>(false);
@@ -46,8 +50,18 @@ class DesktopWindowManager with WindowListener {
   StreamSubscription<DesktopWindowConfig>? _configSubscription;
   static const Duration _debounceDuration = Duration(milliseconds: 500);
 
+  /// §52 一步式全屏（原生实现见 `windows/runner/window_fullscreen.h`）。
+  ///
+  /// 不用 window_manager 0.3.9 的 setFullScreen：它进全屏前先 SC_MAXIMIZE、
+  /// 退出时先 Restore，窗口会经过 2~3 个中间尺寸，表现为闪屏与画面跳动。
+  /// 全屏状态以 [isFullScreenNotifier] 为准（插件的 isFullScreen 不再反映真实状态）。
+  static const MethodChannel fullScreenChannel =
+      MethodChannel('xiugou/window_fullscreen');
+
   DesktopWindowManager(
-      {required ConfigRepository configRepository, this.beforeClose})
+      {required ConfigRepository configRepository,
+      this.beforeClose,
+      this.beforeCloseTimeout = const Duration(seconds: 5)})
       : _configRepository = configRepository;
 
   /// 初始化原生窗口尺寸、位置、标题与无边框属性
@@ -159,11 +173,15 @@ class DesktopWindowManager with WindowListener {
 
   /// 切换全屏播放状态
   Future<void> toggleFullScreen() async {
-    final currentlyFullScreen = await windowManager.isFullScreen();
-    final nextState = !currentlyFullScreen;
-    await windowManager.setFullScreen(nextState);
-    isFullScreenNotifier.value = nextState;
+    await _setFullScreen(!isFullScreenNotifier.value);
     _schedulePersistWindowGeometry();
+  }
+
+  /// 原生侧回传实际生效的状态（取不到显示器信息时保持原状）。
+  Future<void> _setFullScreen(bool value) async {
+    final applied = await fullScreenChannel
+        .invokeMethod<bool>('setFullScreen', {'isFullScreen': value});
+    isFullScreenNotifier.value = applied ?? value;
   }
 
   /// 切换置顶状态
@@ -183,10 +201,9 @@ class DesktopWindowManager with WindowListener {
     _pipBusy = true;
     _debounceSaveTimer?.cancel();
     try {
-      _pipRestoreFullScreen = await windowManager.isFullScreen();
+      _pipRestoreFullScreen = isFullScreenNotifier.value;
       if (_pipRestoreFullScreen) {
-        await windowManager.setFullScreen(false);
-        isFullScreenNotifier.value = false;
+        await _setFullScreen(false);
       }
       _pipRestoreMaximized = await windowManager.isMaximized();
       if (_pipRestoreMaximized) {
@@ -246,8 +263,7 @@ class DesktopWindowManager with WindowListener {
         isMaximizedNotifier.value = true;
       }
       if (_pipRestoreFullScreen) {
-        await windowManager.setFullScreen(true);
-        isFullScreenNotifier.value = true;
+        await _setFullScreen(true);
       }
       isPipNotifier.value = false;
       _schedulePersistWindowGeometry();
@@ -303,7 +319,9 @@ class DesktopWindowManager with WindowListener {
       // 隐藏失败（罕见）不阻断关闭链：窗口保持可见，行为退化为旧路径。
     }
     try {
-      await beforeClose?.call();
+      await beforeClose?.call().timeout(beforeCloseTimeout, onTimeout: () {
+        debugPrint('[xiugou-tv] 退出钩子超过 ${beforeCloseTimeout.inSeconds}s 未完成，继续关闭窗口');
+      });
       await _flushPersistWindowGeometry();
       await windowManager.destroy();
     } catch (error, stack) {
@@ -369,7 +387,7 @@ class DesktopWindowManager with WindowListener {
       final isMax =
           pip ? _pipRestoreMaximized : await windowManager.isMaximized();
       final isFull =
-          pip ? _pipRestoreFullScreen : await windowManager.isFullScreen();
+          pip ? _pipRestoreFullScreen : isFullScreenNotifier.value;
       final size = pip
           ? (_pipRestoreSize ?? const Size(1280, 720))
           : await windowManager.getSize();

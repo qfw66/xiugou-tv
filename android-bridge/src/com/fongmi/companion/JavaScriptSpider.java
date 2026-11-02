@@ -61,7 +61,10 @@ public final class JavaScriptSpider extends com.github.catvod.crawler.Spider {
             globalThis.utils_1 = {
               req: (url, options = {}) => {
                 const raw = __http.request(String(url), JSON.stringify(options || {}));
-                return typeof raw === 'string' ? JSON.parse(raw) : raw;
+                const res = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                // 宿主只回传一份 body（content），text 在这里做别名，避免大响应在 JSON 里复制两遍
+                if (res && res.text === undefined) res.text = res.content;
+                return res;
               },
               kitty: {
                 load: __kittyLoad,
@@ -96,13 +99,20 @@ public final class JavaScriptSpider extends com.github.catvod.crawler.Spider {
                 .allowHostAccess(HostAccess.ALL)
                 .option("engine.WarnInterpreterOnly", "false")
                 .build();
-        context.getBindings("js").putMember("__http", new HttpBridge());
-        context.getBindings("js").putMember("__htmlSelect", (ProxyExecutable) args ->
-                HtmlKit.select(args[0].asString(), args[1].asString()));
-        context.getBindings("js").putMember("__htmlFind", (ProxyExecutable) args ->
-                HtmlKit.find(args[0].asString(), args[1].asString()));
-        context.eval("js", BOOTSTRAP);
-        initialize(extraJson);
+        try {
+            context.getBindings("js").putMember("__http", new HttpBridge());
+            context.getBindings("js").putMember("__htmlSelect", (ProxyExecutable) args ->
+                    HtmlKit.select(args[0].asString(), args[1].asString()));
+            context.getBindings("js").putMember("__htmlFind", (ProxyExecutable) args ->
+                    HtmlKit.find(args[0].asString(), args[1].asString()));
+            context.eval("js", BOOTSTRAP);
+            initialize(extraJson);
+        } catch (RuntimeException | Error e) {
+            // 构造失败时调用方拿不到实例，也就无从 destroy：上下文（十几 MB）必须在这里关掉，
+            // 而失败结果不缓存，坏配置的站每访问一次就会再泄漏一份
+            context.close();
+            throw e;
+        }
     }
 
     @SuppressWarnings("unchecked")

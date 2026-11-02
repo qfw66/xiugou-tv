@@ -97,6 +97,10 @@ public class Canvas {
         return true;
     }
 
+    public boolean clipRect(int left, int top, int right, int bottom) {
+        return clipRect((float) left, (float) top, (float) right, (float) bottom);
+    }
+
     public boolean clipRect(RectF rect) {
         return clipRect(rect.left, rect.top, rect.right, rect.bottom);
     }

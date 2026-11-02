@@ -48,12 +48,21 @@ class SegmentsController extends ValueNotifier<SegmentsState> {
 
   File _cacheFile(String key) => File(p.join(_dir, '$key.json'));
 
-  Future<void> load({required String title, required String episodeName, required int episodeCount}) async {
-    final episode =
-        SegmentEpisodeKey.of(title: title, episodeName: episodeName, episodeCount: episodeCount);
+  Future<void> load(
+      {required String title,
+      required String episodeName,
+      required int episodeCount,
+      int? episodeIndex}) async {
+    final episode = SegmentEpisodeKey.of(
+        title: title,
+        episodeName: episodeName,
+        episodeCount: episodeCount,
+        episodeIndex: episodeIndex);
     if (episode == null) {
       _epoch++;
-      _set(const SegmentsState(phase: SegmentsPhase.unavailable, message: '识别不出集数，无法共享片段'));
+      _set(SegmentsState(
+          phase: SegmentsPhase.unavailable,
+          message: title.trim().isEmpty ? '片名为空，无法共享片段' : '识别不出集数（「${episodeName.trim()}」），无法共享片段'));
       return;
     }
     if (value.episode?.key == episode.key && value.phase != SegmentsPhase.failed) return;
@@ -173,6 +182,49 @@ class SegmentsController extends ValueNotifier<SegmentsState> {
         'submitted': [for (final c in res.submitted) c.key],
       }));
       await tmp.rename(f.path);
+    } catch (_) {}
+    if (!_cachePruned) {
+      _cachePruned = true;
+      unawaited(_pruneCache());
+    }
+  }
+
+  /// 片段缓存上限：超过 30 天的直接删；总量仍超 20 MB 时从最旧的删起。
+  static const Duration cacheMaxAge = Duration(days: 30);
+  static const int cacheMaxBytes = 20 * 1024 * 1024;
+  bool _cachePruned = false;
+
+  /// 只处理 `*.json` / `*.json.tmp`（同目录的 client_id 不动）；每个控制器生命周期最多跑一次，尽力而为。
+  Future<void> _pruneCache() async {
+    try {
+      final dir = Directory(_dir);
+      if (!await dir.exists()) return;
+      final now = DateTime.now();
+      final kept = <(File, DateTime, int)>[];
+      var total = 0;
+      await for (final e in dir.list(followLinks: false)) {
+        if (e is! File) continue;
+        final name = p.basename(e.path);
+        if (!name.endsWith('.json') && !name.endsWith('.json.tmp')) continue;
+        try {
+          final st = await e.stat();
+          if (now.difference(st.modified) > cacheMaxAge) {
+            await e.delete();
+          } else {
+            kept.add((e, st.modified, st.size));
+            total += st.size;
+          }
+        } catch (_) {}
+      }
+      if (total <= cacheMaxBytes) return;
+      kept.sort((a, b) => a.$2.compareTo(b.$2));
+      for (final (file, _, size) in kept) {
+        if (total <= cacheMaxBytes) break;
+        try {
+          await file.delete();
+          total -= size;
+        } catch (_) {}
+      }
     } catch (_) {}
   }
 

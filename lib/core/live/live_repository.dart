@@ -2,8 +2,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:path/path.dart' as p;
+import '../bounded_map.dart';
 import '../config/models/vod_config.dart';
 import '../config/windows_config_storage.dart';
+import '../net/http_client_factory.dart';
 import '../storage/data_restore_guard.dart';
 import 'live_playlist_parser.dart';
 import 'live_source.dart';
@@ -15,7 +17,9 @@ class LiveRepository {
   final Dio _dio;
   final bool _ownsDio;
   final _parser = const LivePlaylistParser();
+  /// 拉取失败时回退用的频道缓存（每源可达数千频道）；按 [_maxConfiguredSources] 淘汰最早的源。
   final _configuredCache = <String, List<Live>>{};
+  static const int _maxConfiguredSources = 16;
   List<LiveSource> _sources = const [];
   Future<void>? _initializing;
   Future<void> _writeQueue = Future.value();
@@ -28,7 +32,7 @@ class LiveRepository {
       : _storage = storage ?? WindowsConfigStorage(),
         _ownsDio = dio == null,
         _dio = dio ??
-            Dio(BaseOptions(
+            HttpClientFactory.createDio(BaseOptions(
               connectTimeout: const Duration(seconds: 10),
               receiveTimeout: const Duration(seconds: 20),
             ));
@@ -215,7 +219,7 @@ class LiveRepository {
         logo: source.logo,
         headers: source.headers,
       );
-      _configuredCache[key] = channels;
+      _configuredCache.putBounded(key, channels, _maxConfiguredSources);
       return channels;
     } catch (error) {
       final cached = _configuredCache[key];

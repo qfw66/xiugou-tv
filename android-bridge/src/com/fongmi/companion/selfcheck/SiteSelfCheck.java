@@ -2,6 +2,7 @@ package com.fongmi.companion.selfcheck;
 
 import com.fongmi.companion.DexSpiderLoader;
 import com.fongmi.companion.ParseStage;
+import com.fongmi.companion.agent.CallRegistry;
 import com.github.catvod.crawler.Spider;
 import com.github.catvod.crawler.SpiderNull;
 import org.json.JSONArray;
@@ -11,11 +12,13 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 逐站自检：对给定的站点列表跑一遍 `homeContent` + 前几个分类的 `categoryContent`，
@@ -73,9 +76,18 @@ public final class SiteSelfCheck {
             String error = "";
             String stage = "";
 
-            ExecutorService ex = newExecutor();
+            // 探测线程绑定独立取消标签：超时后能 Call.cancel() 掐断其 OkHttp 阻塞，线程归还共享池。
+            String probeTag = "selfcheck@" + key + "#" + PROBE_SEQ.incrementAndGet();
+            Future<Probe> future = null;
             try {
-                Future<Probe> future = ex.submit(() -> probeSite(loader, key, api, ext, jar, maxCategories));
+                future = PROBE_POOL.submit(() -> {
+                    String previous = CallRegistry.bind(probeTag);
+                    try {
+                        return probeSite(loader, key, api, ext, jar, maxCategories);
+                    } finally {
+                        CallRegistry.unbind(previous);
+                    }
+                });
                 Probe p = future.get(Math.max(5, timeoutSeconds), TimeUnit.SECONDS);
                 classes = p.classes;
                 best = p.best;
@@ -85,12 +97,18 @@ public final class SiteSelfCheck {
             } catch (java.util.concurrent.TimeoutException te) {
                 verdict = TIMEOUT;
                 error = "timeout " + timeoutSeconds + "s";
+            } catch (java.util.concurrent.RejectedExecutionException busy) {
+                verdict = FAILED;
+                error = "自检线程已满（前序站点仍阻塞在非 HTTP 调用上）";
             } catch (Throwable t) {
                 verdict = FAILED;
                 Throwable cause = (t.getCause() != null) ? t.getCause() : t;
                 error = cause.getClass().getSimpleName() + ": " + trim(cause.getMessage(), 160);
             } finally {
-                ex.shutdownNow();
+                if (future != null && !future.isDone()) {
+                    CallRegistry.cancel(probeTag);
+                    future.cancel(true);
+                }
             }
 
             row.put("verdict", verdict);
@@ -235,6 +253,11 @@ public final class SiteSelfCheck {
         return out;
     }
 
+    private static final AtomicLong PROBE_SEQ = new AtomicLong();
+
+    /** 共享有界探测池：超时后仍不可中止的线程最多占满上限，之后的站直接判 FAILED，不再无限新建线程。 */
+    private static final ExecutorService PROBE_POOL = newExecutor();
+
     private static ExecutorService newExecutor() {
         AtomicInteger seq = new AtomicInteger();
         ThreadFactory tf = r -> {
@@ -242,7 +265,8 @@ public final class SiteSelfCheck {
             t.setDaemon(true);
             return t;
         };
-        return Executors.newSingleThreadExecutor(tf);
+        return new ThreadPoolExecutor(0, 8, 60L, TimeUnit.SECONDS,
+                new SynchronousQueue<Runnable>(), tf, new ThreadPoolExecutor.AbortPolicy());
     }
 
     private static String trim(String s, int max) {

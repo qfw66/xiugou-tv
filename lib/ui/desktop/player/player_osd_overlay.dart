@@ -26,15 +26,21 @@ class OsdController extends ChangeNotifier {
   OsdMessage? get currentMessage => _currentMessage;
   bool get isVisible => _currentMessage != null;
 
-  void show(IconData icon, String text, {String? subText}) {
+  /// [persistent] 为 true 时不自动消失，直到 [dismiss] 或下一条提示（§14 长按倍速）。
+  void show(IconData icon, String text, {String? subText, bool persistent = false}) {
     _dismissTimer?.cancel();
     _currentMessage = OsdMessage(icon: icon, text: text, subText: subText);
     notifyListeners();
 
-    _dismissTimer = Timer(_displayDuration, () {
-      _currentMessage = null;
-      notifyListeners();
-    });
+    if (persistent) return;
+    _dismissTimer = Timer(_displayDuration, dismiss);
+  }
+
+  void dismiss() {
+    _dismissTimer?.cancel();
+    if (_currentMessage == null) return;
+    _currentMessage = null;
+    notifyListeners();
   }
 
   @override

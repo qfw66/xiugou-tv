@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import '../config/models/vod_config.dart';
+import '../net/http_client_factory.dart';
 import '../player/models/player_state.dart';
 
 /// 视频播放地址解析引擎 (处理第三方解析规则与直链提取)
@@ -9,7 +10,7 @@ class ParseEngine {
 
   ParseEngine({Dio? dio})
       : _dio = dio ??
-            Dio(
+            HttpClientFactory.createDio(
               BaseOptions(
                 connectTimeout: const Duration(seconds: 10),
                 receiveTimeout: const Duration(seconds: 12),

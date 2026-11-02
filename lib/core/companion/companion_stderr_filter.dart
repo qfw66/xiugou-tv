@@ -1,3 +1,5 @@
+import '../bounded_map.dart';
+
 /// 把 Java 侧 `printStackTrace()` 刷出来的多行堆栈折叠成一行。
 ///
 /// <p>背景：加固载荷（ftyguard/wexguard）里大量 `catch (Exception e) { e.printStackTrace(); }`，
@@ -16,7 +18,10 @@ class CompanionStderrFilter {
   /// 同一异常超过该次数后降频（每 N 次打一条）。
   final int spamThreshold;
 
+  /// 异常首行 → 次数。首行常带 URL / id 等变量，键空间随运行时长增长，按 [_maxHeaders] 淘汰；
+  /// 被淘汰的首行只是降频计数从头开始，不影响正确性。
   final Map<String, int> _counts = <String, int>{};
+  static const int _maxHeaders = 256;
 
   String? _header;
   int _frames = 0;
@@ -59,7 +64,7 @@ class CompanionStderrFilter {
     _frames = 0;
 
     final nth = (_counts[header] ?? 0) + 1;
-    _counts[header] = nth;
+    _counts.putBounded(header, nth, _maxHeaders);
     if (nth > spamThreshold && nth % spamThreshold != 0) {
       return const <String>[];
     }

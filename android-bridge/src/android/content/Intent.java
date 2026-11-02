@@ -177,6 +177,15 @@ public class Intent {
         return this;
     }
 
+    /**
+     * 桌面端能处理的只有带数据地址的跳转（交给宿主打开）与显式组件；其余与 Android 「无应用可处理」一致返回 null。
+     */
+    public ComponentName resolveActivity(android.content.pm.PackageManager pm) {
+        if (getComponent() != null) return getComponent();
+        if (getData() != null) return new ComponentName("com.fongmi.companion", "UriHandler");
+        return null;
+    }
+
     public static Intent createChooser(Intent target, CharSequence title) {
         return target;
     }

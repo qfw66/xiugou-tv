@@ -21,6 +21,10 @@ class AutoLineSwitchController {
   final AutoSwitchAttempt onCandidate;
   final AutoSwitchNotice onNotice;
   final void Function(bool busy)? onBusyChanged;
+
+  /// §14 用户开关：返回 false 时 [arm] 不建立会话，出错只走常规提示。
+  /// 每次 arm 时现读，设置页改动对下一次起播立即生效。
+  final bool Function()? isEnabled;
   final Duration debounce;
   final Duration earlyWindow;
 
@@ -32,6 +36,7 @@ class AutoLineSwitchController {
   Timer? _timer;
   _ArmedState? _armed;
   bool _inFlight = false;
+  bool _attemptPending = false;
   bool _disposed = false;
 
   AutoLineSwitchController({
@@ -40,6 +45,7 @@ class AutoLineSwitchController {
     required this.onCandidate,
     required this.onNotice,
     this.onBusyChanged,
+    this.isEnabled,
     this.debounce = const Duration(seconds: 2),
     this.earlyWindow = const Duration(seconds: 15),
     this.progressThreshold = const Duration(seconds: 1),
@@ -61,7 +67,8 @@ class AutoLineSwitchController {
   }) {
     if (_disposed) return;
     _cancelTimer();
-    if (sources.length <= 1) {
+    _attemptPending = false;
+    if (sources.length <= 1 || isEnabled?.call() == false) {
       _armed = null;
       return;
     }
@@ -82,6 +89,13 @@ class AutoLineSwitchController {
     }
   }
 
+  /// 恢复切集等临时忙碌态后，继续已到期但被互斥守卫挡下的尝试。
+  void resumePendingAttempt() {
+    if (!_attemptPending || _disposed || _inFlight) return;
+    _attemptPending = false;
+    unawaited(_attempt());
+  }
+
   /// 永久性错误（域名不解析 / HTTP 4xx-5xx / 格式不支持）重试无意义：
   /// 跳过防抖立即换线；其余（瞬时 / 未知）保留防抖，给「其实还能播」留窗口。
   void _scheduleAttempt() {
@@ -93,9 +107,18 @@ class AutoLineSwitchController {
     _timer ??= Timer(debounce, _attempt);
   }
 
+  /// 当前播放内容未变、仅异步事务推进代际时重绑定 epoch。
+  /// 保留原起播位置、已尝试线路和候选状态，避免失败恢复时重开 15 秒窗口。
+  void rebindEpoch(int epoch) {
+    final armed = _armed;
+    if (armed == null || _disposed) return;
+    _armed = armed.copyWith(epoch: epoch);
+  }
+
   /// 关闭播放 / 切换会话 / 刷新开始时调用。
   void disarm() {
     _cancelTimer();
+    _attemptPending = false;
     _armed = null;
   }
 
@@ -127,8 +150,7 @@ class AutoLineSwitchController {
       _armed = null;
       return;
     }
-    if (_timer != null &&
-        position >= armed.startPosition + progressThreshold) {
+    if (_timer != null && position >= armed.startPosition + progressThreshold) {
       // 错误后位置确实前进（≥1s）：说明还能播，取消本次换线。
       _cancelTimer();
     }
@@ -138,7 +160,12 @@ class AutoLineSwitchController {
     _timer = null;
     final armed = _armed;
     if (armed == null || _inFlight || _disposed) return;
-    if (!canSwitch(armed.epoch)) return;
+    if (!canSwitch(armed.epoch)) {
+      // Timer is already elapsed. Keep the intent so a transient switching gate
+      // cannot consume the only error event from the engine.
+      _attemptPending = true;
+      return;
+    }
 
     final position = engine.position;
     if (position >= armed.startPosition + earlyWindow) return;
@@ -166,8 +193,7 @@ class AutoLineSwitchController {
             : '';
         onNotice('线路「${armed.currentSourceName}」不可用，'
             '正在尝试「${candidate.source.name}」$basis…');
-        final switched =
-            await onCandidate(candidate, position, armed.epoch);
+        final switched = await onCandidate(candidate, position, armed.epoch);
         if (!canSwitch(armed.epoch)) return;
         tried.add(candidate.key);
         _armed = armed.copyWith(tried: {...tried});
@@ -196,6 +222,7 @@ class AutoLineSwitchController {
   void dispose() {
     _disposed = true;
     _cancelTimer();
+    _attemptPending = false;
     _armed = null;
     _statusSubscription?.cancel();
     _positionSubscription?.cancel();
@@ -230,6 +257,7 @@ class _ArmedState {
     String? currentSourceName,
     String? currentEpisodeUrl,
     Set<String>? tried,
+    int? epoch,
   }) {
     return _ArmedState(
       sources: sources,
@@ -238,7 +266,7 @@ class _ArmedState {
       episodeName: episodeName,
       currentEpisodeUrl: currentEpisodeUrl ?? this.currentEpisodeUrl,
       tried: tried ?? this.tried,
-      epoch: epoch,
+      epoch: epoch ?? this.epoch,
       startPosition: startPosition,
     );
   }

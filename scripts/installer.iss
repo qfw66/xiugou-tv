@@ -1,6 +1,6 @@
 ; Script generated for XiugouTV Windows x64 Installer
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.0.4"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\build\windows\x64\runner\Release"
@@ -13,6 +13,9 @@
 AppId={{E88D6F21-6A2F-4E8C-B8FB-5A86FA8F0C42}}
 AppName=XiugouTV
 AppVersion={#AppVersion}
+; 安装包自身的版本资源（FileVersion / ProductVersion），发布门禁据此核对版本号。
+VersionInfoVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}
 AppPublisher=XiugouTV Project
 AppPublisherURL=https://github.com/qfw66/xiugou-tv
 AppSupportURL=https://github.com/qfw66/xiugou-tv
@@ -20,6 +23,9 @@ AppUpdatesURL=https://github.com/qfw66/xiugou-tv
 DefaultDirName={autopf}\XiugouTV
 DefaultGroupName=XiugouTV
 DisableProgramGroupPage=yes
+; 默认仍按管理员装到 Program Files；仅允许命令行 /CURRENTUSER 免提权安装，
+; 供发布门禁静默装到临时目录做启动冒烟（向导界面不变）。
+PrivilegesRequiredOverridesAllowed=commandline
 LicenseFile=
 OutputDir={#OutputDir}
 OutputBaseFilename=xiugou-tv-windows-x64-v{#AppVersion}-setup

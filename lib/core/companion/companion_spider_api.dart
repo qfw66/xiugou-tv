@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import '../api/models/vod_models.dart';
 import '../api/search_cancel_token.dart';
 import '../config/models/vod_config.dart';
+import '../net/http_client_factory.dart';
 import 'companion_process_manager.dart';
 import 'site_self_check_report.dart';
 
@@ -12,12 +13,15 @@ class CompanionSpiderApi {
   final CompanionProcessManager processManager;
   final Dio _dio;
 
+  static const rpcReceiveTimeout = Duration(seconds: 75);
+  static const rpcServerTimeout = Duration(seconds: 60);
+
   CompanionSpiderApi({
     CompanionProcessManager? processManager,
     Dio? dio,
   })  : processManager = processManager ?? CompanionProcessManager(),
         _dio = dio ??
-            Dio(BaseOptions(
+            HttpClientFactory.createDio(BaseOptions(
               connectTimeout: const Duration(seconds: 15),
               receiveTimeout: const Duration(seconds: 20),
             ));
@@ -25,7 +29,7 @@ class CompanionSpiderApi {
   /// ext 已在模型层规范化为 JSON 字符串（对象形态会被序列化），可直接下发。
   String _extensionJson(Site site) => site.ext ?? '';
 
-  Future<bool> loadSpider(Site site) async {
+  Future<bool> loadSpider(Site site, {Duration? receiveTimeout}) async {
     if (!processManager.isRunning) return false;
     processManager.notifyActivity();
 
@@ -37,7 +41,12 @@ class CompanionSpiderApi {
           'api': site.api,
           'ext': _extensionJson(site),
           'jar': site.jar ?? '',
+          // 唯一取消标签：同站并发加载时，先结束的那次收尾不会误取消另一次的在途请求。
+          'rpcId': 'load@${site.key}#${++_rpcSeq}',
         },
+        // 冷启动首次要为加固载荷做「下载 → 解密 → dex2jar」，实测 10~20 秒，
+        // 默认 20 秒的接收超时会把「正在正常加载」误判成失败（预热横幅一直红）。
+        options: receiveTimeout == null ? null : Options(receiveTimeout: receiveTimeout),
       );
       if (res.statusCode == 200) {
         final dynamic data =
@@ -50,6 +59,21 @@ class CompanionSpiderApi {
     } catch (_) {
       return false;
     }
+  }
+
+  /// 换配置后释放伴随服务里旧配置的 spider、类加载器、代理端口与密码服务子进程。
+  ///
+  /// 伴随服务未运行时直接返回（下次懒启动的进程本来就是干净的）；失败静默，
+  /// 最坏情况只是旧资源要等空闲停机或退出时才释放，不影响新配置使用。
+  Future<void> resetSpiders() async {
+    if (!processManager.isRunning) return;
+    try {
+      await _dio.post<dynamic>(
+        '${processManager.baseUrl}/spider/reset',
+        data: const <String, dynamic>{},
+        options: Options(receiveTimeout: const Duration(seconds: 10)),
+      );
+    } catch (_) {}
   }
 
   /// 把设置里的「站点自检」总开关同步给伴随服务（运行期生效，无需重启进程）。
@@ -152,11 +176,12 @@ class CompanionSpiderApi {
 
   /// 获取视频详情
   Future<VodDetail?> fetchDetail(Site site, {required String vodId}) async {
-    final rawJson = await _callSpider(
+    final rawJson = await _callSpiderWithRetry(
       site: site,
       method: 'detailContent',
       params: {'id': vodId},
     );
+    if (rawJson.trim().isEmpty) return null;
     try {
       final decoded = jsonDecode(rawJson);
       if (decoded is Map && decoded['list'] is List) {
@@ -171,7 +196,7 @@ class CompanionSpiderApi {
         }
       }
     } on FormatException {
-      return null;
+      throw const FormatException('站源详情响应格式无效');
     }
     return null;
   }
@@ -198,7 +223,7 @@ class CompanionSpiderApi {
   /// 获取 Spider 播放结果；不将空响应或影片标识伪装成媒体地址。
   Future<SpiderPlayResult> fetchPlayResult(Site site,
       {required String flag, required String id}) async {
-    final raw = await _callSpider(
+    final raw = await _callSpiderWithRetry(
       site: site,
       method: 'playerContent',
       params: {'flag': flag, 'id': id},
@@ -212,8 +237,8 @@ class CompanionSpiderApi {
     }
     if (decoded is String) decoded = {'url': decoded, 'parse': 0};
     if (decoded is! Map) throw const FormatException('Spider 播放响应格式无效');
-    final url = decoded['url'];
-    if (url is! String || url.trim().isEmpty) {
+    final url = selectSpiderPlayUrl(decoded['url']);
+    if (url == null) {
       throw const FormatException('Spider 未返回播放地址');
     }
     final parse = int.tryParse('${decoded['parse'] ?? 0}');
@@ -263,14 +288,35 @@ class CompanionSpiderApi {
   /// 每次 RPC 的唯一序号，用于生成取消标签（见 CallRegistry 的 rpcId 口径）。
   static int _rpcSeq = 0;
 
+  Future<String> _callSpiderWithRetry({
+    required Site site,
+    required String method,
+    required Map<String, String> params,
+  }) async {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        final raw = await _callSpider(site: site, method: method, params: params);
+        if (raw.trim().isNotEmpty || attempt == 1) return raw;
+      } on SpiderCallException catch (error) {
+        // Only transient service faults are worth a second attempt; timeouts and payload/upstream
+        // failures would just double the user's wait.
+        final retryable = const {'empty', 'service', 'transport'}.contains(error.stage) || error.httpStatus == 503;
+        if (attempt == 1 || !retryable) rethrow;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 800));
+    }
+    return '';
+  }
+
   Future<String> _callSpider({
     required Site site,
     required String method,
     required Map<String, String> params,
     SearchCancelToken? cancelToken,
+    Duration? receiveTimeout,
   }) async {
-    if (!processManager.isRunning) return '';
     if (cancelToken?.isCancelled ?? false) return '';
+    if (!processManager.isRunning) throw const SpiderCallException('站源服务尚未就绪，请重试', stage: 'service');
     processManager.notifyActivity();
 
     // 点叉后立即放弃这次 RPC：Dio 中止连接，Dart 侧不再等满 20 秒。
@@ -279,7 +325,9 @@ class CompanionSpiderApi {
     // 线程仍卡在 jar 里 OkHttp 的同步请求上，继续占着 callPool 的槽（上限 64，
     // 满了直接 503）。所以必须用同一个 rpcId 让 companion 把那次请求真正 cancel()。
     final rpcId = '$method@${site.key}#${++_rpcSeq}';
+    var finished = false;
     cancelToken?.onCancel(() {
+      if (finished) return;
       dioCancelToken.cancel('搜索已取消');
       unawaited(_cancelRemote(rpcId));
     });
@@ -292,6 +340,7 @@ class CompanionSpiderApi {
         'jar': site.jar ?? '',
         'method': method,
         'rpcId': rpcId,
+        'timeoutMs': '${rpcServerTimeout.inMilliseconds}',
         ...params,
       };
 
@@ -299,22 +348,41 @@ class CompanionSpiderApi {
         '${processManager.baseUrl}/spider/call',
         data: reqBody,
         cancelToken: dioCancelToken,
+        options: Options(
+          receiveTimeout: receiveTimeout ?? rpcReceiveTimeout,
+          validateStatus: (status) => status != null,
+        ),
       );
 
-      if (res.statusCode == 200) {
-        final dynamic data =
-            res.data is String ? jsonDecode(res.data as String) : res.data;
-        if (data is Map && data['code'] == 0) {
-          final dynamic rawData = data['data'];
-          if (rawData is String) {
-            return rawData;
-          } else if (rawData is Map || rawData is List) {
-            return jsonEncode(rawData);
-          }
-        }
+      if (cancelToken?.isCancelled ?? false) return '';
+      final dynamic data = res.data is String ? jsonDecode(res.data as String) : res.data;
+      if (data is! Map) throw const FormatException('站源服务响应格式无效');
+      if (res.statusCode != 200 || data['code'] != 0) {
+        final stage = data['stage']?.toString() ?? (res.statusCode == 504 ? 'timeout' : null);
+        final message = switch (stage) {
+          'download' || 'resolve' || 'md5' => '站点资源加载失败，请稍后重试',
+          'decrypt' || 'dex2jar' || 'init' || 'instantiate' || 'class' => '站点插件加载失败，请重试或更换站源',
+          'timeout' => '站源请求超时，请稍后重试',
+          'empty' || 'upstream' || 'interaction' => data['detail']?.toString() ?? '站源未返回内容',
+          _ => res.statusCode == 503 ? '站源服务繁忙，请稍后重试' : data['error']?.toString() ?? '站源请求失败',
+        };
+        throw SpiderCallException(message, stage: stage, detail: data['detail']?.toString(),
+            httpStatus: res.statusCode, siteKey: site.key, method: method, rpcId: rpcId);
       }
-    } catch (_) {}
-    return '';
+      final dynamic rawData = data['data'];
+      if (rawData is String) return rawData;
+      if (rawData is Map || rawData is List) return jsonEncode(rawData);
+      throw const FormatException('站源服务未返回有效数据');
+    } on DioException catch (error) {
+      if (CancelToken.isCancel(error) || (cancelToken?.isCancelled ?? false)) return '';
+      final timeout = [DioExceptionType.receiveTimeout, DioExceptionType.sendTimeout, DioExceptionType.connectionTimeout].contains(error.type);
+      if (timeout) unawaited(_cancelRemote(rpcId));
+      throw SpiderCallException(timeout ? '站源请求超时，请稍后重试' : '无法连接站源服务，请重试',
+          stage: timeout ? 'timeout' : 'transport', httpStatus: error.response?.statusCode,
+          siteKey: site.key, method: method, rpcId: rpcId);
+    } finally {
+      finished = true;
+    }
   }
 
   /// 通知 companion 中止一次在途 RPC。尽力而为：这里失败不影响调用方，
@@ -380,13 +448,38 @@ class CompanionSpiderApi {
           list: items,
         );
       }
-    } catch (_) {}
-
-    return const VodPageResult.empty();
+    } on FormatException {
+      throw const FormatException('站源返回的数据格式无效');
+    }
+    throw const FormatException('站源返回的数据格式无效');
   }
 }
 
 /// Spider 返回的播放意图；需要解析的页面地址不能直接交给播放器。
+/// 从 playerContent 的 `url` 字段取实际播放地址。
+///
+/// FongMi / TVBox 允许 `url` 是多清晰度数组 `[名称, 地址, 名称, 地址, ...]`
+/// （嗷呜「嗷嗚┃动漫」返回 `["4K", ..., "1080P", ...]`）。以前只认字符串，这类站源一律
+/// 报「Spider 未返回播放地址」。现在与 FongMi 默认一致取第一档；数组里只有地址（无名称）
+/// 时取第一个像地址的元素。都取不到返回 null。
+String? selectSpiderPlayUrl(Object? raw) {
+  if (raw is String) {
+    final value = raw.trim();
+    return value.isEmpty ? null : value;
+  }
+  if (raw is! List) return null;
+  final items = raw.map((e) => e?.toString().trim() ?? '').toList();
+  bool looksLikeUrl(String v) => v.contains('://');
+  // 成对数组：奇数位是地址
+  for (var i = 1; i < items.length; i += 2) {
+    if (looksLikeUrl(items[i])) return items[i];
+  }
+  for (final item in items) {
+    if (looksLikeUrl(item)) return item;
+  }
+  return null;
+}
+
 class SpiderPlayResult {
   final String url;
   final bool needsParse;
@@ -394,4 +487,21 @@ class SpiderPlayResult {
 
   const SpiderPlayResult(
       {required this.url, required this.needsParse, this.headers = const {}});
+}
+
+/// 伴随服务给出的明确失败原因（SpiderServer 的 code/stage/detail 契约）。
+/// toString 直接返回原因，便于上层 `'$e'` 拼出可读提示。
+class SpiderCallException implements Exception {
+  const SpiderCallException(this.message, {this.stage, this.detail, this.httpStatus, this.siteKey, this.method, this.rpcId});
+
+  final String message;
+  final String? stage;
+  final String? detail;
+  final int? httpStatus;
+  final String? siteKey;
+  final String? method;
+  final String? rpcId;
+
+  @override
+  String toString() => message;
 }

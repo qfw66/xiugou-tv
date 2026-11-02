@@ -7,6 +7,7 @@ import '../storage/data_restore_guard.dart';
 import 'models/config_source_entry.dart';
 import 'models/appearance_preferences.dart';
 import 'models/history_preferences.dart';
+import 'models/network_preferences.dart';
 import 'models/play_skip_preferences.dart';
 import 'models/search_preferences.dart';
 import 'models/self_check_preferences.dart';
@@ -52,6 +53,11 @@ abstract class SettingsStorage {
   Future<AppearancePreferences?> readAppearancePreferences();
   Future<void> saveAppearancePreferences(AppearancePreferences preferences);
 
+  /// 读取网络偏好（§14 安全 DNS）；文件不存在或内容为空时返回 null（按「关闭」处理），
+  /// 版本 / 结构 / 字段类型非法时抛出 [FormatException]（调用方保留原文件并提示）
+  Future<NetworkPreferences?> readNetworkPreferences();
+  Future<void> saveNetworkPreferences(NetworkPreferences preferences);
+
   /// 缺省实现：写入 %APPDATA%/XiugouTV
   factory SettingsStorage.windows({Future<Directory> Function()? directory}) = FileSettingsStorage;
 }
@@ -66,6 +72,7 @@ class FileSettingsStorage implements SettingsStorage {
   static const String selfCheckPreferencesFileName = 'self_check_preferences.json';
   static const String playSkipPreferencesFileName = 'play_skip_preferences.json';
   static const String appearancePreferencesFileName = 'appearance_preferences.json';
+  static const String networkPreferencesFileName = 'network_preferences.json';
 
   final Future<Directory> Function() _directory;
   static int _temporarySequence = 0;
@@ -225,6 +232,24 @@ class FileSettingsStorage implements SettingsStorage {
   @override
   Future<void> saveAppearancePreferences(AppearancePreferences preferences) async {
     await _atomicWrite(await _file(appearancePreferencesFileName), jsonEncode(preferences.toJson()));
+  }
+
+  @override
+  Future<NetworkPreferences?> readNetworkPreferences() async {
+    final decoded = await _readJson(networkPreferencesFileName);
+    if (decoded == null) return null;
+    if (decoded is! Map) throw const FormatException('网络偏好格式无效');
+    final map = <String, dynamic>{};
+    for (final entry in decoded.entries) {
+      if (entry.key is! String) throw const FormatException('网络偏好格式无效');
+      map[entry.key as String] = entry.value;
+    }
+    return NetworkPreferences.fromJson(map);
+  }
+
+  @override
+  Future<void> saveNetworkPreferences(NetworkPreferences preferences) async {
+    await _atomicWrite(await _file(networkPreferencesFileName), jsonEncode(preferences.toJson()));
   }
 
   /// 同目录替换成功前不删除旧文件；失败时尽力清理临时文件。

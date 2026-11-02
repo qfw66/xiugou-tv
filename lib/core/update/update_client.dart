@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:dio/dio.dart';
 
+import '../net/http_client_factory.dart';
 import 'update_manifest.dart';
 
 /// 拉取更新清单的失败类型（供 UI 分型提示，不做字符串匹配）。
@@ -50,7 +51,7 @@ class UpdateClient {
   UpdateClient({Dio? dio})
       : _ownsDio = dio == null,
         _dio = dio ??
-            Dio(BaseOptions(
+            HttpClientFactory.createDio(BaseOptions(
               connectTimeout: const Duration(seconds: 8),
               receiveTimeout: const Duration(seconds: 20),
               headers: const {

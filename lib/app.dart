@@ -10,10 +10,12 @@ import 'core/api/cms_json_api.dart';
 import 'core/api/douban_repository.dart';
 import 'core/api/models/vod_models.dart';
 import 'core/api/parse_engine.dart';
+import 'core/api/play_failure_text.dart';
 import 'core/api/search_cancel_token.dart';
 import 'core/api/search_engine.dart';
 import 'core/app_info.dart';
 import 'core/companion/companion_ui_channel.dart';
+import 'core/companion/companion_spider_api.dart';
 import 'core/api/site_api.dart';
 import 'core/config/config_repository.dart';
 import 'core/config/models/builtin_sites.dart';
@@ -163,6 +165,7 @@ final updateServiceProvider = Provider<UpdateService>((ref) {
 
 final updateDownloaderProvider = Provider<UpdateDownloader>((ref) {
   final downloader = UpdateDownloader();
+  unawaited(downloader.pruneStaleOnStartup());
   ref.onDispose(downloader.close);
   return downloader;
 });
@@ -188,14 +191,32 @@ Future<void> showUpdateDialog(BuildContext context) => showDialog<void>(
       builder: (_) => const _UpdateDialogHost(),
     );
 
-
 final cmsApiProvider = Provider<CmsJsonApi>((ref) => CmsJsonApi());
-final siteApiProvider = Provider<SiteApi>((ref) => SiteApi(
-      cmsApi: ref.watch(cmsApiProvider),
-      // 伴随服务懒启动后由 SiteApi 把当前开关推给 Java 侧
-      selfCheckEnabled: () =>
-          ref.read(settingsRepositoryProvider).selfCheckPreferences.enabled,
-    ));
+final siteApiProvider = Provider<SiteApi>((ref) {
+  final api = SiteApi(
+    cmsApi: ref.watch(cmsApiProvider),
+    // 伴随服务懒启动后由 SiteApi 把当前开关推给 Java 侧
+    selfCheckEnabled: () =>
+        ref.read(settingsRepositoryProvider).selfCheckPreferences.enabled,
+  );
+  // 每次加载配置都让伴随服务释放旧配置的资源：否则类加载器、python 子进程、
+  // 代理端口只增不减，换几次配置后加固源会因端口池耗尽而无法播放。
+  final sub = ref.read(configRepositoryProvider).configLoadedStream.listen((_) {
+    // 配置一加载就把 jar 在后台准备好（下载壳 → 解密载荷 → dex2jar，首次要十几秒）。
+    // 否则第一次点详情/播放会踩超时，表现成「必须先做一次全局搜索才能激活」。
+    unawaited(() async {
+      await api.companionSpiderApi.resetSpiders();
+      await api.prewarmCompanionJars(
+          ref.read(configRepositoryProvider).currentVodConfig.sites);
+    }());
+  });
+  ref.onDispose(sub.cancel);
+  // 启动阶段：配置在 runApp 之前就加载完了，configLoadedStream 那一次事件没有监听者，
+  // 所以这里再主动预热一次（否则首次使用仍要「先全局搜索一次」才激活）。
+  unawaited(api.prewarmCompanionJars(
+      ref.read(configRepositoryProvider).currentVodConfig.sites));
+  return api;
+});
 final parseEngineProvider = Provider<ParseEngine>((ref) => ParseEngine());
 
 /// 载荷界面通道：跟随 companion 进程长轮询弹窗 / Toast 事件（配置中心的扫码登录、填写 cookie）。
@@ -299,6 +320,8 @@ final autoLineSwitchProvider = Provider<AutoLineSwitchController>((ref) {
         ref.read(lineSwitchNoticeProvider.notifier).state = message,
     onBusyChanged: (busy) =>
         ref.read(playerAutoSwitchBusyProvider.notifier).state = busy,
+    isEnabled: () =>
+        ref.read(settingsRepositoryProvider).playerSettings.autoLineSwitch,
   );
   ref.onDispose(controller.dispose);
   return controller;
@@ -564,7 +587,8 @@ void _commitPlaybackVolume(WidgetRef ref, double value) {
 }
 
 /// 静音起播提醒的去重表（§36 / §36-R）：按「影片身份」去重，换片重新提示。
-final MutedPlaybackHintRegistry _mutedHintRegistry = MutedPlaybackHintRegistry();
+final MutedPlaybackHintRegistry _mutedHintRegistry =
+    MutedPlaybackHintRegistry();
 
 /// 静音起播提醒：**每部影片最多一次**（同一部片内切集/暂停继续不重复打扰）。
 void _showMutedHintForSpec(WidgetRef ref) {
@@ -654,6 +678,9 @@ class PlaybackSession {
 
 final activePlaybackSessionProvider =
     StateProvider<PlaybackSession?>((ref) => null);
+
+/// 选集抽屉正在浏览的线路。null 表示跟随实际播放线路；只切目录时不改播放真相。
+final episodeBrowseSourceIndexProvider = StateProvider<int?>((ref) => null);
 
 /// §15 详情弹窗「当前集」：仅同站同片且有播放会话时返回快照，否则 `null`。
 ///
@@ -862,6 +889,7 @@ Future<MediaPlaySpec?> _resolveEpisodeSpec(
   required String episodeUrl,
   Duration? timeout,
 }) async {
+  _lastPlayError = null;
   try {
     final future = ref.read(siteApiProvider).resolvePlayback(
           site,
@@ -874,10 +902,16 @@ Future<MediaPlaySpec?> _resolveEpisodeSpec(
         timeout == null ? await future : await future.timeout(timeout);
     if (resolved.url.isEmpty) return null;
     return resolved;
-  } catch (_) {
+  } catch (e) {
+    // 记住原因：源方「没下发内容」和「解析配置错」是两回事，别让用户去改解析。
+    // 给用户看的文案统一由 playResolveFailureText 生成，不直接显示异常原文。
+    _lastPlayError = e;
     return null;
   }
 }
+
+/// 最近一次解析播放失败的异常（由 [_resolveEpisodeSpec] 写入），交给 [playResolveFailureText] 出文案。
+Object? _lastPlayError;
 
 /// 构建目标集播放参数并写入历史记录（切集与详情页选集共用同一字段与记录 ID 规则）。
 ({MediaPlaySpec spec, String recordId, HistoryResumeMatch? resumeMatch})
@@ -958,7 +992,7 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})>
   int sourceIndex = 0,
 }) async {
   if (index < 0 || index >= episodes.length) {
-    return (error: '播放解析失败，请检查站源或解析配置', resumeMatch: null);
+    return (error: playResolveFailureText(null), resumeMatch: null);
   }
   final site = targetSite ?? ref.read(configRepositoryProvider).selectedSite;
   final allSources = (sources == null || sources.isEmpty)
@@ -1046,6 +1080,7 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})>
       failedLines: Set.unmodifiable(failed),
     );
     ref.read(activePlaybackSessionProvider.notifier).state = session;
+    ref.read(episodeBrowseSourceIndexProvider.notifier).state = null;
     ref.read(autoLineSwitchProvider).arm(
           sources: allSources,
           currentSourceIndex: candidate.sourceIndex,
@@ -1066,7 +1101,8 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})>
   }
 
   return (
-    error: attempts.length > 1 ? '所有备用线路均不可用，请稍后重试' : '播放解析失败，请检查站源或解析配置',
+    error:
+        playResolveFailureText(_lastPlayError, allLines: attempts.length > 1),
     resumeMatch: null,
   );
 }
@@ -1132,6 +1168,14 @@ void _markLineFailed(Ref ref, String key, {bool failed = true}) {
   if (!changed) return;
   ref.read(activePlaybackSessionProvider.notifier).state =
       session.copyWith(failedLines: Set.unmodifiable(next));
+}
+
+/// 选集解析/启动失败时旧媒体仍在播放：只恢复会话闸门。
+/// 原自动换线控制器没有被拆除，起播窗口与已尝试线路均保持原值。
+void _restoreEpisodeSwitchSession(WidgetRef ref, PlaybackSession session) {
+  ref.read(activePlaybackSessionProvider.notifier).state =
+      session.copyWith(switching: false);
+  ref.read(autoLineSwitchProvider).resumePendingAttempt();
 }
 
 /// 自动换线实际执行：解析候选线路 → 启动 → 保留位置与历史记录 → 更新会话。
@@ -1236,6 +1280,7 @@ Future<bool> _autoSwitchToLine(
         },
       );
     }
+    ref.read(episodeBrowseSourceIndexProvider.notifier).state = null;
     ref.read(lineSwitchNoticeProvider.notifier).state =
         '已切换到线路「${candidate.source.name}」'
         '${position > Duration.zero ? '，从 ${_formatPlaybackPosition(position)} 继续播放' : ''}';
@@ -1251,7 +1296,8 @@ Future<bool> _autoSwitchToLine(
 /// 迟到结果在会话已关闭或被替换时作废（不播放、不写历史、不更新 UI）。
 /// 返回 null 表示成功或无事发生；否则为用户可展示的错误文案。
 Future<({String? error, HistoryResumeMatch? resumeMatch})> _switchEpisode(
-    WidgetRef ref, int targetIndex) async {
+    WidgetRef ref, int targetIndex,
+    {int? sourceIndex}) async {
   if (ref.read(playerRefreshBusyProvider) ||
       ref.read(playerAutoSwitchBusyProvider)) {
     return (error: null, resumeMatch: null); // 刷新 / 换线进行中：互斥
@@ -1260,23 +1306,36 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})> _switchEpisode(
   if (session == null || session.switching) {
     return (error: null, resumeMatch: null);
   }
-  if (targetIndex < 0 || targetIndex >= session.episodes.length) {
+  final allSources = session.sources.isEmpty
+      ? <PlayFrom>[
+          PlayFrom(name: session.sourceName, episodes: session.episodes),
+        ]
+      : session.sources;
+  final targetSourceIndex = sourceIndex ?? session.sourceIndex;
+  if (targetSourceIndex < 0 || targetSourceIndex >= allSources.length) {
     return (error: null, resumeMatch: null);
   }
-  if (targetIndex == session.index) {
+  final targetSource = allSources[targetSourceIndex];
+  if (targetIndex < 0 || targetIndex >= targetSource.episodes.length) {
+    return (error: null, resumeMatch: null);
+  }
+  if (targetSourceIndex == session.sourceIndex &&
+      targetIndex == session.index) {
     return (error: null, resumeMatch: null);
   }
 
-  ref.read(autoLineSwitchProvider).disarm();
+  // 不 disarm 原自动换线：switching 已阻止并发；失败时保留原早期窗口，
+  // 成功后下方会以目标集的新状态覆盖 arm。
   final epoch = ++_playbackSessionEpoch;
+  ref.read(autoLineSwitchProvider).rebindEpoch(epoch);
   ref.read(activePlaybackSessionProvider.notifier).state =
       session.copyWith(switching: true);
 
   final resolved = await _resolveEpisodeSpec(
     ref,
     site: session.site,
-    sourceName: session.sourceName,
-    episodeUrl: session.episodes[targetIndex].url,
+    sourceName: targetSource.name,
+    episodeUrl: targetSource.episodes[targetIndex].url,
   );
 
   // 会话已关闭 / 被替换 / 有更新操作：迟到结果作废
@@ -1286,9 +1345,11 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})> _switchEpisode(
   final current = ref.read(activePlaybackSessionProvider);
   if (current == null) return (error: null, resumeMatch: null);
   if (resolved == null) {
-    ref.read(activePlaybackSessionProvider.notifier).state =
-        current.copyWith(switching: false);
-    return (error: '播放解析失败，请检查站源或解析配置', resumeMatch: null);
+    _restoreEpisodeSwitchSession(ref, current);
+    return (
+      error: playResolveFailureText(_lastPlayError),
+      resumeMatch: null,
+    );
   }
 
   // 切换前快照：启动失败时用于把历史与跟踪对象恢复到「切换前」状态。
@@ -1300,8 +1361,8 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})> _switchEpisode(
   final prepared = _prepareEpisodePlayback(
     ref,
     item: current.item,
-    sourceName: current.sourceName,
-    episodes: current.episodes,
+    sourceName: targetSource.name,
+    episodes: targetSource.episodes,
     index: targetIndex,
     site: current.site,
     resolved: resolved,
@@ -1335,8 +1396,7 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})> _switchEpisode(
     await restoreHistory();
     final failed = ref.read(activePlaybackSessionProvider);
     if (failed != null) {
-      ref.read(activePlaybackSessionProvider.notifier).state =
-          failed.copyWith(switching: false);
+      _restoreEpisodeSwitchSession(ref, failed);
     }
     return (error: '播放启动失败，请重试', resumeMatch: null);
   }
@@ -1351,20 +1411,24 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})> _switchEpisode(
   final latest = ref.read(activePlaybackSessionProvider);
   if (latest != null) {
     final resetTried = <String>{
-      lineSwitchKey(latest.sourceIndex, latest.sourceName),
+      lineSwitchKey(targetSourceIndex, targetSource.name),
     };
     ref.read(activePlaybackSessionProvider.notifier).state = latest.copyWith(
+      sourceName: targetSource.name,
+      sourceIndex: targetSourceIndex,
+      episodes: targetSource.episodes,
       index: targetIndex,
       switching: false,
       triedLines: resetTried,
       failedLines: const {},
     );
+    ref.read(episodeBrowseSourceIndexProvider.notifier).state = null;
     ref.read(autoLineSwitchProvider).arm(
-          sources: latest.sources,
-          currentSourceIndex: latest.sourceIndex,
-          currentSourceName: latest.sourceName,
-          episodeName: latest.episodes[targetIndex].name,
-          currentEpisodeUrl: latest.episodes[targetIndex].url,
+          sources: allSources,
+          currentSourceIndex: targetSourceIndex,
+          currentSourceName: targetSource.name,
+          episodeName: targetSource.episodes[targetIndex].name,
+          currentEpisodeUrl: targetSource.episodes[targetIndex].url,
           tried: resetTried,
           epoch: _playbackSessionEpoch,
           startPosition: prepared.spec.startPosition ?? Duration.zero,
@@ -1523,6 +1587,18 @@ Future<void> _handleEpisodeSwitch(
   _showResumeHint(ref, result.resumeMatch);
 }
 
+Future<void> _handleEpisodeSwitchOnSource(BuildContext context, WidgetRef ref,
+    int sourceIndex, int targetIndex) async {
+  final result =
+      await _switchEpisode(ref, targetIndex, sourceIndex: sourceIndex);
+  if (!context.mounted) return;
+  if (result.error != null) {
+    showAppMessage(result.error!, type: AppMessageType.error);
+    return;
+  }
+  _showResumeHint(ref, result.resumeMatch);
+}
+
 /// 刷新当前播放：可解析场景（点播剧集）重新解析，其余原样重载。
 ///
 /// 保留刷新前位置、不新增历史记录、失败不打断当前播放；
@@ -1570,6 +1646,7 @@ Future<({String? error, bool refreshed})> _refreshPlayback(
       // 点播剧集：重新解析当前集（与详情页选集 / 切集同一调用）
       final episode = session.episodes[session.index];
       var timedOut = false;
+      Object? refreshError;
       MediaPlaySpec? resolved;
       try {
         resolved = await ref
@@ -1586,11 +1663,14 @@ Future<({String? error, bool refreshed})> _refreshPlayback(
         if (resolved.url.isEmpty) resolved = null;
       } on TimeoutException {
         timedOut = true;
-      } catch (_) {
+      } catch (e) {
+        refreshError = e;
         resolved = null;
       }
       if (resolved == null) {
-        error = timedOut ? '刷新失败：解析超时，请稍后重试' : '刷新失败：播放解析失败，请检查站源或解析配置';
+        error = timedOut
+            ? '刷新失败：解析超时，请稍后重试'
+            : '刷新失败：${playResolveFailureText(refreshError)}';
       } else {
         target = MediaPlaySpec(
           url: resolved.url,
@@ -1742,33 +1822,54 @@ PlayerEpisodeNav? _buildEpisodeNav(
 PlayerEpisodeListNav? _buildEpisodeListNav(
     WidgetRef ref, PlaybackSession? session, BuildContext playerContext,
     {bool busy = false}) {
-  if (session == null || session.episodes.length <= 1) return null;
+  if (session == null) return null;
+  final sources = session.sources.isEmpty
+      ? <PlayFrom>[
+          PlayFrom(name: session.sourceName, episodes: session.episodes),
+        ]
+      : session.sources;
+  final hasChoices = session.episodes.length > 1 || sources.length > 1;
+  if (!hasChoices) return null;
+  final requestedBrowse = ref.watch(episodeBrowseSourceIndexProvider);
+  final browseSourceIndex = requestedBrowse != null &&
+          requestedBrowse >= 0 &&
+          requestedBrowse < sources.length
+      ? requestedBrowse
+      : session.sourceIndex.clamp(0, sources.length - 1);
+  final browseSource = sources[browseSourceIndex];
+  final browsingPlayingLine = browseSourceIndex == session.sourceIndex;
   final episodes = <PlayerEpisodeOption>[
-    for (var i = 0; i < session.episodes.length; i++)
+    for (var i = 0; i < browseSource.episodes.length; i++)
       PlayerEpisodeOption(
         index: i,
-        name: session.episodes[i].name,
-        current: i == session.index,
+        name: browseSource.episodes[i].name,
+        current: browsingPlayingLine && i == session.index,
       ),
   ];
   final lines = <PlayerLineChoice>[
-    if (session.sources.length > 1)
-      for (var i = 0; i < session.sources.length; i++)
+    if (sources.length > 1)
+      for (var i = 0; i < sources.length; i++)
         PlayerLineChoice(
           index: i,
-          name: session.sources[i].name,
+          name: sources[i].name,
           current: i == session.sourceIndex,
-          unavailable: session.failedLines
-              .contains(lineSwitchKey(i, session.sources[i].name)),
+          browsing: i == browseSourceIndex,
+          unavailable:
+              session.failedLines.contains(lineSwitchKey(i, sources[i].name)),
         ),
   ];
   return PlayerEpisodeListNav(
     episodes: episodes,
     lines: lines,
-    lineName: session.sourceName,
+    lineName: browseSource.name,
+    browsingPlayingLine: browsingPlayingLine,
     switching: session.switching || busy,
-    onSelectEpisode: (index) =>
-        unawaited(_handleEpisodeSwitch(playerContext, ref, index)),
+    onSelectEpisode: (index) => unawaited(
+      browsingPlayingLine
+          ? _handleEpisodeSwitch(playerContext, ref, index)
+          : _handleEpisodeSwitchOnSource(
+              playerContext, ref, browseSourceIndex, index),
+    ),
     onSelectLine: (index) =>
         unawaited(ref.read(manualLineSwitchProvider)(session, index)),
   );
@@ -1807,8 +1908,11 @@ Future<void> _manualSwitchToLine(
     Ref ref, PlaybackSession session, int sourceIndex) async {
   final current = ref.read(activePlaybackSessionProvider);
   if (current == null) return;
-  if (sourceIndex == current.sourceIndex) return;
   if (sourceIndex < 0 || sourceIndex >= current.sources.length) return;
+  if (sourceIndex == current.sourceIndex) {
+    ref.read(episodeBrowseSourceIndexProvider.notifier).state = null;
+    return;
+  }
   if (ref.read(playerRefreshBusyProvider) ||
       ref.read(playerAutoSwitchBusyProvider) ||
       current.switching) {
@@ -1819,10 +1923,13 @@ Future<void> _manualSwitchToLine(
   final episodeName = current.episodes[current.index].name;
   final match = matchEpisodeOnLine(target, episodeName);
   if (match == null) {
+    // 只切选集目录，不改变实际播放会话、历史或播放代际。
+    ref.read(episodeBrowseSourceIndexProvider.notifier).state = sourceIndex;
     ref.read(lineSwitchNoticeProvider.notifier).state =
-        '线路「${target.name}」没有「$episodeName」，请换一条';
+        '线路「${target.name}」没有「$episodeName」，已显示该线路选集；当前播放未中断';
     return;
   }
+  ref.read(episodeBrowseSourceIndexProvider.notifier).state = null;
 
   // 作废在途的自动换线 / 切集结果，并关闭自动换线（新线路由用户选定）。
   final epoch = ++_playbackSessionEpoch;
@@ -2261,6 +2368,8 @@ class _SegmentsSessionSyncState extends State<_SegmentsSessionSync> {
       title: session.item.name,
       episodeName: session.episodes[index].name,
       episodeCount: session.episodes.length,
+      // 集名认不出集号时按选集位置兜底（「正片」「彩蛋」这类）
+      episodeIndex: index,
     ));
   }
 
@@ -2269,7 +2378,7 @@ class _SegmentsSessionSyncState extends State<_SegmentsSessionSync> {
 }
 
 /// §43 把播放会话同步给弹幕加载器：
-/// 片名 + 当前集名变化 → load（同片同集不重复拉；换线不变）；
+/// 站点 + 影片 + 当前集变化 → load（同片同集不重复拉；换线不变）；
 /// 无会话 / 直播 / 关闭弹幕 → clear（取消在途请求）。
 class _DanmakuSessionSync extends StatefulWidget {
   const _DanmakuSessionSync({
@@ -2310,9 +2419,16 @@ class _DanmakuSessionSyncState extends State<_DanmakuSessionSync> {
       return;
     }
     final index = session.index.clamp(0, session.episodes.length - 1);
-    final name = session.item.name;
-    final episode = session.episodes[index].name;
-    unawaited(widget.controller.load(name: name, episode: episode));
+    // 集号 / 总集数参与本地校验（多集认不出集号不匹配、单集按电影匹配），
+    // 站点 + 影片 id 区分播放会话：同名不同片不复用上一部的弹幕
+    unawaited(widget.controller.load(
+      name: session.item.name,
+      episode: session.episodes[index].name,
+      episodeIndex: index,
+      episodeCount: session.episodes.length,
+      yearHint: session.item.year,
+      scope: '${session.site?.key ?? ''}|${session.item.id}',
+    ));
   }
 
   @override
@@ -2323,9 +2439,15 @@ class _DanmakuSessionSyncState extends State<_DanmakuSessionSync> {
 /// 「播放时隐藏标题栏」（§38）实时传给播放器。
 class _PlayerPrefsBinding extends StatefulWidget {
   final SettingsRepository repository;
-  final Widget Function(BuildContext context, String scale,
-      bool hideWindowTitleBar, bool danmakuEnabled,
-      DanmakuSettings danmakuSettings) builder;
+  final Widget Function(
+      BuildContext context,
+      String scale,
+      bool hideWindowTitleBar,
+      bool danmakuEnabled,
+      DanmakuSettings danmakuSettings,
+      bool showMiniProgress,
+      double holdRate,
+      bool autoHideCursor) builder;
 
   const _PlayerPrefsBinding({required this.repository, required this.builder});
 
@@ -2344,9 +2466,15 @@ class _PlayerPrefsBindingState extends State<_PlayerPrefsBinding> {
       initialData: widget.repository.playerSettings,
       builder: (context, snapshot) {
         final settings = snapshot.data ?? PlayerSettings.defaults;
-        return widget.builder(context, settings.scale,
-            settings.hideWindowTitleBar, settings.danmakuEnabled,
-            settings.danmaku);
+        return widget.builder(
+            context,
+            settings.scale,
+            settings.hideWindowTitleBar,
+            settings.danmakuEnabled,
+            settings.danmaku,
+            settings.showMiniProgress,
+            settings.holdRate,
+            settings.autoHideCursor);
       },
     );
   }
@@ -2379,7 +2507,6 @@ class _UpdateDialogHost extends ConsumerWidget {
     );
   }
 }
-
 
 /// 关于页的更新行：把状态与动作接到纯展示的 [AboutUpdateSection]。
 class AboutUpdateSectionHost extends ConsumerWidget {
@@ -2494,6 +2621,121 @@ class _UpdateCheckHostState extends ConsumerState<UpdateCheckHost> {
 }
 
 /// Windows 桌面应用程序顶层组件
+/// 顶部「站点资源准备」提示条：准备中转圈，失败给「重试」，成功自动隐藏。
+///
+/// 延迟 1.5 秒再出现：热启动（缓存已就绪）往往 1~2 秒就完成，
+/// 立刻弹会让人误以为「每次打开都要等」。失败则立即出现。
+class PrewarmBanner extends ConsumerWidget {
+  const PrewarmBanner({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final api = ref.watch(siteApiProvider);
+    return ValueListenableBuilder<PrewarmStatus>(
+      valueListenable: api.prewarm,
+      builder: (context, status, _) => _PrewarmBannerBody(
+        status: status,
+        onRetry: () => unawaited(api.prewarmCompanionJars(
+            ref.read(configRepositoryProvider).currentVodConfig.sites,
+            force: true)),
+      ),
+    );
+  }
+}
+
+class _PrewarmBannerBody extends StatefulWidget {
+  const _PrewarmBannerBody({required this.status, required this.onRetry});
+
+  final PrewarmStatus status;
+  final VoidCallback onRetry;
+
+  @override
+  State<_PrewarmBannerBody> createState() => _PrewarmBannerBodyState();
+}
+
+class _PrewarmBannerBodyState extends State<_PrewarmBannerBody> {
+  static const Duration _delayBeforeShow = Duration(milliseconds: 1500);
+  Timer? _delay;
+  bool _visible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _sync();
+  }
+
+  @override
+  void didUpdateWidget(covariant _PrewarmBannerBody oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.status != widget.status) _sync();
+  }
+
+  @override
+  void dispose() {
+    _delay?.cancel();
+    super.dispose();
+  }
+
+  void _sync() {
+    final status = widget.status;
+    if (status.failed) {
+      _delay?.cancel();
+      _delay = null;
+      if (!_visible) setState(() => _visible = true);
+      return;
+    }
+    if (!status.running) {
+      _delay?.cancel();
+      _delay = null;
+      if (_visible) setState(() => _visible = false);
+      return;
+    }
+    if (_visible || _delay != null) return;
+    _delay = Timer(_delayBeforeShow, () {
+      _delay = null;
+      if (mounted && widget.status.running) setState(() => _visible = true);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = widget.status;
+    if (!_visible) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    return Material(
+      elevation: 8,
+      borderRadius: BorderRadius.circular(AppRadii.pill),
+      color: theme.colorScheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (status.running)
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              Icon(Icons.wifi_off_rounded,
+                  size: 16, color: theme.colorScheme.error),
+            const SizedBox(width: 10),
+            Text(status.message, style: theme.textTheme.bodyMedium),
+            if (status.failed) ...[
+              const SizedBox(width: 4),
+              TextButton(
+                onPressed: widget.onRetry,
+                child: const Text('重试'),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class XiugouTvApp extends ConsumerWidget {
   const XiugouTvApp({super.key});
 
@@ -2506,6 +2748,7 @@ class XiugouTvApp extends ConsumerWidget {
     final liveEntryLoading = ref.watch(liveEntryLoadingProvider);
     final prepareIntent = ref.watch(playbackIntentProvider);
     final activeSession = ref.watch(activePlaybackSessionProvider);
+    ref.watch(episodeBrowseSourceIndexProvider);
     // §43 弹幕：加载器 + 本次播放的开关覆盖
     final danmakuController = ref.watch(danmakuControllerProvider);
     final danmakuOverride = ref.watch(danmakuSessionOverrideProvider);
@@ -2552,6 +2795,13 @@ class XiugouTvApp extends ConsumerWidget {
         children: [
           child ?? const SizedBox.shrink(),
           AppMessageHost(key: appMessageKey),
+          // 首次启动的站点资源准备提示：只在「准备中 / 失败」时出现，成功自动消失。
+          const Positioned(
+            top: 14,
+            left: 0,
+            right: 0,
+            child: Center(child: PrewarmBanner()),
+          ),
           DialogDragStrip(
             windowManager: windowMgr,
             observer: _dialogRouteObserver,
@@ -2563,77 +2813,87 @@ class XiugouTvApp extends ConsumerWidget {
           child: SpiderDialogHost(
             channel: ref.read(companionUiChannelProvider),
             openUrl: ref.read(installerLauncherProvider).openUrl,
-          child: Builder(
-            builder: (ctx) {
-              final searchBridge = ref.watch(homeSearchBridgeProvider);
-              return DesktopWindowFrame(
-                windowManager: windowMgr,
-                activeSiteName: activeSiteName,
-                onSettingsPressed: () => openSettingsPage(ref),
-                onSiteSelectorPressed: () =>
-                    showSiteSelectorDialog(innerContext, ref),
-                searchBar: const HomeSearchBarHost(),
+            child: Builder(
+              builder: (ctx) {
+                final searchBridge = ref.watch(homeSearchBridgeProvider);
+                return DesktopWindowFrame(
+                  windowManager: windowMgr,
+                  activeSiteName: activeSiteName,
+                  onSettingsPressed: () => openSettingsPage(ref),
+                  onSiteSelectorPressed: () =>
+                      showSiteSelectorDialog(innerContext, ref),
+                  searchBar: const HomeSearchBarHost(),
                   onRefresh:
                       searchBridge.visible ? searchBridge.onRefresh : null,
-                refreshBusy: searchBridge.refreshBusy,
-                child: DesktopShell(
-              showPlayer: activePlaySpec != null ||
-                  liveEntryLoading ||
-                  prepareIntent != null,
-              showSettings: showSettings,
-              settingsView: showSettings
-                  ? SettingsPage(
-                      playerSettingsApplication:
-                          playerEngine.settingsApplication,
-                      playerEngine: playerEngine,
+                  refreshBusy: searchBridge.refreshBusy,
+                  child: DesktopShell(
+                    showPlayer: activePlaySpec != null ||
+                        liveEntryLoading ||
+                        prepareIntent != null,
+                    showSettings: showSettings,
+                    settingsView: showSettings
+                        ? SettingsPage(
+                            companionSpiderApi:
+                                ref.read(siteApiProvider).companionSpiderApi,
+                            playerSettingsApplication:
+                                playerEngine.settingsApplication,
+                            playerEngine: playerEngine,
                             configRepository:
                                 ref.read(configRepositoryProvider),
                             settingsRepository:
                                 ref.read(settingsRepositoryProvider),
                             cacheMaintenance:
                                 ref.read(cacheMaintenanceProvider),
-                      epgRepository: ref.read(epgRepositoryProvider),
+                            epgRepository: ref.read(epgRepositoryProvider),
                             dataBackupService:
                                 ref.read(dataBackupServiceProvider),
-                      wallpaperStore: ref.read(wallpaperStoreProvider),
-                      isPlaybackActive: () =>
-                          ref.read(activePlaySpecProvider) != null,
-                      updateSection: (buildInfo) =>
-                          AboutUpdateSectionHost(between: buildInfo),
-                      onResetAll: () => _resetAllSettingsAndRestart(ref),
-                      onClose: () => ref
-                          .read(settingsPageOpenProvider.notifier)
-                          .state = false,
-                      onAddConfig: (pageContext) => showDialog<void>(
-                        context: pageContext,
-                        builder: (_) => ConfigDialog(
+                            wallpaperStore: ref.read(wallpaperStoreProvider),
+                            isPlaybackActive: () =>
+                                ref.read(activePlaySpecProvider) != null,
+                            updateSection: (buildInfo) =>
+                                AboutUpdateSectionHost(between: buildInfo),
+                            onResetAll: () => _resetAllSettingsAndRestart(ref),
+                            onClose: () {
+                              ref
+                                  .read(settingsPageOpenProvider.notifier)
+                                  .state = false;
+                              ref
+                                  .read(autoLineSwitchProvider)
+                                  .resumePendingAttempt();
+                            },
+                            onAddConfig: (pageContext) => showDialog<void>(
+                              context: pageContext,
+                              builder: (_) => ConfigDialog(
                                   repository:
                                       ref.read(configRepositoryProvider)),
-                      ),
-                    )
-                  : null,
-              mainView: WallpaperBackdrop(
-                store: ref.read(wallpaperStoreProvider),
-                child: const DesktopMainView(),
-              ),
-              playerView: activePlaySpec == null &&
-                      !liveEntryLoading &&
-                      prepareIntent == null
-                  ? null
-                  : Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        _LineSwitchNoticeHost(
-                          child: _PlaySkipWatcher(
-                            engine: playerEngine,
-                            child: _PlayerPrefsBinding(
+                            ),
+                          )
+                        : null,
+                    mainView: WallpaperBackdrop(
+                      store: ref.read(wallpaperStoreProvider),
+                      child: const DesktopMainView(),
+                    ),
+                    playerView: activePlaySpec == null &&
+                            !liveEntryLoading &&
+                            prepareIntent == null
+                        ? null
+                        : Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              _LineSwitchNoticeHost(
+                                child: _PlaySkipWatcher(
+                                  engine: playerEngine,
+                                  child: _PlayerPrefsBinding(
                                     repository:
                                         ref.read(settingsRepositoryProvider),
                                     builder: (playerContext,
                                             scale,
                                             hideWindowTitleBar,
                                             danmakuDefault,
-                                            danmakuSettings) =>
+                                            danmakuSettings,
+                                            showMiniProgress,
+                                            holdRate,
+                                            autoHideCursor) =>
                                         _SegmentsSessionSync(
                                       session: !segmentsServiceConfigured ||
                                               activePlaySpec?.isLive == true
@@ -2641,217 +2901,239 @@ class XiugouTvApp extends ConsumerWidget {
                                           : activeSession,
                                       controller: segmentsController,
                                       child: _DanmakuSessionSync(
-                                      session: activePlaySpec?.isLive == true
-                                          ? null
-                                          : activeSession,
-                                      // §43 弹幕可选：本次构建未配置弹幕服务时不加载、不挂入口
-                                      enabled: danmakuServiceConfigured &&
-                                          activePlaySpec?.isLive != true &&
-                                          (danmakuOverride ?? danmakuDefault),
-                                      controller: danmakuController,
-                                      child: DesktopVideoPlayer(
-                                        danmakuNav: !danmakuServiceConfigured ||
-                                                activeSession == null ||
-                                                activePlaySpec?.isLive == true
+                                        session: activePlaySpec?.isLive == true
                                             ? null
-                                            : PlayerDanmakuNav(
-                                                state: danmakuController,
-                                                settings: danmakuSettings,
-                                                // §43 播放页「弹幕设置」抽屉：与设置中心同一份设置，改动落盘
-                                                onSettingsChanged: (next) {
-                                                  final repo = ref.read(
-                                                      settingsRepositoryProvider);
-                                                  unawaited(repo
-                                                      .updatePlayerSettings(repo
+                                            : activeSession,
+                                        // §43 弹幕可选：本次构建未配置弹幕服务时不加载、不挂入口
+                                        enabled: danmakuServiceConfigured &&
+                                            activePlaySpec?.isLive != true &&
+                                            (danmakuOverride ?? danmakuDefault),
+                                        controller: danmakuController,
+                                        child: DesktopVideoPlayer(
+                                          danmakuNav:
+                                              !danmakuServiceConfigured ||
+                                                      activeSession == null ||
+                                                      activePlaySpec?.isLive ==
+                                                          true
+                                                  ? null
+                                                  : PlayerDanmakuNav(
+                                                      state: danmakuController,
+                                                      settings: danmakuSettings,
+                                                      // §43 播放页「弹幕设置」抽屉：与设置中心同一份设置，改动落盘
+                                                      onSettingsChanged:
+                                                          (next) {
+                                                        final repo = ref.read(
+                                                            settingsRepositoryProvider);
+                                                        unawaited(repo
+                                                            .updatePlayerSettings(repo
+                                                                .playerSettings
+                                                                .copyWith(
+                                                                    danmaku:
+                                                                        next)));
+                                                      },
+                                                      enabled:
+                                                          danmakuOverride ??
+                                                              danmakuDefault,
+                                                      onToggle: () => ref
+                                                              .read(
+                                                                  danmakuSessionOverrideProvider
+                                                                      .notifier)
+                                                              .state =
+                                                          !(danmakuOverride ??
+                                                              danmakuDefault),
+                                                    ),
+                                          playerEngine: playerEngine,
+                                          windowManager: windowMgr,
+                                          scale: scale,
+                                          hideWindowTitleBar:
+                                              hideWindowTitleBar,
+                                          showMiniProgress: showMiniProgress,
+                                          holdRate: holdRate,
+                                          autoHideCursor: autoHideCursor,
+                                          playerInfoLabel: 'MPV 播放器',
+                                          episodeNav: _buildEpisodeNav(
+                                              ref, activeSession, playerContext,
+                                              refreshBusy: refreshBusy ||
+                                                  autoSwitchBusy),
+                                          episodeListNav: _buildEpisodeListNav(
+                                              ref, activeSession, playerContext,
+                                              busy: refreshBusy ||
+                                                  autoSwitchBusy),
+                                          lineNav: _buildLineNav(
+                                              ref, activeSession,
+                                              busy: refreshBusy ||
+                                                  autoSwitchBusy),
+                                          onLivePrev: liveChannels.isEmpty
+                                              ? null
+                                              : () => unawaited(
+                                                  _switchLiveChannel(ref, -1)),
+                                          onLiveNext: liveChannels.isEmpty
+                                              ? null
+                                              : () => unawaited(
+                                                  _switchLiveChannel(ref, 1)),
+                                          liveChannels: liveChannels,
+                                          liveCurrentIndex:
+                                              liveRuntime?.index ?? 0,
+                                          liveFavoriteKeys: liveFavoriteKeys,
+                                          onLiveSelect: (index) => unawaited(
+                                              _startLiveChannel(
+                                                  ref, liveChannels, index)),
+                                          onLiveManage: () => unawaited(
+                                              _showLiveManagerDialog(
+                                                  innerContext, ref)),
+                                          refreshNav: PlayerRefreshNav(
+                                            busy: refreshBusy ||
+                                                autoSwitchBusy ||
+                                                (activeSession?.switching ??
+                                                    false),
+                                            onRefresh: () =>
+                                                _handleRefreshPlayback(
+                                                    playerContext, ref),
+                                          ),
+                                          skipNav: _buildSkipNav(
+                                              ref,
+                                              activeSession,
+                                              playerContext,
+                                              playSkipPreferences),
+                                          // §44 共享片段：与本地片头片尾是两个独立功能
+                                          segmentsNav:
+                                              !segmentsServiceConfigured ||
+                                                      activeSession == null ||
+                                                      activePlaySpec?.isLive ==
+                                                          true
+                                                  ? null
+                                                  : PlayerSegmentsNav(
+                                                      state: segmentsController,
+                                                      onSubmit:
+                                                          segmentsController
+                                                              .submit,
+                                                      onFeedback:
+                                                          segmentsController
+                                                              .feedback,
+                                                      autoApply: ref
+                                                          .read(
+                                                              settingsRepositoryProvider)
                                                           .playerSettings
-                                                          .copyWith(
-                                                              danmaku: next)));
-                                                },
-                                                enabled: danmakuOverride ??
-                                                    danmakuDefault,
-                                                onToggle: () => ref
-                                                        .read(
-                                                            danmakuSessionOverrideProvider
-                                                                .notifier)
-                                                        .state =
-                                                    !(danmakuOverride ??
-                                                        danmakuDefault),
-                                              ),
-                                playerEngine: playerEngine,
-                                windowManager: windowMgr,
-                                scale: scale,
-                                hideWindowTitleBar: hideWindowTitleBar,
-                                playerInfoLabel: 'MPV 播放器',
-                                episodeNav: _buildEpisodeNav(
-                                    ref, activeSession, playerContext,
-                                            refreshBusy:
-                                                refreshBusy || autoSwitchBusy),
-                                episodeListNav: _buildEpisodeListNav(
-                                    ref, activeSession, playerContext,
-                                            busy:
-                                                refreshBusy || autoSwitchBusy),
-                                        lineNav: _buildLineNav(
-                                            ref, activeSession,
-                                            busy:
-                                                refreshBusy || autoSwitchBusy),
-                                onLivePrev: liveChannels.isEmpty
-                                    ? null
-                                            : () => unawaited(
-                                                _switchLiveChannel(ref, -1)),
-                                onLiveNext: liveChannels.isEmpty
-                                    ? null
-                                            : () => unawaited(
-                                                _switchLiveChannel(ref, 1)),
-                                liveChannels: liveChannels,
-                                        liveCurrentIndex:
-                                            liveRuntime?.index ?? 0,
-                                liveFavoriteKeys: liveFavoriteKeys,
-                                onLiveSelect: (index) => unawaited(
-                                    _startLiveChannel(
-                                        ref, liveChannels, index)),
-                                onLiveManage: () => unawaited(
-                                            _showLiveManagerDialog(
-                                                innerContext, ref)),
-                                refreshNav: PlayerRefreshNav(
-                                  busy: refreshBusy ||
-                                      autoSwitchBusy ||
-                                              (activeSession?.switching ??
-                                                  false),
-                                          onRefresh: () =>
-                                              _handleRefreshPlayback(
-                                      playerContext, ref),
-                                ),
-                                        skipNav: _buildSkipNav(
-                                            ref,
-                                            activeSession,
-                                            playerContext,
-                                            playSkipPreferences),
-                                        // §44 共享片段：与本地片头片尾是两个独立功能
-                                        segmentsNav: !segmentsServiceConfigured ||
-                                                activeSession == null ||
-                                                activePlaySpec?.isLive == true
-                                            ? null
-                                            : PlayerSegmentsNav(
-                                                state: segmentsController,
-                                                onSubmit:
-                                                    segmentsController.submit,
-                                                onFeedback:
-                                                    segmentsController.feedback,
-                                                autoApply: ref
-                                                    .read(
-                                                        settingsRepositoryProvider)
-                                                    .playerSettings
-                                                    .segmentsAutoApply,
-                                                onAutoApplyChanged: (v) {
-                                                  final repo = ref.read(
-                                                      settingsRepositoryProvider);
-                                                  unawaited(repo
-                                                      .updatePlayerSettings(repo
-                                                          .playerSettings
-                                                          .copyWith(
-                                                              segmentsAutoApply:
-                                                                  v)));
-                                                },
-                                                localOpeningMs: playSkipPreferences
-                                                        .enabled
-                                                    ? (playSkipPreferences
-                                                            .entryFor(
-                                                                activeSession
-                                                                    .item.id)
-                                                            ?.openingMs ??
-                                                        0)
-                                                    : 0,
-                                              ),
-                                // §16 起播准备态：解析期间页内骨架 / 失败可重试
-                                preparing: prepareIntent,
-                                        onRetryPrepare:
-                                            prepareIntent?.isFailed == true
-                                    ? () => unawaited(
-                                        retryPlayPreparation(ref))
-                                    : null,
-                                onCancelPrepare: prepareIntent == null
-                                    ? null
-                                    : () => cancelPlayPreparation(ref),
-                                onVolumeCommitted: (value) =>
-                                    _commitPlaybackVolume(ref, value),
-                                onMutedPlaybackDetected: () =>
-                                    _showMutedHintForSpec(ref),
-                                replayNav: PlayerReplayNav(
-                                  busy: refreshBusy ||
-                                      autoSwitchBusy ||
-                                              (activeSession?.switching ??
-                                                  false),
-                                  onReplay: () => unawaited(
-                                      _handleReplayRequested(
-                                                  playerContext,
-                                                  ref,
-                                                  playerEngine)),
-                                ),
-                                videoTracksNav: trackNavs?.video,
-                                audioTracksNav: trackNavs?.audio,
-                                subtitleTracksNav: trackNavs?.subtitle,
-                                onScaleChanged: (value) =>
-                                    _handleScaleChanged(ref, value),
-                                resetNav: PlayerResetNav(
-                                  enabled: !refreshBusy &&
-                                      !autoSwitchBusy &&
-                                              !(activeSession?.switching ??
-                                                  false),
-                                          onReset: () => _handleResetPlayerData(
-                                              ref, playerEngine),
-                                ),
-                                onBack: () {
-                                          ref
-                                              .read(autoLineSwitchProvider)
-                                              .disarm();
-                                  // 先同步捕获最终播放位置写入历史，再停止引擎（stop 会重置位置）
-                                  unawaited(ref
-                                              .read(
-                                                  playbackHistoryTrackerProvider)
-                                      .stop());
-                                  playerEngine.stop();
-                                  ref
-                                              .read(activePlaySpecProvider
-                                                  .notifier)
-                                      .state = null;
+                                                          .segmentsAutoApply,
+                                                      onAutoApplyChanged: (v) {
+                                                        final repo = ref.read(
+                                                            settingsRepositoryProvider);
+                                                        unawaited(repo
+                                                            .updatePlayerSettings(repo
+                                                                .playerSettings
+                                                                .copyWith(
+                                                                    segmentsAutoApply:
+                                                                        v)));
+                                                      },
+                                                      localOpeningMs: playSkipPreferences
+                                                              .enabled
+                                                          ? (playSkipPreferences
+                                                                  .entryFor(
+                                                                      activeSession
+                                                                          .item
+                                                                          .id)
+                                                                  ?.openingMs ??
+                                                              0)
+                                                          : 0,
+                                                    ),
+                                          // §16 起播准备态：解析期间页内骨架 / 失败可重试
+                                          preparing: prepareIntent,
+                                          onRetryPrepare:
+                                              prepareIntent?.isFailed == true
+                                                  ? () => unawaited(
+                                                      retryPlayPreparation(ref))
+                                                  : null,
+                                          onCancelPrepare: prepareIntent == null
+                                              ? null
+                                              : () =>
+                                                  cancelPlayPreparation(ref),
+                                          onVolumeCommitted: (value) =>
+                                              _commitPlaybackVolume(ref, value),
+                                          onMutedPlaybackDetected: () =>
+                                              _showMutedHintForSpec(ref),
+                                          replayNav: PlayerReplayNav(
+                                            busy: refreshBusy ||
+                                                autoSwitchBusy ||
+                                                (activeSession?.switching ??
+                                                    false),
+                                            onReplay: () => unawaited(
+                                                _handleReplayRequested(
+                                                    playerContext,
+                                                    ref,
+                                                    playerEngine)),
+                                          ),
+                                          videoTracksNav: trackNavs?.video,
+                                          audioTracksNav: trackNavs?.audio,
+                                          subtitleTracksNav:
+                                              trackNavs?.subtitle,
+                                          onScaleChanged: (value) =>
+                                              _handleScaleChanged(ref, value),
+                                          resetNav: PlayerResetNav(
+                                            enabled: !refreshBusy &&
+                                                !autoSwitchBusy &&
+                                                !(activeSession?.switching ??
+                                                    false),
+                                            onReset: () =>
+                                                _handleResetPlayerData(
+                                                    ref, playerEngine),
+                                          ),
+                                          onBack: () {
+                                            ref
+                                                .read(autoLineSwitchProvider)
+                                                .disarm();
+                                            // 先同步捕获最终播放位置写入历史，再停止引擎（stop 会重置位置）
+                                            unawaited(ref
+                                                .read(
+                                                    playbackHistoryTrackerProvider)
+                                                .stop());
+                                            playerEngine.stop();
+                                            ref
+                                                .read(activePlaySpecProvider
+                                                    .notifier)
+                                                .state = null;
 
-                                  // ⑤ 修复：加载态中返回同样撤销（迟到起播作废，见 _enterLive）
-                                  ref
-                                              .read(liveEntryLoadingProvider
-                                                  .notifier)
-                                      .state = false;
-                                          // §43 退出播放：取消在途弹幕请求，开关回到设置默认
-                                          danmakuController.clear();
-                                          segmentsController.clear();
-                                          ref
-                                              .read(
-                                                  danmakuSessionOverrideProvider
-                                                      .notifier)
-                                              .state = null;
-                                  // 关闭播放会话并作废在途切换结果
-                                  _playbackSessionEpoch++;
-                                  ref
-                                              .read(
-                                                  activePlaybackSessionProvider
-                                          .notifier)
-                                      .state = null;
-                                },
-                              ),
-                            ),
+                                            // ⑤ 修复：加载态中返回同样撤销（迟到起播作废，见 _enterLive）
+                                            ref
+                                                .read(liveEntryLoadingProvider
+                                                    .notifier)
+                                                .state = false;
+                                            // §43 退出播放：取消在途弹幕请求，开关回到设置默认
+                                            danmakuController.clear();
+                                            segmentsController.clear();
+                                            ref
+                                                .read(
+                                                    danmakuSessionOverrideProvider
+                                                        .notifier)
+                                                .state = null;
+                                            // 关闭播放会话并作废在途切换结果
+                                            ref
+                                                .read(
+                                                    episodeBrowseSourceIndexProvider
+                                                        .notifier)
+                                                .state = null;
+                                            _playbackSessionEpoch++;
+                                            ref
+                                                .read(
+                                                    activePlaybackSessionProvider
+                                                        .notifier)
+                                                .state = null;
+                                          },
+                                        ),
+                                      ),
                                     ),
-                          ),
-                        ),
+                                  ),
+                                ),
                               ),
                               if (liveEntryLoading)
                                 const _LiveEntryLoadingOverlay(),
-                      ],
-                    ),
+                            ],
+                          ),
                   ),
                 );
-          },
+              },
+            ),
+          ),
         ),
-      ),
-    ),
       ),
     );
   }
@@ -2903,7 +3185,9 @@ AppMessageType _lineSwitchNoticeType(String message) {
     return AppMessageType.info;
   }
   if (message.contains('失败')) return AppMessageType.error;
-  if (message.contains('请换一条')) return AppMessageType.warning;
+  if (message.contains('请换一条') || message.contains('当前播放未中断')) {
+    return AppMessageType.warning;
+  }
   return AppMessageType.success;
 }
 
@@ -3107,9 +3391,12 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   final Set<String> _searchSeenKeys = <String>{};
   int _searchCompleted = 0;
   int _searchTotal = 0;
+  int _searchFailed = 0;
+  String? _firstSearchFailure;
 
   String? _loadedSiteIdentity;
   int _contentGeneration = 0;
+  Timer? _prewarmTimer;
 
   /// 豆瓣首页每页条数（24 ≈ 宽窗口 3 行，滚动时再续）
   static const int _doubanPageSize = 24;
@@ -3155,6 +3442,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   /// 从「详情/选集弹窗」起播时记住来源：退出播放器后要回到这个弹窗，而不是首页。
   VodDetail? _playbackOriginDetail;
   Site? _playbackOriginSite;
+
   /// §15：最近一次播放会话的只读副本。
   ///
   /// 播放会话在 `onBack` 里会被清空（作废在途切换），而恢复详情弹窗要等下一帧、
@@ -3256,6 +3544,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     // 不卸载它），那一刻标题栏也不在了；而在 dispose 之后再碰 ref 会抛
     // `Cannot use "ref" after the widget was disposed`（旧实现用 post-frame
     // 复位正好踩中）。新实例挂载时 initState → _syncSearchBridge 会覆盖旧值。
+    _prewarmTimer?.cancel();
     _cancelSearchStream();
     _searchController.dispose();
     _searchFocusNode.removeListener(_onSearchFocusChanged);
@@ -3363,9 +3652,10 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     setState(() => _doubanLoadingMore = true);
 
     try {
-      final page = await ref
-          .read(doubanRepositoryProvider)
-          .fetchPage(collection, start: _doubanNextStart, count: _doubanPageSize);
+      final page = await ref.read(doubanRepositoryProvider).fetchPage(
+          collection,
+          start: _doubanNextStart,
+          count: _doubanPageSize);
       if (!_acceptContent(generation, identity) || !mounted) return;
       if (_doubanCollection != collection) return; // 期间换了分类：丢弃
       final known = <String>{for (final item in _items) item.id};
@@ -3383,8 +3673,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     } on DoubanException catch (error) {
       if (!_acceptContent(generation, identity) || !mounted) return;
       setState(() => _doubanLoadingMore = false);
-      showAppMessage('加载更多失败：${error.message}',
-          type: AppMessageType.error);
+      showAppMessage('加载更多失败：${error.message}', type: AppMessageType.error);
     } catch (error) {
       if (!_acceptContent(generation, identity) || !mounted) return;
       setState(() => _doubanLoadingMore = false);
@@ -3508,8 +3797,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
         _items = [..._items, ...appended];
         _categoryPage = requested;
         _categoryLoadingMore = false;
-        _categoryHasMore = requested < _maxCategoryPages &&
-            _declaresMorePages(result, shown);
+        _categoryHasMore =
+            requested < _maxCategoryPages && _declaresMorePages(result, shown);
       });
       // 一次翻页可能还是撑不满一屏，继续补。
       _maybeFillCategoryPage();
@@ -3547,6 +3836,16 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     if (_startupLiveEntryPending) return;
     if (!mounted) return;
     _searchNotice = null;
+    // 首次进入主视图时预热：这里能确保配置里的站点已经加载好
+    //（provider 创建时配置可能还没进来，那时站点列表为空，预热会被整条跳过）。
+    // 延后 3 秒再开始：低配机上 JVM 启动要 10~20 秒，别让它和首屏抢磁盘/CPU。
+    _prewarmTimer?.cancel();
+    _prewarmTimer = Timer(const Duration(seconds: 3), () {
+      _prewarmTimer = null;
+      if (!mounted) return;
+      unawaited(ref.read(siteApiProvider).prewarmCompanionJars(
+          ref.read(configRepositoryProvider).currentVodConfig.sites));
+    });
     final site = ref.read(configRepositoryProvider).selectedSite;
     debugPrint('${site?.toJson()}'); // Map 直接打印
     final identity = _currentSiteIdentity();
@@ -3627,8 +3926,18 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
           if (firstCat.id.isNotEmpty) {
             // ignore: avoid_print
             print('--> 默认拉取第 1 个分类: ${firstCat.name} (ID: ${firstCat.id})');
-            final catRes =
-                await siteApi.fetchCategory(site, categoryId: firstCat.id);
+            VodPageResult catRes;
+            try {
+              catRes =
+                  await siteApi.fetchCategory(site, categoryId: firstCat.id);
+            } catch (error) {
+              // Home already succeeded: a failing first category must not wipe its recommendations.
+              if (homeRes.list.isEmpty) rethrow;
+              if (!_acceptContent(generation, identity)) return;
+              showAppMessage('「${firstCat.name}」加载失败：$error',
+                  type: AppMessageType.warning);
+              catRes = const VodPageResult.empty();
+            }
             if (!_acceptContent(generation, identity)) return;
             // ignore: avoid_print
             print('--> [第 1 分类视频数]: ${catRes.list.length} 部');
@@ -3736,6 +4045,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     _searchSeenKeys.clear();
     _searchCompleted = 0;
     _searchTotal = 0;
+    _searchFailed = 0;
+    _firstSearchFailure = null;
     setState(() {
       // 聚合搜索不再整块转圈：结果区边到边显示，进度由站点栏尾部胶囊承担
       _isLoading = !isAggregate;
@@ -3745,7 +4056,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       _searchSiteGroupKey = null;
       _isSearching = true;
       _searchPending = isAggregate;
-      if (isAggregate) _items = [];
+      _items = [];
     });
 
     try {
@@ -3785,14 +4096,12 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       }
       final cancelToken = SearchCancelToken();
       _searchCancelToken = cancelToken;
-      final results =
-          await searchEngine.searchSite(site, query, cancelToken: cancelToken);
-      if (_acceptContent(generation, identity)) {
-        setState(() {
-          _items = results;
-          _isLoading = false;
-        });
-      }
+      _listenToSearch(
+        searchEngine
+            .searchAllIncremental([site], query, cancelToken: cancelToken),
+        generation: generation,
+        identity: identity,
+      );
     } catch (e) {
       if (_acceptContent(generation, identity)) {
         setState(() {
@@ -3835,12 +4144,21 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
           if (added.isNotEmpty) _items = [..._items, ...added];
           _searchCompleted = batch.completed;
           _searchTotal = batch.total;
+          if (batch.error != null) {
+            _searchFailed++;
+            _firstSearchFailure ??= '${batch.site.name}：${batch.error}';
+            _searchNotice = '$_searchFailed 个站点搜索失败；$_firstSearchFailure';
+          }
         });
       },
       onError: (Object error) {
         if (!_acceptContent(generation, identity)) return;
         setState(() {
-          _errorMessage = '聚合搜索失败: $error';
+          if (_items.isEmpty) {
+            _errorMessage = '聚合搜索失败: $error';
+          } else {
+            _searchNotice = '部分搜索失败: $error';
+          }
           _searchPending = false;
           _isLoading = false;
         });
@@ -3849,6 +4167,13 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
         if (!_acceptContent(generation, identity)) return;
         setState(() {
           _searchPending = false;
+          _isLoading = false;
+          if (_searchCompleted > 0 && _searchFailed == _searchCompleted) {
+            _errorMessage = '搜索失败：$_firstSearchFailure';
+          } else if (_searchFailed > 0 && _items.isEmpty) {
+            _searchNotice =
+                '其余站点无匹配，$_searchFailed 个站点搜索失败；$_firstSearchFailure';
+          }
         });
         _searchSub = null;
       },
@@ -3912,6 +4237,12 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     } catch (e) {
       if (mounted) {
         Navigator.of(context).pop();
+        if (e is SpiderCallException &&
+            e.stage == 'empty' &&
+            await _awaitSiteDialogSince(clickedAt)) {
+          return;
+        }
+        if (!mounted) return;
         showAppMessage('获取详情失败: $e', type: AppMessageType.error);
       }
     }
@@ -3967,8 +4298,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       site,
       currentEpisodeForDetail(
         // 关播后会话已清空：优先用保留副本，同站同片才命中。
-        session: _lastPlayedSession ??
-            ref.read(activePlaybackSessionProvider),
+        session: _lastPlayedSession ?? ref.read(activePlaybackSessionProvider),
         vodId: detail.item.id,
         siteKey: site?.key,
       ),
@@ -4145,10 +4475,11 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
           playUrl = resolved.url;
           headers = resolved.headers;
         }
-      } catch (_) {
+      } catch (e) {
         if (site?.usesCompanion ?? false) {
           if (mounted) {
-            showAppMessage('播放解析失败，请检查站源或解析配置', type: AppMessageType.error);
+            showAppMessage(playResolveFailureText(e),
+                type: AppMessageType.error);
           }
           return;
         }
@@ -4200,6 +4531,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
           onPlayRecord: _resumeHistoryRecord,
           onDeleteRecord: (id) => repo.removeHistory(id),
           onClearAll: () => repo.clearHistory(),
+          incognito: repo.historyIncognito,
         ),
       ),
     );
@@ -4459,8 +4791,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(AppRadii.pill)),
                   elevation: 2,
-                  shadowColor:
-                      context.palette.accentInk.withValues(alpha: 0.3),
+                  shadowColor: context.palette.accentInk.withValues(alpha: 0.3),
                 ),
                 icon: const Icon(Icons.settings_outlined, size: 18),
                 label: const Text('立即配置影视源',
@@ -4589,7 +4920,9 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                     const SizedBox(height: 10),
                   ],
                 ] else if (_categories.isNotEmpty) ...[
-                  if (!_isDoubanHome || _isSearching || _doubanViewingSingleCategory) ...[
+                  if (!_isDoubanHome ||
+                      _isSearching ||
+                      _doubanViewingSingleCategory) ...[
                     Container(
                       height: 38,
                       padding: const EdgeInsets.symmetric(vertical: 2),
@@ -4597,51 +4930,72 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                       child: HorizontalScrollArea(
                         controller: _categoryScrollController,
                         child: ListView.separated(
-                        key: const ValueKey('category-bar'),
-                        controller: _categoryScrollController,
-                        scrollDirection: Axis.horizontal,
-                        itemCount: _categories.length +
+                          key: const ValueKey('category-bar'),
+                          controller: _categoryScrollController,
+                          scrollDirection: Axis.horizontal,
+                          itemCount: _categories.length +
                               (_isDoubanHome && _doubanViewingSingleCategory
                                   ? 1
                                   : 0),
-                        separatorBuilder: (_, __) => const SizedBox(width: 8),
-                        itemBuilder: (context, index) {
-                          if (_isDoubanHome && _doubanViewingSingleCategory) {
-                            if (index == 0) {
-                              return _FilterPill(
-                                label: '◀ 返回推荐大厅',
-                                isSelected: false,
-                                onTap: () {
-                                  setState(() {
-                                    _doubanViewingSingleCategory = false;
-                                  });
-                                },
-                              );
+                          separatorBuilder: (_, __) => const SizedBox(width: 8),
+                          itemBuilder: (context, index) {
+                            if (_isDoubanHome && _doubanViewingSingleCategory) {
+                              if (index == 0) {
+                                return _FilterPill(
+                                  label: '◀ 返回推荐大厅',
+                                  isSelected: false,
+                                  onTap: () {
+                                    setState(() {
+                                      _doubanViewingSingleCategory = false;
+                                    });
+                                  },
+                                );
+                              }
+                              index -= 1;
                             }
-                            index -= 1;
-                          }
-                          final cat = _categories[index];
-                          final isSelected = _selectedCategory?.id == cat.id;
+                            final cat = _categories[index];
+                            final isSelected = _selectedCategory?.id == cat.id;
 
-                          return _FilterPill(
-                            label: cat.name,
-                            isSelected: isSelected,
-                            onTap: () {
-                              _searchController.clear();
-                              loadSiteData(
-                                  category: cat, preserveCategories: true);
-                            },
-                          );
-                        },
-                      ),
+                            return _FilterPill(
+                              label: cat.name,
+                              isSelected: isSelected,
+                              onTap: () {
+                                _searchController.clear();
+                                loadSiteData(
+                                    category: cat, preserveCategories: true);
+                              },
+                            );
+                          },
+                        ),
                       ),
                     ),
                     const SizedBox(height: 10),
                   ],
                 ],
 
+                if (_isSearching && _items.isNotEmpty && _searchNotice != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Row(children: [
+                      Expanded(
+                          child: Text(_searchNotice!,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  fontSize: AppType.caption,
+                                  color: palette.danger))),
+                      TextButton(
+                          onPressed: _searchBusy
+                              ? null
+                              : () => _handleSearch(_searchController.text),
+                          child: const Text('重试')),
+                    ]),
+                  ),
+
                 // 豆瓣单一分类网格提示：明确「点片=搜索」，避免被当成进豆瓣详情（§17）
-                if (_isDoubanHome && !_isSearching && _doubanViewingSingleCategory) ...[
+                if (_isDoubanHome &&
+                    !_isSearching &&
+                    _doubanViewingSingleCategory) ...[
                   Padding(
                     padding: const EdgeInsets.only(left: 2, bottom: 8),
                     child: Text(
@@ -4659,8 +5013,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                     decoration: BoxDecoration(
                       color: context.palette.panel,
                       borderRadius: BorderRadius.circular(AppRadii.lg),
-                      border: Border.all(
-                          color: context.glassBorder, width: 1.0),
+                      border:
+                          Border.all(color: context.glassBorder, width: 1.0),
                       boxShadow: AppShadows.subtleDepth(),
                     ),
                     clipBehavior: Clip.antiAlias,
@@ -4695,8 +5049,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                       decoration: BoxDecoration(
                                         color: palette.danger
                                             .withValues(alpha: 0.12),
-                                        borderRadius:
-                                            BorderRadius.circular(AppRadii.pill),
+                                        borderRadius: BorderRadius.circular(
+                                            AppRadii.pill),
                                         border: Border.all(
                                           color: palette.danger
                                               .withValues(alpha: 0.35),
@@ -4751,14 +5105,12 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                           height: 72,
                                           decoration: BoxDecoration(
                                             color: palette.raised,
-                                            borderRadius:
-                                                BorderRadius.circular(
-                                                    AppRadii.pill),
+                                            borderRadius: BorderRadius.circular(
+                                                AppRadii.pill),
                                             border: Border.all(
                                                 color: context.glassBorder,
                                                 width: 1.0),
-                                            boxShadow:
-                                                AppShadows.subtleDepth(),
+                                            boxShadow: AppShadows.subtleDepth(),
                                           ),
                                           child: Icon(
                                             _isSearching
@@ -4897,7 +5249,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                             children: [
                                               // §19 无限滚动：滚动通知从内部 GridView
                                               // 冒泡上来，接近底部时续页
-                                              NotificationListener<ScrollNotification>(
+                                              NotificationListener<
+                                                  ScrollNotification>(
                                                 onNotification: _onGridScroll,
                                                 child: VodGridView(
                                                   items: visibleItems,
@@ -4909,72 +5262,72 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                                                   // UA → 403，§17）；站源 `@头` 尾巴拆开带上
                                                   imageProviderFor: (item) =>
                                                       posterImageProvider(
-                                                              item.pic,
+                                                          item.pic,
                                                           targetWidth: 512),
                                                 ),
                                               ),
-                                          if (_doubanLoadingMore &&
-                                              _isDoubanHome &&
-                                              !_isSearching)
-                                            Positioned(
-                                              left: 0,
-                                              right: 0,
-                                              bottom: 14,
-                                              child: Center(
-                                                child: Container(
-                                                  padding:
-                                                      const EdgeInsets.symmetric(
+                                              if (_doubanLoadingMore &&
+                                                  _isDoubanHome &&
+                                                  !_isSearching)
+                                                Positioned(
+                                                  left: 0,
+                                                  right: 0,
+                                                  bottom: 14,
+                                                  child: Center(
+                                                    child: Container(
+                                                      padding: const EdgeInsets
+                                                          .symmetric(
                                                           horizontal: 14,
                                                           vertical: 8),
-                                                  decoration: BoxDecoration(
-                                                    color: context
-                                                        .palette.raised
+                                                      decoration: BoxDecoration(
+                                                        color: context
+                                                            .palette.raised
                                                             .withValues(
                                                                 alpha: 0.92),
-                                                    borderRadius:
+                                                        borderRadius:
                                                             BorderRadius
                                                                 .circular(
                                                                     AppRadii
                                                                         .pill),
-                                                    border: Border.all(
-                                                        color: context
+                                                        border: Border.all(
+                                                            color: context
                                                                 .palette
                                                                 .border),
-                                                  ),
-                                                  child: Row(
-                                                    mainAxisSize:
-                                                        MainAxisSize.min,
-                                                    children: [
-                                                      SizedBox(
-                                                        width: 12,
-                                                        height: 12,
-                                                        child:
-                                                            CircularProgressIndicator(
-                                                          strokeWidth: 2,
-                                                          color: context
-                                                              .palette
-                                                              .accentInk,
-                                                        ),
                                                       ),
+                                                      child: Row(
+                                                        mainAxisSize:
+                                                            MainAxisSize.min,
+                                                        children: [
+                                                          SizedBox(
+                                                            width: 12,
+                                                            height: 12,
+                                                            child:
+                                                                CircularProgressIndicator(
+                                                              strokeWidth: 2,
+                                                              color: context
+                                                                  .palette
+                                                                  .accentInk,
+                                                            ),
+                                                          ),
                                                           const SizedBox(
                                                               width: 8),
-                                                      Text(
-                                                        '正在加载更多…',
-                                                        style: TextStyle(
+                                                          Text(
+                                                            '正在加载更多…',
+                                                            style: TextStyle(
                                                               fontSize: AppType
                                                                   .caption,
-                                                          color: context
+                                                              color: context
                                                                   .palette
                                                                   .textSub,
-                                                        ),
+                                                            ),
+                                                          ),
+                                                        ],
                                                       ),
-                                                    ],
+                                                    ),
                                                   ),
                                                 ),
-                                              ),
-                                            ),
-                                        ],
-                                      ),
+                                            ],
+                                          ),
                   ),
                 ),
               ],
@@ -4985,7 +5338,6 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     );
   }
 }
-
 
 /// 筛选胶囊按钮 [ xxx ] / [ xxx 3 ]（Infuse × Netflix 风格流媒体药丸）
 ///

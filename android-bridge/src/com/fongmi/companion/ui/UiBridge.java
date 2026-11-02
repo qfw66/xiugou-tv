@@ -88,8 +88,16 @@ public final class UiBridge extends DialogHost {
 
     @Override
     public void onShow(Dialog dialog) {
+        SHOWN.incrementAndGet();
         showing.put(dialog.getHostId(), dialog);
         markDirty(dialog);
+    }
+
+    /** Dialogs ever shown by payloads; lets an RPC tell whether it asked the user for something. */
+    private static final java.util.concurrent.atomic.AtomicLong SHOWN = new java.util.concurrent.atomic.AtomicLong();
+
+    public static long shownCount() {
+        return SHOWN.get();
     }
 
     @Override

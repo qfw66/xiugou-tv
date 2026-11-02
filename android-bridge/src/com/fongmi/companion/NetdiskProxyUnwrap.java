@@ -23,13 +23,24 @@ import java.util.Map;
  * （2026-10-27 实测夸克原画：带 header 206 video/x-matroska，不带 header 412）。
  * 因此这里只换 url，header 原样保留，交给播放器单线程直连。
  *
- * 只处理 127.0.0.1:8096 且带 http(s) url 参数的地址；companion 自己的 9978 /proxy 改写
- * （{@link GuardProxyServer#rewriteLocalProxyUrls}）不受影响。
+ * 同一种加速代理协议不止出现在 8096：嗷呜（aowu）载荷把直链包成
+ * {@code http://127.0.0.1:2525/proxy?url=<urlencoded>&size=512K&thread=16&remove=true}，
+ * 2525 由它解出的 ARM64 {@code goproxy-android-arm64} 可执行文件提供，Windows 上同样起不来，
+ * 播放器连 2525 被拒（§57，2026-11-01 实测木偶「摆渡原畫」）。所以按「协议特征」识别，而不是只认端口：
+ * 回环地址 + {@code /kaiser} 或 {@code /proxy} + http(s) 的 url 参数，且（端口是 8096，或带
+ * thread / size / chunk 任一加速参数）。
+ *
+ * 不碰的情况：companion 自己起的载荷代理端口（{@link GuardProxyServer#ownsPort}、本机分块代理端口），
+ * 以及载荷 ProxyOrigin 形态 {@code /proxy?do=..&url=..}（带 do 参数，由
+ * {@link GuardProxyServer#rewriteLocalProxyUrls} 处理）。
  */
 public final class NetdiskProxyUnwrap {
 
-    /** 多线程代理固定监听的端口（载荷里硬编码）。 */
+    /** 载荷「GoProxy.startServer」硬编码的多线程代理端口；该端口不要求带加速参数。 */
     static final int ACCEL_PORT = 8096;
+
+    /** 加速代理的特征参数：线程数 / 分块大小。 */
+    private static final String[] ACCEL_PARAMS = {"thread", "size", "chunk"};
 
     private NetdiskProxyUnwrap() {
     }
@@ -40,7 +51,10 @@ public final class NetdiskProxyUnwrap {
      * 不是 JSON、没有命中加速代理时原样返回，不改动其它字段。
      */
     public static String unwrap(String result) {
-        if (result == null || !result.contains(":" + ACCEL_PORT)) return result;
+        if (result == null || (!result.contains("127.0.0.1:") && !result.contains("localhost:"))
+                || (!result.contains("/kaiser?") && !result.contains("/proxy?"))) {
+            return result;
+        }
         try {
             JSONObject json = new JSONObject(result);
             Map<String, String> headers = headersOf(json.opt("header"));
@@ -69,8 +83,8 @@ public final class NetdiskProxyUnwrap {
             }
             if (!changed) return result;
             com.github.catvod.utils.DebugLog.line("Netdisk", proxied
-                    ? "8096 加速代理已拆壳，改走本机分块并发代理"
-                    : "8096 加速代理已拆壳，改为直连网盘");
+                    ? "本地加速代理已拆壳，改走本机分块并发代理"
+                    : "本地加速代理已拆壳，改为直连网盘");
             return json.toString();
         } catch (Exception e) {
             return result;
@@ -102,28 +116,42 @@ public final class NetdiskProxyUnwrap {
 
     /** 是加速代理地址时返回其 url 参数指向的 http(s) 直链；否则返回 null。 */
     static String directUrlOf(String address) {
-        if (address == null || !address.startsWith("http://127.0.0.1:" + ACCEL_PORT + "/")) return null;
+        if (address == null
+                || (!address.startsWith("http://127.0.0.1:") && !address.startsWith("http://localhost:"))) {
+            return null;
+        }
         String query;
+        int port;
         try {
             URI uri = new URI(address);
-            if (uri.getPort() != ACCEL_PORT) return null;
+            port = uri.getPort();
             String path = uri.getPath();
             if (!"/kaiser".equals(path) && !"/proxy".equals(path)) return null;
             query = uri.getRawQuery();
         } catch (Exception e) {
             return null;
         }
-        if (query == null) return null;
+        if (query == null || port <= 0) return null;
+        // companion 自己起的代理（载荷 ProxyOrigin 服务 / 本机分块代理）不拆
+        if (port == NetdiskChunkProxy.localPort() || GuardProxyServer.ownsPort(port)) return null;
+        String target = null;
+        boolean accel = port == ACCEL_PORT;
         for (String pair : query.split("&")) {
-            if (!pair.startsWith("url=")) continue;
-            String decoded;
-            try {
-                decoded = URLDecoder.decode(pair.substring(4), StandardCharsets.UTF_8);
-            } catch (IllegalArgumentException e) {
-                return null;
+            int eq = pair.indexOf('=');
+            String name = eq < 0 ? pair : pair.substring(0, eq);
+            if ("do".equals(name)) return null; // ProxyOrigin 形态：交给 rewriteLocalProxyUrls
+            for (String p : ACCEL_PARAMS) {
+                if (p.equals(name)) accel = true;
             }
-            return decoded.startsWith("http://") || decoded.startsWith("https://") ? decoded : null;
+            if ("url".equals(name) && target == null && eq >= 0) {
+                try {
+                    target = URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+                } catch (IllegalArgumentException e) {
+                    return null;
+                }
+            }
         }
-        return null;
+        if (!accel || target == null) return null;
+        return target.startsWith("http://") || target.startsWith("https://") ? target : null;
     }
 }

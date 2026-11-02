@@ -73,11 +73,35 @@ public class SQLiteDatabase extends SQLiteClosable {
         return -1;
     }
 
-    public int update(String table, ContentValues values, String whereClause, String[] whereArgs) {
-        return 0;
+    /** 载荷常用 replace(表, nullColumnHack, values) 做 upsert；返回受影响行数。 */
+    public static final int CONFLICT_NONE = 0;
+    public static final int CONFLICT_ROLLBACK = 1;
+    public static final int CONFLICT_ABORT = 2;
+    public static final int CONFLICT_FAIL = 3;
+    public static final int CONFLICT_IGNORE = 4;
+    public static final int CONFLICT_REPLACE = 5;
+
+    /** 与 insert / replace 一样不落库（本替身的数据库为空实现），返回 -1 表示未插入。 */
+    public long insertWithOnConflict(String table, String nullColumnHack, ContentValues initialValues,
+                                     int conflictAlgorithm) {
+        return conflictAlgorithm == CONFLICT_REPLACE
+                ? replace(table, nullColumnHack, initialValues)
+                : insert(table, nullColumnHack, initialValues);
+    }
+
+    public long replace(String table, String nullColumnHack, ContentValues values) {
+        return -1;
+    }
+
+    public long replaceOrThrow(String table, String nullColumnHack, ContentValues values) {
+        return -1;
     }
 
     public int delete(String table, String whereClause, String[] whereArgs) {
+        return 0;
+    }
+
+    public int update(String table, ContentValues values, String whereClause, String[] whereArgs) {
         return 0;
     }
 

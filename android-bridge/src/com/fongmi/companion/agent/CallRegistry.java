@@ -124,7 +124,11 @@ public final class CallRegistry {
 
     /** 请求结束（成功或失败）后注销，防止 Call 引用长期滞留。 */
     public static void unregister(Call call) {
-        String tag = CURRENT_TAG.get();
+        unregister(CURRENT_TAG.get(), call);
+    }
+
+    /** 按显式标签注销：响应体在别的线程/RPC 结束后才关闭时用（见 HttpLogHook 的响应体包装）。 */
+    public static void unregister(String tag, Call call) {
         if (tag == null || call == null) {
             return;
         }
@@ -170,6 +174,24 @@ public final class CallRegistry {
                 }
             }
             calls.clear();
+        }
+        return cancelled;
+    }
+
+    /**
+     * 取消 {@code tag} 本身以及 {@code tag + suffix + 序号} 形式的同族标签
+     * （服务端为无 rpcId 的请求生成的唯一标签），供按粗粒度标签取消时使用。
+     */
+    public static int cancelFamily(String tag, String suffix) {
+        if (tag == null || tag.isEmpty()) {
+            return 0;
+        }
+        int cancelled = cancel(tag);
+        String prefix = tag + suffix;
+        for (String key : new java.util.ArrayList<>(IN_FLIGHT.keySet())) {
+            if (key.startsWith(prefix)) {
+                cancelled += cancel(key);
+            }
         }
         return cancelled;
     }

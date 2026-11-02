@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:xml/xml.dart';
+import '../net/http_client_factory.dart';
 import '../player/models/player_state.dart';
 import 'push_input_resolver.dart';
 
@@ -97,7 +98,7 @@ class WebDavRepository {
   WebDavRepository({Dio? dio})
       : _ownsDio = dio == null,
         _dio = dio ??
-            Dio(BaseOptions(
+            HttpClientFactory.createDio(BaseOptions(
               connectTimeout: const Duration(seconds: 10),
               receiveTimeout: const Duration(seconds: 15),
             ));

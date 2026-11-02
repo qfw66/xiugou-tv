@@ -6,14 +6,19 @@ import com.github.catvod.utils.HeaderOverride;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import okhttp3.Call;
 import okhttp3.Interceptor;
+import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
 import okio.Buffer;
+import okio.BufferedSource;
+import okio.ForwardingSource;
+import okio.Okio;
 
 /**
  * OkHttp 钩子：由 {@link HttpLogAgent} / 构建期 {@link PatchOkHttp} 注入到
@@ -73,8 +78,11 @@ public final class HttpLogHook {
             } catch (Throwable ignored) {
             }
             boolean tracked = call != null && CallRegistry.register(call);
+            final String tag = tracked ? CallRegistry.currentTag() : null;
+            boolean handedOff = false;
             try {
                 Response response = chain.proceed(request);
+                response = UpstreamResponsePolicy.handle(this, chain.request(), request, response, call);
                 if (logging) {
                     long cost = (System.nanoTime() - started) / 1_000_000L;
                     byte[] peek = new byte[0];
@@ -87,12 +95,55 @@ public final class HttpLogHook {
                     DebugLog.httpResponse(id, response.code(), cost,
                             response.header("Content-Type"), length, peek);
                 }
+                if (tracked && response.body() != null) {
+                    // 注销推迟到响应体关闭：读响应体期间仍可被 /spider/cancel 与看门狗掐断
+                    response = response.newBuilder()
+                            .body(new UnregisterOnClose(response.body(), tag, call))
+                            .build();
+                    handedOff = true;
+                }
                 return response;
             } catch (Throwable t) {
                 if (logging) DebugLog.httpError(id, t);
                 throw t;
             } finally {
-                if (tracked) CallRegistry.unregister(call);
+                if (tracked && !handedOff) CallRegistry.unregister(tag, call);
+            }
+        }
+
+        /** 包装响应体：关闭时（只一次）从 CallRegistry 注销该请求。 */
+        private static final class UnregisterOnClose extends ResponseBody {
+            private final ResponseBody delegate;
+            private final BufferedSource source;
+
+            UnregisterOnClose(ResponseBody delegate, String tag, Call call) {
+                this.delegate = delegate;
+                AtomicBoolean done = new AtomicBoolean();
+                this.source = Okio.buffer(new ForwardingSource(delegate.source()) {
+                    @Override
+                    public void close() throws IOException {
+                        try {
+                            super.close();
+                        } finally {
+                            if (done.compareAndSet(false, true)) CallRegistry.unregister(tag, call);
+                        }
+                    }
+                });
+            }
+
+            @Override
+            public MediaType contentType() {
+                return delegate.contentType();
+            }
+
+            @Override
+            public long contentLength() {
+                return delegate.contentLength();
+            }
+
+            @Override
+            public BufferedSource source() {
+                return source;
             }
         }
 
@@ -105,6 +156,10 @@ public final class HttpLogHook {
         private static byte[] body(Request request) {
             try {
                 if (request.body() == null) return null;
+                // 长度未知（多为流式 / 一次性 body）或超出日志上限时不读：读了会消耗掉一次性 body，
+                // 也会把大文件整体搬进内存。
+                long length = request.body().contentLength();
+                if (length < 0 || length > DebugLog.maxChars()) return null;
                 Buffer buffer = new Buffer();
                 request.body().writeTo(buffer);
                 return buffer.readByteArray();

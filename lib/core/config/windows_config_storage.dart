@@ -114,6 +114,15 @@ class WindowsConfigStorage {
         jsonDecode(await file.readAsString()) as Map<String, dynamic>);
   }
 
+  /// 删除当前配置快照与旧版缓存（卸载配置时用；文件不存在视为成功）
+  Future<void> deleteCurrentConfig() async {
+    final dir = await getStorageDirectory();
+    for (final name in ['current_config.json', _vodConfigCacheFileName]) {
+      final file = File(p.join(dir.path, name));
+      if (await file.exists()) await file.delete();
+    }
+  }
+
   Future<void> saveCurrentConfig(ConfigSnapshot snapshot) async {
     final dir = await getStorageDirectory();
     await _atomicWrite(

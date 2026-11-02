@@ -21,6 +21,15 @@ public class SpiderServer {
 
     private static final long DEFAULT_CALL_TIMEOUT_MS = 60_000L;
     private static final int MAX_INFLIGHT_CALLS = 64;
+    /** 客户端给的看门狗超时上限：全站体检按站数放大预算，30 分钟足够覆盖单批。 */
+    private static final long MAX_CALL_TIMEOUT_MS = 30 * 60_000L;
+    /** /ui/events 长轮询等待上限。 */
+    private static final long MAX_POLL_WAIT_MS = 60_000L;
+    /** 无 rpcId 时生成服务端唯一后缀的序号，见 {@link #rpcTagOf}。 */
+    private static final java.util.concurrent.atomic.AtomicLong SERVER_RPC_SEQ =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** 服务端生成标签的分隔符：按粗粒度 tag 取消时据此匹配同族标签。 */
+    static final String SERVER_RPC_SUFFIX = "#srv";
 
     private final DexSpiderLoader loader;
     private final int requestedPort;
@@ -53,14 +62,15 @@ public class SpiderServer {
             return t;
         }));
 
-        server.createContext("/health", new HealthHandler());
-        server.createContext("/spider/load", new LoadHandler());
-        server.createContext("/spider/call", new CallHandler());
-        server.createContext("/spider/cancel", new CancelHandler());
-        server.createContext("/shutdown", new ShutdownHandler());
+        server.createContext("/health", guarded(new HealthHandler()));
+        server.createContext("/spider/load", guarded(new LoadHandler()));
+        server.createContext("/spider/call", guarded(new CallHandler()));
+        server.createContext("/spider/cancel", guarded(new CancelHandler()));
+        server.createContext("/spider/reset", guarded(new ResetHandler()));
+        server.createContext("/shutdown", guarded(new ShutdownHandler()));
         // 载荷弹窗 / Toast 等界面事件（长轮询）与用户操作回放，见 ui.UiBridge
-        server.createContext("/ui/events", new UiEventsHandler());
-        server.createContext("/ui/input", new UiInputHandler());
+        server.createContext("/ui/events", guarded(new UiEventsHandler()));
+        server.createContext("/ui/input", guarded(new UiInputHandler()));
         com.fongmi.companion.ui.UiBridge.install();
         // 网盘直链分块并发代理（替代载荷 8096 加速代理），见 docs/NETDISK_PLAYBACK_PLAN.md
         server.createContext(NetdiskChunkProxy.PREFIX, new NetdiskChunkProxy());
@@ -69,6 +79,44 @@ public class SpiderServer {
         this.boundPort = server.getAddress().getPort();
         NetdiskChunkProxy.setLocalPort(this.boundPort);
         return this.boundPort;
+    }
+
+    /** 请求体超过 {@link #MAX_BODY_BYTES}：统一包装层据此回 413。 */
+    private static final class BodyTooLargeException extends IOException {
+        BodyTooLargeException() {
+            super("请求体超过 8 MB");
+        }
+    }
+
+    /**
+     * 统一包装：任何 handler 抛出的异常都回 500（请求体超限回 413），且无论成败都关闭 exchange，
+     * 避免连接与请求体流在异常路径上滞留。响应头已发出时只记日志、不再重复写头。
+     */
+    private static HttpHandler guarded(HttpHandler inner) {
+        return exchange -> {
+            try {
+                inner.handle(exchange);
+            } catch (Throwable t) {
+                System.err.println("[SpiderServer] handler error " + exchange.getRequestURI().getPath() + ": " + t);
+                if (exchange.getResponseCode() == -1) {
+                    try {
+                        if (t instanceof BodyTooLargeException) {
+                            sendJsonResponse(exchange, 413, "{\"code\":-1,\"error\":\"payload too large\"}");
+                        } else {
+                            sendJsonResponse(exchange, 500, "{\"code\":-1,\"error\":\"" + escapeJson(String.valueOf(t)) + "\"}");
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            } finally {
+                exchange.close();
+            }
+        };
+    }
+
+    /** 当前占用 callPool 的 worker 数：持续等于上限说明有不可中止的阻塞，客户端可据此重启 companion。 */
+    public int activeCalls() {
+        return callPool.getActiveCount();
     }
 
     public void stop() {
@@ -101,12 +149,16 @@ public class SpiderServer {
         }
     }
 
+    /** 请求体上限：本地 RPC 最大的是全站体检列表，几 MB 足够。 */
+    private static final int MAX_BODY_BYTES = 8 << 20;
+
     private static String readBody(HttpExchange exchange) throws IOException {
         try (InputStream is = exchange.getRequestBody();
              ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
             byte[] buf = new byte[4096];
             int n;
             while ((n = is.read(buf)) != -1) {
+                if (baos.size() + n > MAX_BODY_BYTES) throw new BodyTooLargeException();
                 baos.write(buf, 0, n);
             }
             return baos.toString(StandardCharsets.UTF_8);
@@ -118,8 +170,30 @@ public class SpiderServer {
         public void handle(HttpExchange exchange) throws IOException {
             String resp = "{\"status\":\"ok\",\"version\":\"1.0.0\",\"javaVersion\":\""
                     + System.getProperty("java.version", "unknown")
-                    + "\",\"port\":" + boundPort + "}";
+                    + "\",\"port\":" + boundPort
+                    + ",\"activeCalls\":" + callPool.getActiveCount()
+                    + ",\"maxCalls\":" + MAX_INFLIGHT_CALLS + "}";
             sendJsonResponse(exchange, 200, resp);
+        }
+    }
+
+    /**
+     * 换配置时由客户端调用：释放旧配置的全部 spider、类加载器、代理端口与密码服务子进程。
+     * 不重置的话这些只增不减（元空间、python 子进程、9978-10000 端口池都会被耗尽）。
+     */
+    private class ResetHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJsonResponse(exchange, 405, "{\"error\":\"Method Not Allowed\"}");
+                return;
+            }
+            readBody(exchange);
+            int released = loader.clear();
+            com.fongmi.companion.hardshell.PayloadCryptoService.reset();
+            com.fongmi.companion.guard.GuardCryptoService.reset();
+            System.out.println("[SpiderServer] 配置已切换，释放 spider " + released + " 个");
+            sendJsonResponse(exchange, 200, "{\"code\":0,\"released\":" + released + "}");
         }
     }
 
@@ -140,7 +214,7 @@ public class SpiderServer {
         public void handle(HttpExchange exchange) throws IOException {
             Map<String, String> query = parseQuery(exchange.getRequestURI().getRawQuery());
             long after = parseLong(query.get("after"), -1L);
-            long waitMs = parseLong(query.get("wait"), 25_000L);
+            long waitMs = Math.max(0L, Math.min(MAX_POLL_WAIT_MS, parseLong(query.get("wait"), 25_000L)));
             try {
                 sendJsonResponse(exchange, 200, com.fongmi.companion.ui.UiBridge.get().poll(after, waitMs));
             } catch (InterruptedException e) {
@@ -206,8 +280,7 @@ public class SpiderServer {
             long timeoutMs = resolveTimeoutMs(map);
             final String loadTag = "load@" + siteKey;
             String loadedKey = runWithWatchdog(exchange, loadTag, rpcTagOf(loadTag, map.get("rpcId")), timeoutMs, () -> {
-                ParseStage.begin(loadTag);
-                Spider spider = loader.getSpider(siteKey, api, ext, jar);
+                Spider spider = requireUsableSpider(loader.getSpider(siteKey, api, ext, jar));
                 return spider.siteKey != null ? spider.siteKey : siteKey;
             });
             if (loadedKey == null) {
@@ -242,6 +315,7 @@ public class SpiderServer {
             final String callTag = method + "@" + siteKey;
             long dbg = DebugLog.rpcEnabled() ? DebugLog.nextId() : 0;
             DebugLog.rpcStart(dbg, method, siteKey, api, ext, jar, map);
+            long dialogsBefore = com.fongmi.companion.ui.UiBridge.shownCount();
             String result = runWithWatchdog(exchange, callTag, rpcTagOf(callTag, map.get("rpcId")), timeoutMs,
                     () -> invokeSpiderCall(siteKey, api, ext, jar, method, map, callTag));
             if (result == null) {
@@ -249,6 +323,24 @@ public class SpiderServer {
             }
             DebugLog.rpcResult(dbg, method, result);
 
+            // 空结果不等于成功：detail/player 必须返回内容，空串代表源方没有下发
+            // （典型：上游 panonline=false，网盘在线模式被关掉）。以前包装成 code:0 + data:""，
+            // 客户端只能归到「解析失败」，把用户引去查 Cookie —— 实际 CK 是好的。
+            // home/search 的空列表是正常结果，不能套用这条。
+            String trimmed = result == null ? "" : result.trim();
+            boolean mustHaveContent = "detailContent".equals(method) || "playerContent".equals(method);
+            if (mustHaveContent && (trimmed.isEmpty() || "{}".equals(trimmed) || "[]".equals(trimmed))) {
+                // The payload asked the user something (e.g. 海绵「选择任意网盘扫码后即可播放」) and got no answer:
+                // retrying would only pop the same dialog again.
+                boolean askedUser = com.fongmi.companion.ui.UiBridge.shownCount() > dialogsBefore;
+                String stage = askedUser ? "interaction" : "empty";
+                String detail = askedUser
+                        ? "站源需要先在弹出的窗口里完成操作（如扫码登录网盘）后才能继续"
+                        : "站点未返回内容（源方可能已关闭网盘在线模式）";
+                sendJsonResponse(exchange, 200,
+                        "{\"code\":-1,\"stage\":\"" + stage + "\",\"detail\":\"" + escapeJson(detail) + "\"}");
+                return;
+            }
             String resp = "{\"code\":0,\"data\":" + (isJsonValue(result) ? result : "\"" + escapeJson(result) + "\"") + "}";
             sendJsonResponse(exchange, 200, resp);
         }
@@ -278,7 +370,10 @@ public class SpiderServer {
             if (tag.isEmpty()) {
                 tag = text(payload.get("tag"));
             }
-            int cancelled = CallRegistry.cancel(tag);
+            // 只给了粗粒度 tag 时，连同服务端为无 rpcId 请求生成的同族标签一起取消
+            int cancelled = payload.get("rpcId") instanceof String && !tag.isEmpty() && tag.equals(text(payload.get("rpcId")))
+                    ? CallRegistry.cancel(tag)
+                    : CallRegistry.cancelFamily(tag, SERVER_RPC_SUFFIX);
             DebugLog.line("RPC", "cancel tag=" + tag + " cancelled=" + cancelled);
             sendJsonResponse(exchange, 200, "{\"code\":0,\"tag\":\"" + escapeJson(tag)
                     + "\",\"cancelled\":" + cancelled + "}");
@@ -294,7 +389,10 @@ public class SpiderServer {
      * （比如连着搜两个词）不会互相误伤；没给就退回 {@code fallbackTag}，粒度变粗但依然可取消。
      */
     private static String rpcTagOf(String fallbackTag, String rpcId) {
-        return rpcId == null || rpcId.trim().isEmpty() ? fallbackTag : rpcId.trim();
+        // 没给 rpcId 时生成唯一后缀：同标签并发时，先结束的 worker 收尾 unbind 不会取消另一次的在途请求
+        return rpcId == null || rpcId.trim().isEmpty()
+                ? fallbackTag + SERVER_RPC_SUFFIX + SERVER_RPC_SEQ.incrementAndGet()
+                : rpcId.trim();
     }
 
     /**
@@ -312,9 +410,14 @@ public class SpiderServer {
         try {
             future = callPool.submit(() -> {
                 String previous = CallRegistry.bind(rpcTag);
+                ParseStage.begin(rpcTag);
                 try {
                     return task.call();
+                } catch (Throwable error) {
+                    throw new SpiderWorkerFailure(error, ParseStage.current());
                 } finally {
+                    ParseStage.clearFailure();
+                    ParseStage.clearTag(rpcTag);
                     CallRegistry.unbind(previous);
                 }
             });
@@ -338,11 +441,13 @@ public class SpiderServer {
                     + "\",\"timeoutMs\":" + timeoutMs + "}");
             return null;
         } catch (ExecutionException ee) {
-            Throwable cause = ee.getCause() != null ? ee.getCause() : ee;
+            Throwable worker = ee.getCause() != null ? ee.getCause() : ee;
+            ParseStage.Failure failure = worker instanceof SpiderWorkerFailure
+                    ? ((SpiderWorkerFailure) worker).failure : null;
+            Throwable cause = worker instanceof SpiderWorkerFailure ? worker.getCause() : worker;
             cause.printStackTrace();
             DebugLog.line("RPC", "error " + tag + ": " + cause);
             // 响应分三层：error=面向用户的人话；stage=内部阶段；detail=技术细节（只在日志/探针用）
-            ParseStage.Failure failure = ParseStage.forTag(tag);
             String stage = failure != null ? failure.stage : ParseStage.CALL;
             String detail = failure != null ? failure.detail : String.valueOf(cause.getMessage());
             sendJsonResponse(exchange, 500, "{\"code\":-1,\"error\":\"站点暂不可用\",\"stage\":\""
@@ -373,7 +478,7 @@ public class SpiderServer {
             try {
                 long v = Long.parseLong(raw.trim());
                 if (v > 0) {
-                    return v;
+                    return Math.min(v, MAX_CALL_TIMEOUT_MS);
                 }
             } catch (NumberFormatException ignored) {
             }
@@ -385,10 +490,25 @@ public class SpiderServer {
         return s != null && (s.startsWith("{") || s.startsWith("["));
     }
 
+    private static final class SpiderWorkerFailure extends Exception {
+        final ParseStage.Failure failure;
+        SpiderWorkerFailure(Throwable cause, ParseStage.Failure failure) {
+            super(cause);
+            this.failure = failure;
+        }
+    }
+
+    private static Spider requireUsableSpider(Spider spider) {
+        if (spider == null || spider instanceof SpiderNull) {
+            if (ParseStage.current() == null) ParseStage.fail(ParseStage.CLASS, "payload not loadable");
+            throw new IllegalStateException("站点暂不可用");
+        }
+        return spider;
+    }
+
     private String invokeSpiderCall(String siteKey, String api, String ext, String jar, String method,
                                     Map<String, String> map, String stageTag) throws Exception {
-        // 每次调用先清掉本线程上一次的阶段记录：worker 线程是复用的，否则会读到残留
-        ParseStage.begin(stageTag);
+        // The watchdog owns this worker's unique RPC diagnostic scope.
         // 自检总开关：不绑定站点，运行期改写体检开关（设置页切换开关时下发）。
         if ("selfCheckConfig".equals(method)) {
             boolean on = Boolean.parseBoolean(map.getOrDefault("enabled", "false"));
@@ -409,17 +529,8 @@ public class SpiderServer {
                     parseInt(map.get("maxCategories"), 3),
                     parseInt(map.get("perSiteTimeout"), 30));
         }
-        Spider spider = loader.getSpider(siteKey, api, ext, jar);
-        // 载荷没加载起来时**不再静默返回空串**：那会让调用方看到 {"code":0,"data":""}，
-        // 误以为「站点没内容」。这里升级为带阶段的错误（阶段由 getSpider 内部记录）。
-        if (spider instanceof SpiderNull) {
-            ParseStage.Failure failure = ParseStage.current();
-            String stage = failure != null ? failure.stage : ParseStage.CLASS;
-            String detail = failure != null ? failure.detail : "payload not loadable";
-            ParseStage.fail(stage, detail);
-            // 抛给 RPC 层的 message 保持「人话」；技术细节走 ParseStage → 响应的 detail 字段与日志
-            throw new IllegalStateException("站点暂不可用");
-        }
+        Spider spider = requireUsableSpider(loader.getSpider(siteKey, api, ext, jar));
+        ParseStage.clearFailure();
         String result;
         switch (method) {
             case "homeContent": {
@@ -471,6 +582,11 @@ public class SpiderServer {
                 result = "{}";
                 break;
         }
+        // invariant: an upstream error page swallowed by the payload must not become a valid empty listing.
+        ParseStage.Failure upstream = ParseStage.current();
+        if (upstream != null && ParseStage.UPSTREAM.equals(upstream.stage) && isEmptyListing(method, result)) {
+            throw new IllegalStateException(upstream.detail);
+        }
         // 播放地址改写：载荷把 m3u8 包成 http://127.0.0.1:<port>/proxy?do=..&url=..，
         // 而 mv p/media_kit 会在第一个 & 处截断 URL（实测请求行只剩 ?do=m3u8），
         // 载荷拿不到 url → 空流 → 播放器报 "Failed to recognize file format."。
@@ -480,6 +596,21 @@ public class SpiderServer {
             result = NetdiskProxyUnwrap.unwrap(result);
         }
         return result != null ? GuardProxyServer.rewriteLocalProxyUrls(result) : "";
+    }
+
+    private static boolean isEmptyListing(String method, String result) {
+        boolean home = "homeContent".equals(method);
+        if (!home && !"categoryContent".equals(method) && !"searchContent".equals(method)) return false;
+        String text = result == null ? "" : result.trim();
+        if (text.isEmpty() || "{}".equals(text)) return true;
+        try {
+            org.json.JSONObject json = new org.json.JSONObject(text);
+            org.json.JSONArray list = json.optJSONArray("list");
+            org.json.JSONArray classes = json.optJSONArray("class");
+            return (list == null || list.length() == 0) && (!home || classes == null || classes.length() == 0);
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private static String escapeJson(String s) {

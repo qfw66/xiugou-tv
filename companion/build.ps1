@@ -120,6 +120,15 @@ if (Test-Path -LiteralPath $okhttpBuilder) {
     Write-Host "WARN: okhttp3 OkHttpClient`$Builder.class not found; HTTP debug logs disabled"
 }
 
+# android-bridge/resources 下是随 jar 发布的数据（如 source-rules.properties），
+# javac 不会带上非 .java 文件，必须显式复制进 jar 根目录。
+$bridgeResourcesDir = Join-Path $bridgeDir "resources"
+if (Test-Path $bridgeResourcesDir) {
+    Copy-Item -Path (Join-Path $bridgeResourcesDir "*") -Destination $outDir -Recurse -Force
+} else {
+    throw "android-bridge resources not found: $bridgeResourcesDir"
+}
+
 Write-Host "Packaging companion-service.jar..."
 $manifestContent = @"
 Manifest-Version: 1.0
@@ -176,4 +185,28 @@ if (Test-Path $unidbgDir) {
     Write-Host "Copied guard-decrypt libs: $($unidbgJars.Count) jar(s) -> $unidbgDist"
 } else {
     Write-Host "WARN: 缺少 $unidbgDir，加固站点将无法自动解密（退回 SpiderNull）"
+}
+
+# py 源子进程运行时：宿主基类与 runner 放到 dist/pyshell，由 PyRuntime 以子进程拉起。
+# 与 lib-unidbg 同理不并进主 jar：只有 py 源用得上，且脚本目录需要能单独改。
+$pyShellDir = Join-Path $scriptDir "pyshell"
+if (Test-Path $pyShellDir) {
+    $pyShellDist = Join-Path $distDir "pyshell"
+    if (Test-Path $pyShellDist) { Remove-Item -Recurse -Force $pyShellDist }
+    Copy-Item -Path $pyShellDir -Destination $pyShellDist -Recurse -Force
+    Write-Host "Copied py shell runtime -> $pyShellDist"
+} else {
+    Write-Host "WARN: 缺少 $pyShellDir，py 源站点将无法执行"
+}
+
+# 便携 CPython（含 requests / pycryptodome / beautifulsoup4 / lxml / pyquery）：放到 dist/pyruntime。
+# 缺这个目录时 PyRuntime 会回退到 PATH 上的 python，那只有开发机可用，分发包必须带上。
+$pyRuntimeDir = Join-Path $scriptDir "pyruntime"
+if (Test-Path $pyRuntimeDir) {
+    $pyRuntimeDist = Join-Path $distDir "pyruntime"
+    if (Test-Path $pyRuntimeDist) { Remove-Item -Recurse -Force $pyRuntimeDist }
+    Copy-Item -Path $pyRuntimeDir -Destination $pyRuntimeDist -Recurse -Force
+    Write-Host "Copied portable python runtime -> $pyRuntimeDist"
+} else {
+    Write-Host "WARN: 缺少 $pyRuntimeDir，py 源将退回系统 python（仅开发环境可用）"
 }

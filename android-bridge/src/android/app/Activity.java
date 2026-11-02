@@ -73,4 +73,17 @@ public class Activity extends Context {
 
     public void setRequestedOrientation(int requestedOrientation) {
     }
+    /** 进程里只有一个 Application 单例。 */
+    public final Application getApplication() {
+        return Application.get();
+    }
+
+    public View getCurrentFocus() {
+        View decor = window.getDecorView();
+        return decor == null ? null : decor.findFocus();
+    }
+
+    public android.window.OnBackInvokedDispatcher getOnBackInvokedDispatcher() {
+        return window.getOnBackInvokedDispatcher();
+    }
 }

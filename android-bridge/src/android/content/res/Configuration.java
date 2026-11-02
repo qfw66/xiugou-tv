@@ -15,6 +15,15 @@ public class Configuration {
     public static final int UI_MODE_NIGHT_YES = 0x20;
 
     public int orientation = ORIENTATION_LANDSCAPE;
+    public static final int SCREENLAYOUT_SIZE_MASK = 0x0f;
+    public static final int SCREENLAYOUT_SIZE_NORMAL = 0x02;
+    public static final int SCREENLAYOUT_SIZE_LARGE = 0x03;
+    public static final int SCREENLAYOUT_SIZE_XLARGE = 0x04;
+    public static final int SCREENLAYOUT_LONG_YES = 0x20;
+
+    /** 电视按超大屏、长屏报告。 */
+    public int screenLayout = SCREENLAYOUT_SIZE_XLARGE | SCREENLAYOUT_LONG_YES;
+    public int smallestScreenWidthDp = 1080;
     public int uiMode = UI_MODE_TYPE_TELEVISION | UI_MODE_NIGHT_NO;
     public int screenWidthDp = 1920;
     public int screenHeightDp = 1080;

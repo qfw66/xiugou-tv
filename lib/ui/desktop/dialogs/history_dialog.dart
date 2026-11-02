@@ -18,6 +18,9 @@ class HistoryDialog extends StatelessWidget {
   /// 分组所用的当前时间（可注入以便测试）
   final DateTime? now;
 
+  /// 无痕浏览开启中（§14）：标题旁显示「无痕模式中」，提示新的观看不会记录
+  final bool incognito;
+
   const HistoryDialog({
     super.key,
     required this.records,
@@ -25,6 +28,7 @@ class HistoryDialog extends StatelessWidget {
     required this.onDeleteRecord,
     required this.onClearAll,
     this.now,
+    this.incognito = false,
   });
 
   String _formatTime(int timestamp) {
@@ -81,13 +85,42 @@ class HistoryDialog extends StatelessWidget {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      '播放历史',
-                      style: TextStyle(
-                        fontSize: AppType.h2,
-                        fontWeight: FontWeight.bold,
-                        color: palette.textTitle,
-                      ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '播放历史',
+                          style: TextStyle(
+                            fontSize: AppType.h2,
+                            fontWeight: FontWeight.bold,
+                            color: palette.textTitle,
+                          ),
+                        ),
+                        if (incognito) ...[
+                          const SizedBox(width: 10),
+                          Tooltip(
+                            message: '新的观看不会写入历史，也不会更新续播进度',
+                            child: Container(
+                              key: const ValueKey('history-incognito-badge'),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: palette.raised,
+                                borderRadius:
+                                    BorderRadius.circular(AppRadii.pill),
+                                border: Border.all(color: palette.textSub),
+                              ),
+                              child: Text(
+                                '无痕模式中',
+                                style: TextStyle(
+                                  fontSize: AppType.caption,
+                                  color: palette.textSub,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                     Text(
                       '共 ${records.length} 条观看记录',

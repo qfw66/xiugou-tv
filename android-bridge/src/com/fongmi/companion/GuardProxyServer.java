@@ -24,11 +24,16 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 /**
- * 加固载荷（ftyguard/wexguard）本地代理宿主。
+ * 加固载荷（ftyguard/wexguard）与普通 TVBox jar 的本地代理宿主。
+ *
+ * <p>加固载荷的代理类是 {@code ProxyOrigin}；普通 jar（CatVodSpider 参考实现，如肥猫）叫
+ * {@code Proxy}，两者协议相同（端口探测 do=ck、按 do= 分发），只是类名不同，优先 ProxyOrigin。
  *
  * 手机端由 TVBox 宿主在固定端口起 NanoHTTPD，并把 /proxy?do=... 交给
  * 载荷的 com.github.catvod.spider.ProxyOrigin#proxy(Map) 处理；载荷里的静态字段
@@ -56,6 +61,12 @@ public final class GuardProxyServer {
     private static final Map<ClassLoader, HttpServer> SERVERS = new ConcurrentHashMap<>();
     private static final Map<ClassLoader, Integer> PORTS = new ConcurrentHashMap<>();
     private static final Map<ClassLoader, Method> PROXY_METHODS = new ConcurrentHashMap<>();
+    /** 每个 loader 实际托管的代理类（加固载荷 ProxyOrigin，或普通 jar 的 Proxy）。 */
+    private static final Map<ClassLoader, Class<?>> PROXY_CLASSES = new ConcurrentHashMap<>();
+    /** HttpServer.stop 不会关闭外部执行器，须随服务一起显式关闭。 */
+    private static final Map<ClassLoader, ExecutorService> POOLS = new ConcurrentHashMap<>();
+    /** 单个载荷代理的并发处理线程上限（播放器一般 1~4 路并发），超出排队。 */
+    private static final int MAX_HANDLER_THREADS = 16;
     /** 结构性失败（没有 ProxyOrigin.proxy(Map)）：不再重复 bind，避免端口泄漏。 */
     private static final Map<ClassLoader, String> BLOCKED = new ConcurrentHashMap<>();
     /** 端口注入失败原因：已知不可注入时不再反复尝试。 */
@@ -93,7 +104,11 @@ public final class GuardProxyServer {
             try {
                 proxyClass = Class.forName("com.github.catvod.spider.ProxyOrigin", false, loader);
             } catch (Throwable notGuardPayload) {
-                return;   // 非加固 jar：静默跳过
+                // 普通 TVBox jar（CatVodSpider 参考实现）的本地代理类叫 Proxy：同样靠 9978–9999 探测
+                // /proxy?do=ck，再把 do=bili / do=hxq / 网盘等分发给站点。桌面没有宿主服务时端口恒为 -1，
+                // 播放地址变成 http://127.0.0.1:-1/proxy?...（肥猫「韩圈」实测）。
+                proxyClass = standardProxyClass(loader);
+                if (proxyClass == null) return;   // 没有本地代理类：静默跳过，不绑定端口
             }
             Method proxy;
             try {
@@ -108,18 +123,24 @@ public final class GuardProxyServer {
                 return;
             }
             HttpServer server = null;
+            ExecutorService pool = null;
             try {
                 server = bindFreePort();
                 int port = server.getAddress().getPort();
                 // ProxyOrigin.Gc() 的判据：yq >= 9978 直接复用，否则从 9978 逐个探测到 10000。
                 // 因此这里必须落在 [9978,10000)，否则载荷会反复探测并把 yq 留在无效值。
-                ExecutorService pool = Executors.newCachedThreadPool(r -> {
+                ThreadPoolExecutor bounded = new ThreadPoolExecutor(
+                        MAX_HANDLER_THREADS, MAX_HANDLER_THREADS, 30, TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<>(), r -> {
                     Thread t = new Thread(r, "guard-proxy-" + port);
                     t.setDaemon(true);
                     return t;
                 });
+                bounded.allowCoreThreadTimeOut(true);
+                pool = bounded;
                 server.setExecutor(pool);
-                server.createContext("/", exchange -> handle(exchange, proxyClass, proxy));
+                final Class<?> handlerClass = proxyClass;
+                server.createContext("/", exchange -> handle(exchange, handlerClass, proxy));
                 // ① 先把服务起起来：代理可用性**不依赖**端口注入是否成功。
                 //    历史实现先 setPort 再 start，一旦载荷的端口字段不叫 yq（wexguard 变体），
                 //    注入异常会把整个服务一起掐死，而端口已经 bind 占住且不释放。
@@ -127,8 +148,10 @@ public final class GuardProxyServer {
                 SERVERS.put(loader, server);
                 PORTS.put(loader, port);
                 PROXY_METHODS.put(loader, proxy);
+                PROXY_CLASSES.put(loader, proxyClass);
+                POOLS.put(loader, pool);
                 System.out.println("[GuardProxy] started on 127.0.0.1:" + port
-                        + " for payload ProxyOrigin in " + loader);
+                        + " for payload " + proxyClass.getSimpleName() + " in " + loader);
 
                 // ② 再尽力注入端口：让载荷的 getOwnProxyUrl()/内部自请求指向本服务。
                 if (Boolean.getBoolean("tvm.companion.proxyDebug")) {
@@ -153,6 +176,7 @@ public final class GuardProxyServer {
                     } catch (Throwable ignored) {
                     }
                 }
+                if (pool != null) pool.shutdownNow();
                 BLOCKED.put(loader, String.valueOf(t));
                 ParseStage.fail(ParseStage.PROXY, t.toString());
                 System.err.println("[GuardProxy] start failed: " + t);
@@ -168,7 +192,8 @@ public final class GuardProxyServer {
         Integer port = PORTS.get(loader);
         if (port == null || INJECT_FAILED.containsKey(loader)) return;
         try {
-            Class<?> proxyClass = Class.forName("com.github.catvod.spider.ProxyOrigin", false, loader);
+            Class<?> proxyClass = PROXY_CLASSES.get(loader);
+            if (proxyClass == null) return;
             Injection injection = injectPort(proxyClass, port);
             if (!injection.ok) {
                 INJECT_FAILED.put(loader, injection.detail);
@@ -184,6 +209,22 @@ public final class GuardProxyServer {
     public static int portOf(ClassLoader loader) {
         Integer p = PORTS.get(loader);
         return p != null ? p : -1;
+    }
+
+    /**
+     * 普通 jar 的 {@code com.github.catvod.spider.Proxy}：必须是**该 jar 自己定义的**类
+     * （防止父加载器里的同名类被误认），且有静态 {@code Object[] proxy(Map)}。不满足就当没有。
+     */
+    static Class<?> standardProxyClass(ClassLoader loader) {
+        try {
+            Class<?> c = Class.forName("com.github.catvod.spider.Proxy", false, loader);
+            if (c.getClassLoader() != loader) return null;
+            Method m = c.getDeclaredMethod("proxy", Map.class);
+            if (!Modifier.isStatic(m.getModifiers()) || m.getReturnType() != Object[].class) return null;
+            return c;
+        } catch (Throwable absent) {
+            return null;
+        }
     }
 
     private static HttpServer bindFreePort() throws Exception {
@@ -376,13 +417,23 @@ public final class GuardProxyServer {
                 } catch (Throwable ignored) {
                 }
             }
+            for (ExecutorService pool : POOLS.values()) {
+                pool.shutdownNow();
+            }
+            POOLS.clear();
             SERVERS.clear();
             PORTS.clear();
             PROXY_METHODS.clear();
+            PROXY_CLASSES.clear();
             BLOCKED.clear();
             INJECT_FAILED.clear();
             MEMBERS_LOGGED.clear();
         }
+    }
+
+    /** 端口是否由本类起的载荷代理服务占用（{@link NetdiskProxyUnwrap} 据此不拆自家代理）。 */
+    public static boolean ownsPort(int port) {
+        return PORTS.containsValue(port);
     }
 
     /** 路径式代理入口前缀：`/proxy/<base64url(query)>`。 */
@@ -461,6 +512,7 @@ public final class GuardProxyServer {
             sendText(exchange, 200, "ok");
             return;
         }
+        InputStream in = null;
         try {
             Object[] arr = invokeProxy(proxy, params);
             if (arr == null || arr.length < 3 || arr[2] == null) {
@@ -469,7 +521,7 @@ public final class GuardProxyServer {
             }
             int code = ((Number) arr[0]).intValue();
             String contentType = arr[1] == null ? "" : String.valueOf(arr[1]);
-            InputStream in = (InputStream) arr[2];
+            in = (InputStream) arr[2];
 
             Headers headers = exchange.getResponseHeaders();
             headers.set("Access-Control-Allow-Origin", "*");
@@ -557,12 +609,26 @@ public final class GuardProxyServer {
                     exchange.getRequestHeaders().getFirst("Range"), t0, "streamed");
         } catch (InvocationTargetException ite) {
             Throwable cause = ite.getCause() != null ? ite.getCause() : ite;
-            System.err.println("[GuardProxy] proxy error: " + cause);
+            // 兜底也要说人话：500 + 原始异常只会让用户看到一团栈。
+            // VerifyError 说明载荷里这个方法被 dex2jar 降级成了「抛异常的桩」，属转换产物问题，
+            // 不是用户的网络/CK 问题 —— 明确标出来，避免误导排查方向。
+            boolean degraded = cause instanceof VerifyError;
+            System.err.println("[GuardProxy] proxy error: " + cause
+                    + (degraded ? "（载荷方法未转换成功，d2j 降级桩）" : ""));
             cause.printStackTrace();
-            sendText(exchange, 500, "proxy error: " + cause);
+            sendText(exchange, 502, "proxy error: " + cause
+                    + (degraded ? "（载荷方法未转换成功，d2j 降级桩）" : ""));
         } catch (Throwable t) {
             System.err.println("[GuardProxy] handle error: " + t);
-            sendText(exchange, 500, "error: " + t);
+            sendText(exchange, 502, "error: " + t);
+        } finally {
+            // 缓冲分支与异常分支同样要关闭上游流（流式分支的 try-with-resources 已关过，重复关闭无害）。
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (Throwable ignored) {
+                }
+            }
         }
     }
 

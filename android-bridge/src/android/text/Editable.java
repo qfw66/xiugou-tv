@@ -3,7 +3,7 @@ package android.text;
 /**
  * android.text.Editable：可编辑文本。载荷几乎只用 {@code getText().toString()}，另有少量 insert / delete。
  */
-public interface Editable extends CharSequence, Appendable {
+public interface Editable extends Spanned, Appendable {
 
     Editable replace(int st, int en, CharSequence text);
 

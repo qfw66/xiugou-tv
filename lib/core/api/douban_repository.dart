@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:dio/dio.dart';
 
+import '../bounded_map.dart';
+import '../net/http_client_factory.dart';
 import 'models/vod_models.dart';
 
 /// 豆瓣首页分类（backlog §17）。
@@ -170,15 +172,17 @@ class DoubanRepository {
   /// 剧照（横图）缓存时长：比列表长得多——剧照不随榜单变动，30 分钟足够。
   final Duration stillCacheTtl;
 
-  /// 键为 `集合:起始:数量`
+  /// 键为 `集合:起始:数量`；无限滚动每页一个键，按 [_maxPages] 淘汰最早的页。
   final Map<String, _CacheEntry> _cache = <String, _CacheEntry>{};
+  static const int _maxPages = 64;
 
   /// 同一键的并发请求只发一次
   final Map<String, Future<DoubanPage>> _inflight =
       <String, Future<DoubanPage>>{};
 
-  /// subject id → 剧照地址（null 表示确认没有横图，避免反复重试）。
+  /// subject id → 剧照地址（null 表示确认没有横图，避免反复重试）；按 [_maxStills] 淘汰。
   final Map<String, _StillEntry> _stills = <String, _StillEntry>{};
+  static const int _maxStills = 128;
 
   /// 同一部片的剧照请求只发一次（hero 轮播会反复问同一批 id）。
   final Map<String, Future<String?>> _stillInflight =
@@ -261,7 +265,8 @@ class DoubanRepository {
         final body = await _httpGet(uri);
         final url = pickLandscapeStill(body);
         // 解析成功就落缓存（含 null），免得每次都重打接口。
-        _stills[id] = _StillEntry(url, DateTime.now().add(stillCacheTtl));
+        _stills.putBounded(
+            id, _StillEntry(url, DateTime.now().add(stillCacheTtl)), _maxStills);
         return url;
       } catch (_) {
         // 该 id 不属于这个类型 / 重定向没被跟随：换下一条路径再试
@@ -316,7 +321,8 @@ class DoubanRepository {
       throw DoubanException('豆瓣接口请求失败：$error');
     }
     final page = parsePage(body, start: start);
-    _cache[key] = _CacheEntry(page, DateTime.now().add(cacheTtl));
+    _cache.putBounded(
+        key, _CacheEntry(page, DateTime.now().add(cacheTtl)), _maxPages);
     return page;
   }
 
@@ -424,7 +430,7 @@ class DoubanRepository {
     return value.isEmpty ? title.trim() : value;
   }
 
-  static final Dio _sharedDio = Dio(
+  static final Dio _sharedDio = HttpClientFactory.createDio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 10),
       receiveTimeout: const Duration(seconds: 15),

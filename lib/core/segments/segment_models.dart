@@ -2,6 +2,10 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 
+// 集号解析复用弹幕那套（中文数字 / SxxEyy / EP / 去片名与分辨率噪音），
+// 之前片段自己实现的那份认不出「第十二集」「正片」「01话」等写法。
+import '../danmaku/danmaku_matcher.dart' show EpisodeNumber;
+
 /// 共享片段分类（§44）。键与服务端 `server/segments-worker/src/rules.js` 一致。
 enum SegmentCategory {
   intro('intro', '片头'),
@@ -119,10 +123,24 @@ class SegmentEpisodeKey {
     required String title,
     required String episodeName,
     required int episodeCount,
+    int? episodeIndex,
   }) {
     final t = normalizeTitle(title);
     if (t.isEmpty) return null;
-    final ep = episodeCount <= 1 ? 1 : parseEpisodeNumber(episodeName);
+    int? ep;
+    if (episodeCount <= 1) {
+      ep = 1;
+    } else {
+      ep = parseEpisodeNumber(episodeName, title: title);
+      // 集名认不出（「正片」「彩蛋」「上」等）时退回选集列表里的位置：
+      // 键会带一点「按位置」的假设，但共享片段本身还有「本集时长 ±15 秒」校验兜底。
+      if (ep == null &&
+          episodeIndex != null &&
+          episodeIndex >= 0 &&
+          episodeIndex < episodeCount) {
+        ep = episodeIndex + 1;
+      }
+    }
     if (ep == null) return null;
     final key = sha1.convert(utf8.encode('$t|$ep')).toString();
     return SegmentEpisodeKey._(key, title.trim(), ep);
@@ -140,35 +158,21 @@ class SegmentEpisodeKey {
         half.writeCharCode(r);
       }
     }
-    return half
-        .toString()
-        .toLowerCase()
-        .replaceAll(RegExp(r'[\(\[【（《<][^\)\]】）》>]*[\)\]】）》>]'), '')
-        .replaceAll(RegExp(r'[\s\p{P}\p{S}]', unicode: true), '');
+    final lower = half.toString().toLowerCase();
+    String skeleton(String s) => s.replaceAll(RegExp(r'[\s\p{P}\p{S}]', unicode: true), '');
+    final stripped = skeleton(lower.replaceAll(RegExp(r'[\(\[【（《<][^\)\]】）》>]*[\)\]】）》>]'), ''));
+    // invariant: a title wholly wrapped in brackets（「《庆余年》」）is the title itself, not an annotation;
+    // only this otherwise-empty case falls back, so keys of every other title stay unchanged.
+    return stripped.isNotEmpty ? stripped : skeleton(lower);
   }
 
-  /// 从集名里解析集序号：第N集 / EPN / SxxEyy / 纯数字 / 网盘文件名开头的数字。
-  static int? parseEpisodeNumber(String name) {
-    final s = name.trim().toLowerCase();
-    final patterns = [
-      RegExp(r'第\s*0*(\d{1,4})\s*[集话話期回]'),
-      RegExp(r's\d{1,2}\s*e0*(\d{1,4})'),
-      // EP07 / E07：前后都不能紧挨字母数字，避免把 hash 里的「e1」当成集号
-      RegExp(r'(?:^|[^a-z0-9])ep?\s*0*(\d{1,4})(?![a-z0-9])'),
-      RegExp(r'^0*(\d{1,4})$'),
-    ];
-    for (final p in patterns) {
-      final m = p.firstMatch(s);
-      if (m != null) return _positive(m.group(1));
-    }
-    // 网盘文件名：「[1.76 GB]01-4K.高码率.mkv」→ 去掉括号附注后取开头的数字
-    final stripped = s.replaceAll(RegExp(r'[\(\[【（][^\)\]】）]*[\)\]】）]'), '').trim();
-    final m = RegExp(r'^0*(\d{1,4})(?![\d.]*\s*(?:k|p|gb|mb|fps|bit))').firstMatch(stripped);
-    return m == null ? null : _positive(m.group(1));
-  }
-
-  static int? _positive(String? s) {
-    final n = int.tryParse(s ?? '');
+  /// 从集名里解析集序号。
+  ///
+  /// 直接复用弹幕的 [EpisodeNumber.parse]：它覆盖「第X集（含中文数字）」「SxxEyy」
+  /// 「EP/E + 数字」「纯数字」，并会先剔除重复片名、分辨率、体积、音轨等噪音。
+  /// [title] 用来去掉集名里重复的片名（「流浪地球2.mp4」里的 2 不是集号）。
+  static int? parseEpisodeNumber(String name, {String? title}) {
+    final n = EpisodeNumber.parse(name, title: title).number;
     return n == null || n <= 0 ? null : n;
   }
 }

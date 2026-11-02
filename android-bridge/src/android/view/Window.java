@@ -18,6 +18,10 @@ public class Window {
     private final ContentSink sink;
     private final WindowManager.LayoutParams attributes = new WindowManager.LayoutParams();
     private View decorView;
+    private int statusBarColor;
+    private int navigationBarColor;
+    private boolean navigationBarContrastEnforced = true;
+    private final android.window.OnBackInvokedDispatcher backDispatcher = new android.window.OnBackInvokedDispatcher();
 
     public Window() {
         this(null);
@@ -77,6 +81,39 @@ public class Window {
     }
 
     public void setAttributes(WindowManager.LayoutParams params) {
+    }
+
+    public void setStatusBarColor(int color) {
+        this.statusBarColor = color;
+    }
+
+    public int getStatusBarColor() {
+        return statusBarColor;
+    }
+
+    public void setNavigationBarColor(int color) {
+        this.navigationBarColor = color;
+    }
+
+    public int getNavigationBarColor() {
+        return navigationBarColor;
+    }
+
+    public void setNavigationBarContrastEnforced(boolean enforceContrast) {
+        this.navigationBarContrastEnforced = enforceContrast;
+    }
+
+    public boolean isNavigationBarContrastEnforced() {
+        return navigationBarContrastEnforced;
+    }
+
+    /** 每个窗口一个返回手势分发器；桌面端的返回由宿主的「关闭弹窗」承担。 */
+    public android.window.OnBackInvokedDispatcher getOnBackInvokedDispatcher() {
+        return backDispatcher;
+    }
+
+    public View getCurrentFocus() {
+        return decorView == null ? null : decorView.findFocus();
     }
 
     public View findViewById(int id) {

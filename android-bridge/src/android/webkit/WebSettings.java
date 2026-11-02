@@ -78,6 +78,16 @@ public class WebSettings {
         this.blockNetworkImage = flag;
     }
 
+    public void setBlockNetworkLoads(boolean flag) {
+        this.blockNetworkLoads = flag;
+    }
+
+    public boolean getBlockNetworkLoads() {
+        return blockNetworkLoads;
+    }
+
+    private boolean blockNetworkLoads;
+
     public void setCacheMode(int mode) {
         this.cacheMode = mode;
     }

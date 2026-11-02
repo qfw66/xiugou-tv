@@ -19,17 +19,20 @@ public class GradientDrawable extends Drawable {
     public static final int LINE = 2;
     public static final int RING = 3;
 
-    /** 渐变方向常量（AOSP 取值）。 */
-    public static final class Orientation {
-        public static final int TOP_BOTTOM = 0;
-        public static final int TR_BL = 1;
-        public static final int RIGHT_LEFT = 2;
-        public static final int BR_TL = 3;
-        public static final int BOTTOM_TOP = 4;
-        public static final int BL_TR = 5;
-        public static final int LEFT_RIGHT = 6;
-        public static final int TL_BR = 7;
+    /** 渐变方向（与 AOSP 一样是枚举，载荷以 GETSTATIC 取枚举实例）。 */
+    public enum Orientation {
+        TOP_BOTTOM,
+        TR_BL,
+        RIGHT_LEFT,
+        BR_TL,
+        BOTTOM_TOP,
+        BL_TR,
+        LEFT_RIGHT,
+        TL_BR
     }
+
+    private Orientation orientation = Orientation.TOP_BOTTOM;
+    private int[] colors;
 
     /** 线性渐变 / 径向渐变 / 扫描渐变（AOSP 取值）。 */
     public static final int LINEAR_GRADIENT = 0;
@@ -39,6 +42,11 @@ public class GradientDrawable extends Drawable {
     public GradientDrawable() {
     }
 
+    public GradientDrawable(Orientation orientation, int[] colors) {
+        if (orientation != null) this.orientation = orientation;
+        this.colors = colors == null ? null : colors.clone();
+    }
+
     public void setShape(int shape) {
     }
 
@@ -46,6 +54,11 @@ public class GradientDrawable extends Drawable {
     }
 
     public void setColors(int[] colors) {
+        this.colors = colors == null ? null : colors.clone();
+    }
+
+    public int[] getColors() {
+        return colors == null ? null : colors.clone();
     }
 
     public void setCornerRadius(float radius) {
@@ -64,6 +77,11 @@ public class GradientDrawable extends Drawable {
     }
 
     public void setOrientation(Orientation orientation) {
+        if (orientation != null) this.orientation = orientation;
+    }
+
+    public Orientation getOrientation() {
+        return orientation;
     }
 
     public void setSize(int width, int height) {

@@ -41,6 +41,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     ::DispatchMessage(&msg);
   }
 
+  // S48 shutdown crash (0xC000041D, 2026-10-28): window_manager's destroy()
+  // only calls PostQuitMessage, so the top-level HWND is still alive when the
+  // message loop ends. Leaving teardown to the stack destructor destroys
+  // flutter_controller_ without nulling it first; messages sent to the parent
+  // while the engine tears down its child view are routed back into the
+  // half-destroyed controller and crash inside the window callback.
+  // Tear down explicitly while the object is fully alive: release the
+  // controller first, then destroy the top-level window.
+  window.Destroy();
+
   ::CoUninitialize();
   return EXIT_SUCCESS;
 }

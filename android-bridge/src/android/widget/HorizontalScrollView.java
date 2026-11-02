@@ -20,7 +20,17 @@ public class HorizontalScrollView extends FrameLayout {
         super(context, attrs, defStyleAttr);
     }
 
+    private boolean smoothScrollingEnabled = true;
+
     public void setFillViewport(boolean fillViewport) {
+    }
+
+    public void setSmoothScrollingEnabled(boolean smoothScrollingEnabled) {
+        this.smoothScrollingEnabled = smoothScrollingEnabled;
+    }
+
+    public boolean isSmoothScrollingEnabled() {
+        return smoothScrollingEnabled;
     }
 
     public void smoothScrollTo(int x, int y) {

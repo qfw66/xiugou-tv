@@ -8,6 +8,7 @@ import 'package:dio/dio.dart';
 import 'package:path/path.dart' as p;
 
 import '../config/windows_config_storage.dart';
+import '../net/http_client_factory.dart';
 import 'update_manifest.dart';
 import 'update_mirrors.dart';
 
@@ -76,7 +77,7 @@ class UpdateDownloader {
     Future<Directory> Function()? dataDirectory,
   })  : _ownsDio = dio == null,
         _dio = dio ??
-            Dio(BaseOptions(
+            HttpClientFactory.createDio(BaseOptions(
               connectTimeout: const Duration(seconds: 10),
               receiveTimeout: const Duration(minutes: 5),
             )),
@@ -442,6 +443,16 @@ class UpdateDownloader {
   Future<void> _promote(File part, File target) async {
     if (await target.exists()) await target.delete();
     await part.rename(target.path);
+  }
+
+  /// 启动时清理：取消下载后不再重试时，`.part`（约 90 MB）不会等到下一次下载才被清掉。
+  /// 规则与下载前的清理一致（只删 7 天前的安装包与临时文件），尽力而为、不抛错。
+  Future<void> pruneStaleOnStartup() async {
+    try {
+      final root = Directory(p.join((await _dataDirectory()).path, 'updates'));
+      if (!await root.exists()) return;
+      await _pruneStaleDownloads(root, '');
+    } catch (_) {}
   }
 
   /// 清理 `updates/` 下非当前版本、超过 7 天的安装包与临时文件。

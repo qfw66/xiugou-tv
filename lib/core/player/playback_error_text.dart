@@ -55,6 +55,12 @@ PlaybackFailure classifyPlaybackFailure(String? raw) {
     return const PlaybackFailure(
         '播放地址无法打开，请换一条线路或稍后重试', PlaybackFailureKind.permanent);
   }
+  // 清单/分段只读到一半就被对端关闭（ffmpeg: "Stream ends prematurely" / "ffurl_read returned ..."）。
+  // 典型是源站按 UA 截断或中转抖动，属于**可重试**的瞬时错误，不是地址失效。
+  if (text.contains('stream ends prematurely') || text.contains('ffurl_read')) {
+    return const PlaybackFailure(
+        '该线路传输中断（播放清单没读全），请重试或换一条线路', PlaybackFailureKind.transient);
+  }
   if (text.contains('connection refused') ||
       text.contains('connection timed out') ||
       text.contains('timed out') ||
@@ -64,6 +70,22 @@ PlaybackFailure classifyPlaybackFailure(String? raw) {
         '连接播放服务器失败，请稍后重试或换线', PlaybackFailureKind.transient);
   }
   return const PlaybackFailure('播放遇到错误，请稍后重试或换线', PlaybackFailureKind.unknown);
+}
+
+/// mpv 的「降级告警」：硬件解码初始化失败（AVHWDeviceContext）、缓存目录建不起来等。
+///
+/// 实测：`Failed to allocate AVHWDeviceContext.` 之后 mpv 会自动退回软解继续播放，
+/// 视频是正常的；如果把它当致命错误，就会出现「弹播放错误，但画面照常播放」。
+/// 这类告警只进诊断日志，不弹面板、不触发自动换线。
+bool isBenignPlaybackError(String? raw) {
+  final text = (raw ?? '').toLowerCase();
+  if (text.isEmpty) return false;
+  if (text.contains('avhwdevicecontext')) return true;
+  if (text.contains('failed to allocate hwdevice')) return true;
+  if (text.contains('failed to create file cache')) return true;
+  if (text.contains('failed to initialize hardware decoding')) return true;
+  if (text.contains('hwdec') && text.contains('failed')) return true;
+  return false;
 }
 
 /// 只要文案（兼容既有调用点 / 既有用例）。

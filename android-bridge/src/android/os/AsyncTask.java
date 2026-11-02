@@ -33,7 +33,21 @@ public abstract class AsyncTask<Params, Progress, Result> {
 
     /** Android 公开的两个执行器：并行池与串行队列。 */
     public static final Executor THREAD_POOL_EXECUTOR = POOL;
-    public static final Executor SERIAL_EXECUTOR = new SerialExecutor();
+    public static final Executor SERIAL_EXECUTOR = new PerLoaderSerialExecutor();
+
+    /**
+     * 按任务所属 ClassLoader 分开的串行队列：一个载荷的任务挂住只卡它自己的队列，
+     * 不会阻塞其它载荷的 execute，也不会让旧载荷钉住新载荷。弱键随 loader 回收。
+     */
+    private static final java.util.Map<ClassLoader, SerialExecutor> SERIALS = new java.util.WeakHashMap<>();
+    private static final SerialExecutor BOOT_SERIAL = new SerialExecutor();
+
+    private static SerialExecutor serialFor(ClassLoader loader) {
+        if (loader == null) return BOOT_SERIAL;
+        synchronized (SERIALS) {
+            return SERIALS.computeIfAbsent(loader, k -> new SerialExecutor());
+        }
+    }
 
     private volatile Status status = Status.PENDING;
     private final AtomicBoolean cancelled = new AtomicBoolean();
@@ -83,7 +97,8 @@ public abstract class AsyncTask<Params, Progress, Result> {
                 finish(result);
             }
         });
-        exec.execute(future);
+        if (exec == SERIAL_EXECUTOR) serialFor(getClass().getClassLoader()).execute(future);
+        else exec.execute(future);
         return this;
     }
 
@@ -126,6 +141,14 @@ public abstract class AsyncTask<Params, Progress, Result> {
         return future.get(timeout, unit);
     }
 
+    /** 公开的 SERIAL_EXECUTOR：按 Runnable 的定义类加载器分派到各自的串行队列。 */
+    private static final class PerLoaderSerialExecutor implements Executor {
+        @Override
+        public void execute(Runnable r) {
+            serialFor(r.getClass().getClassLoader()).execute(r);
+        }
+    }
+
     /** 与 Android 一致：按提交顺序逐个执行，实际运行在共享线程池上。 */
     private static final class SerialExecutor implements Executor {
         private final java.util.ArrayDeque<Runnable> tasks = new java.util.ArrayDeque<>();
@@ -136,6 +159,9 @@ public abstract class AsyncTask<Params, Progress, Result> {
             tasks.offer(() -> {
                 try {
                     r.run();
+                } catch (Throwable t) {
+                    // 池线程无人取结果，异常会被静默吞掉：留一条日志便于排查载荷
+                    System.err.println("[android.os.AsyncTask] 串行任务异常: " + t);
                 } finally {
                     scheduleNext();
                 }

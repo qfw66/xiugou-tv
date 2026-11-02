@@ -12,6 +12,7 @@ import android.util.AttributeSet;
 public class EditText extends TextView {
 
     private final SpannableStringBuilder editable = new SpannableStringBuilder();
+    private boolean showSoftInputOnFocus = true;
 
     public EditText(Context context) {
         super(context);
@@ -31,6 +32,9 @@ public class EditText extends TextView {
     private void init() {
         // 载荷直接改写 getText() 返回的对象（insert / delete / clear）时也要让宿主刷新
         editable.setOnChangeListener(source -> notifyChanged());
+        // Android 的 EditText 默认可聚焦
+        setFocusable(true);
+        setFocusableInTouchMode(true);
     }
 
     @Override
@@ -54,8 +58,9 @@ public class EditText extends TextView {
      */
     public void applyUserInput(String value) {
         String old = editable.toString();
-        if (old.equals(value == null ? "" : value)) return;
-        editable.setQuietly(value);
+        CharSequence filtered = applyFilters(value == null ? "" : value);
+        if (old.contentEquals(filtered)) return;
+        editable.setQuietly(filtered);
         fireWatchers(old, editable);
     }
 
@@ -73,6 +78,11 @@ public class EditText extends TextView {
     public void selectAll() {
     }
 
-    public void setCursorVisible(boolean visible) {
+    public void setShowSoftInputOnFocus(boolean show) {
+        this.showSoftInputOnFocus = show;
+    }
+
+    public boolean getShowSoftInputOnFocus() {
+        return showSoftInputOnFocus;
     }
 }

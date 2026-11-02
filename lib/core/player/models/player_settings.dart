@@ -63,6 +63,30 @@ class PlayerSettings {
   /// 关闭后共享片段只在「片段」抽屉里列出，1 票的提示胶囊照常出现。
   final bool segmentsAutoApply;
 
+  /// §51 底栏隐藏后贴窗口底边的常驻细进度线。默认 true（保持原有观感）；
+  /// 关闭后控制条收起时画面底部不再留任何线条。
+  final bool showMiniProgress;
+
+  /// §14 起播早期出错时自动尝试备用线路。默认 true（与此前常开行为一致）；
+  /// 关闭后出错只提示，由用户在线路抽屉里手动换。
+  final bool autoLineSwitch;
+
+  /// §14 播放页长按 → 的临时倍速（取值见 [holdRateOptions]，默认 3x）；松开恢复原倍速。
+  final double holdRate;
+
+  /// §55 播放中鼠标静止 [cursorIdleDelay] 后自动隐藏光标。默认 true；
+  /// 关闭后光标在播放页始终可见。鼠标一动光标立即出现，与控制条显隐互不牵连。
+  final bool autoHideCursor;
+
+  /// 起播时补浏览器 UA / Referer（仅在站点没提供时）。
+  ///
+  /// 有些源站按 UA 拦非浏览器请求：清单只给一半、或直接断连（实测 py1080p 专线）。
+  /// 默认开启；若某个源反而被搞坏，可在这里关掉，回到「按站点原始请求头播放」。
+  final bool browserHeaders;
+
+  /// 鼠标静止多久后隐藏光标（§55 口径：5 秒）。
+  static const Duration cursorIdleDelay = Duration(seconds: 5);
+
   const PlayerSettings({
     this.hwdec = 'auto-safe',
     this.defaultVolume = 100,
@@ -80,17 +104,26 @@ class PlayerSettings {
     this.danmakuEnabled = true,
     this.danmaku = DanmakuSettings.defaults,
     this.segmentsAutoApply = true,
+    this.showMiniProgress = true,
+    this.autoLineSwitch = true,
+    this.holdRate = defaultHoldRate,
+    this.autoHideCursor = true,
+    this.browserHeaders = true,
   });
 
   static const PlayerSettings defaults = PlayerSettings();
 
+  /// 解码方式（§50）。
+  ///
+  /// 只列在 media_kit 渲染链（libmpv render API + ANGLE OpenGL）下真能硬解的取值：
+  /// 2026-10-30 本机实测 `d3d11va` / `dxva2` / `nvdec` / `cuda` 这类直通模式没有
+  /// 可用的纹理互通，mpv 会静默回落软解（CPU 约为硬解的 4 倍），因此只保留拷回（-copy）
+  /// 变体。旧配置里的这些取值由 [normalizeHwdec] 统一迁回自动。
   static const List<PlayerOption> hwdecOptions = [
     PlayerOption('auto-safe', '自动（推荐）'),
-    PlayerOption('d3d11va', 'D3D11VA 硬解'),
-    PlayerOption('d3d11va-copy', 'D3D11VA 硬解（拷回模式）'),
-    PlayerOption('dxva2', 'DXVA2 硬解（旧显卡）'),
-    PlayerOption('nvdec', 'NVIDIA NVDEC'),
-    PlayerOption('cuda', 'NVIDIA CUDA / CUVID'),
+    PlayerOption('d3d11va-copy', 'D3D11VA 硬解'),
+    PlayerOption('dxva2-copy', 'DXVA2 硬解（旧显卡）'),
+    PlayerOption('nvdec-copy', 'NVIDIA NVDEC 硬解'),
     PlayerOption('no', '软件解码'),
   ];
 
@@ -119,6 +152,10 @@ class PlayerSettings {
     PlayerOption('4:3', '4:3'),
   ];
 
+  /// 长按倍速档位（白名单；越界或非档位值回落 [defaultHoldRate]）
+  static const List<double> holdRateOptions = [2.0, 3.0, 4.0];
+  static const double defaultHoldRate = 3.0;
+
   static const double minRate = 0.5;
   static const double maxRate = 3.0;
   static const int minAudioDelayMs = -5000;
@@ -138,7 +175,9 @@ class PlayerSettings {
     return value;
   }
 
-  /// 兼容旧 DesktopWindowConfig.hardwareDecoding（'auto' | 'd3d11va' | 'no'）
+  /// 规范化解码方式：兼容旧 DesktopWindowConfig.hardwareDecoding（'auto' | 'd3d11va' | 'no'），
+  /// 以及 §50 之前的直通取值（d3d11va / dxva2 / nvdec / cuda，实际都在软解）。
+  /// 不认识的值一律回到自动：自动会按显卡挑可用的拷回硬解，比猜一个厂商专用值稳。
   static String normalizeHwdec(String? raw) {
     final value = raw?.trim().toLowerCase() ?? '';
     if (value == 'auto' || value.isEmpty) return 'auto-safe';
@@ -179,7 +218,17 @@ class PlayerSettings {
       danmakuEnabled: json['danmakuEnabled'] != false,
       danmaku: DanmakuSettings.fromJson(json['danmaku']),
       segmentsAutoApply: json['segmentsAutoApply'] != false,
+      showMiniProgress: json['showMiniProgress'] != false,
+      autoLineSwitch: json['autoLineSwitch'] != false,
+      holdRate: _pickHoldRate(json['holdRate']),
+      autoHideCursor: json['autoHideCursor'] != false,
+      browserHeaders: json['browserHeaders'] != false,
     );
+  }
+
+  static double _pickHoldRate(Object? raw) {
+    final parsed = raw is num ? raw.toDouble() : double.tryParse(raw?.toString() ?? '');
+    return parsed != null && holdRateOptions.contains(parsed) ? parsed : defaultHoldRate;
   }
 
   Map<String, dynamic> toJson() => {
@@ -199,6 +248,11 @@ class PlayerSettings {
         'danmakuEnabled': danmakuEnabled,
         'danmaku': danmaku.toJson(),
         'segmentsAutoApply': segmentsAutoApply,
+        'showMiniProgress': showMiniProgress,
+        'autoLineSwitch': autoLineSwitch,
+        'holdRate': holdRate,
+        'autoHideCursor': autoHideCursor,
+        'browserHeaders': browserHeaders,
       };
 
   /// 画面缩放对应的 mpv 属性取值：比例模式强制对应比例，其余复位默认态。
@@ -245,6 +299,11 @@ class PlayerSettings {
     bool? danmakuEnabled,
     DanmakuSettings? danmaku,
     bool? segmentsAutoApply,
+    bool? showMiniProgress,
+    bool? autoLineSwitch,
+    double? holdRate,
+    bool? autoHideCursor,
+    bool? browserHeaders,
   }) {
     return PlayerSettings(
       hwdec: hwdec ?? this.hwdec,
@@ -263,6 +322,11 @@ class PlayerSettings {
       danmakuEnabled: danmakuEnabled ?? this.danmakuEnabled,
       danmaku: danmaku ?? this.danmaku,
       segmentsAutoApply: segmentsAutoApply ?? this.segmentsAutoApply,
+      showMiniProgress: showMiniProgress ?? this.showMiniProgress,
+      autoLineSwitch: autoLineSwitch ?? this.autoLineSwitch,
+      holdRate: holdRate ?? this.holdRate,
+      autoHideCursor: autoHideCursor ?? this.autoHideCursor,
+      browserHeaders: browserHeaders ?? this.browserHeaders,
     );
   }
 
@@ -284,10 +348,16 @@ class PlayerSettings {
       other.hideWindowTitleBar == hideWindowTitleBar &&
       other.danmakuEnabled == danmakuEnabled &&
       other.danmaku == danmaku &&
-      other.segmentsAutoApply == segmentsAutoApply;
+      other.segmentsAutoApply == segmentsAutoApply &&
+      other.showMiniProgress == showMiniProgress &&
+      other.autoLineSwitch == autoLineSwitch &&
+      other.holdRate == holdRate &&
+      other.autoHideCursor == autoHideCursor &&
+      other.browserHeaders == browserHeaders;
 
   @override
-  int get hashCode => Object.hash(hwdec, defaultVolume, defaultRate, audioChannels, audioDelayMs,
+  int get hashCode => Object.hashAll([hwdec, defaultVolume, defaultRate, audioChannels, audioDelayMs,
       toneMapping, scale, brightness, contrast, saturation, gamma, cacheSecs, hideWindowTitleBar,
-      danmakuEnabled, danmaku, segmentsAutoApply);
+      danmakuEnabled, danmaku, segmentsAutoApply, showMiniProgress, autoLineSwitch, holdRate,
+      autoHideCursor, browserHeaders]);
 }

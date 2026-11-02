@@ -12,7 +12,10 @@ public class Context {
     private static final ConcurrentHashMap<String, SharedPreferences> PREFS = new ConcurrentHashMap<>();
 
     public static Context get() {
-        return INSTANCE;
+        // 必须返回 Application 实例：Android 里 Application 就是 Context，
+        // 而不少载荷（如 aowu 的 AwInit）会对传入的 Context 做 checkcast Application，
+        // 拿到裸 Context 会 ClassCastException，异常被吞后表现为「网盘初始化失败」。
+        return android.app.Application.get();
     }
 
     public Object getSystemService(String name) {
@@ -115,6 +118,21 @@ public class Context {
 
     private static final android.content.pm.PackageManager PACKAGE_MANAGER =
             new android.content.pm.PackageManager();
+
+    public final android.graphics.drawable.Drawable getDrawable(int id) {
+        return getResources().getDrawable(id, getTheme());
+    }
+
+    public android.content.res.Resources.Theme getTheme() {
+        return THEME;
+    }
+
+    private static final android.content.res.Resources.Theme THEME = RESOURCES.newTheme();
+
+    /** 与 files 同级的 no_backup 目录（Android 上不参与云备份；桌面端只是普通持久目录）。 */
+    public java.io.File getNoBackupFilesDir() {
+        return persistentDir("no_backup", "xiugou_tv_no_backup");
+    }
 
     public java.io.File getCacheDir() {
         return persistentDir("cache", "xiugou_tv_cache");

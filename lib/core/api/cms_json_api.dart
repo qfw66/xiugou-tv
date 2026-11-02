@@ -3,6 +3,7 @@ import 'dart:developer' as developer;
 import 'package:dio/dio.dart';
 import '../config/models/vod_config.dart';
 import '../net/ascii_url.dart';
+import '../net/http_client_factory.dart';
 import 'models/vod_models.dart';
 import 'search_cancel_token.dart';
 
@@ -12,7 +13,7 @@ class CmsJsonApi {
 
   CmsJsonApi({Dio? dio})
       : _dio = dio ??
-            Dio(
+            HttpClientFactory.createDio(
               BaseOptions(
                 connectTimeout: const Duration(seconds: 15),
                 receiveTimeout: const Duration(seconds: 20),
@@ -137,8 +138,8 @@ class CmsJsonApi {
 
     final effectiveEndpoint = _resolveHttpEndpoint(apiEndpoint, site);
     if (effectiveEndpoint == null) {
-      _log('SiteApi::fetchHome', '<-- [$siteName] 该站源为 Android Dex 爬虫插件 ($apiEndpoint)，当前桌面端暂无 JVM/Dex 运行环境。');
-      throw UnsupportedError('站源 [$siteName] 属于 Android Dex 爬虫插件 ($apiEndpoint)，桌面端暂不支持，请切换为 CMS (JSON/XML) 或 HTTP 直连站源');
+      _log('SiteApi::fetchHome', '<-- [$siteName] 该站源是爬虫插件 ($apiEndpoint)，没有 HTTP 端点，不能走 CMS 通道（须由爬虫服务加载）。');
+      throw UnsupportedError('站源 [$siteName] 是爬虫插件（$apiEndpoint），需要由爬虫服务加载，不能按 CMS 接口直连');
     }
 
     try {
@@ -241,7 +242,7 @@ class CmsJsonApi {
 
     final effectiveEndpoint = _resolveHttpEndpoint(apiEndpoint, site);
     if (effectiveEndpoint == null) {
-      _log('SiteApi::fetchCategory', '<-- [$siteName] 该站源为 Android Dex 爬虫插件 ($apiEndpoint)，无法通过 HTTP 拉取分类。');
+      _log('SiteApi::fetchCategory', '<-- [$siteName] 该站源是爬虫插件 ($apiEndpoint)，没有 HTTP 端点，不能走 CMS 通道拉取分类。');
       return const VodPageResult.empty();
     }
 
@@ -320,8 +321,8 @@ class CmsJsonApi {
 
     final effectiveEndpoint = _resolveHttpEndpoint(apiEndpoint, site);
     if (effectiveEndpoint == null) {
-      _log('SiteApi::fetchDetail', '<-- [$siteName] 该站源为 Android Dex 爬虫插件 ($apiEndpoint)，无法获取详情。');
-      throw UnsupportedError('站源 [$siteName] 属于 Android Dex 爬虫插件 ($apiEndpoint)，无法获取详情');
+      _log('SiteApi::fetchDetail', '<-- [$siteName] 该站源是爬虫插件 ($apiEndpoint)，没有 HTTP 端点，不能走 CMS 通道获取详情。');
+      throw UnsupportedError('站源 [$siteName] 是爬虫插件（$apiEndpoint），需要由爬虫服务加载，不能按 CMS 接口直连');
     }
 
     try {
@@ -409,8 +410,7 @@ class CmsJsonApi {
 
     final effectiveEndpoint = _resolveHttpEndpoint(apiEndpoint, site);
     if (effectiveEndpoint == null) {
-      _log('SiteApi::search', '<-- [$siteName] 忽略非 HTTP 爬虫接口 ($apiEndpoint)');
-      return const VodPageResult.empty();
+      throw UnsupportedError('站源没有可用的 HTTP 搜索接口');
     }
 
     _log('SiteApi::search', '--> 正在搜索站点: [$siteName] (关键词: "$query", 页码: $page)');
@@ -513,7 +513,7 @@ class CmsJsonApi {
         return const VodPageResult.empty();
       }
       _log('SiteApi::search', '<-- [$siteName] 搜索发生异常: $e');
-      return const VodPageResult.empty();
+      rethrow;
     }
   }
 

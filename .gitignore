@@ -176,6 +176,8 @@ $RECYCLE.BIN/
 /test/_probe_*.txt
 /test/解析失败分析报告.md
 # /companion/lib-unidbg/  —— 构建期依赖，随仓库发布（见 companion/deps.manifest.json）
+# /companion/pyruntime/  —— 便携 CPython + wheel，体积大且可由 scripts 重新生成，不进仓库
+/companion/pyruntime/
 /xiugou-tv-backup-*.json
 # /companion/libs/      —— 同上
 # /test/lib/*.jar        —— test/ 已不在仓库内

@@ -26,6 +26,9 @@ public class ImageView extends View {
     private volatile Bitmap bitmap;
     private Drawable drawable;
     private ScaleType scaleType = ScaleType.FIT_CENTER;
+    private boolean adjustViewBounds;
+    private boolean cropToPadding;
+    private android.graphics.Matrix imageMatrix = new android.graphics.Matrix();
 
     public ImageView(Context context) {
         super(context);
@@ -72,6 +75,28 @@ public class ImageView extends View {
     }
 
     public void setAdjustViewBounds(boolean adjustViewBounds) {
+        this.adjustViewBounds = adjustViewBounds;
+    }
+
+    public boolean getAdjustViewBounds() {
+        return adjustViewBounds;
+    }
+
+    public void setCropToPadding(boolean cropToPadding) {
+        this.cropToPadding = cropToPadding;
+    }
+
+    public boolean getCropToPadding() {
+        return cropToPadding;
+    }
+
+    /** 图片变换矩阵只保存；宿主按 scaleType 自行缩放位图。 */
+    public void setImageMatrix(android.graphics.Matrix matrix) {
+        this.imageMatrix = matrix == null ? new android.graphics.Matrix() : new android.graphics.Matrix(matrix);
+    }
+
+    public android.graphics.Matrix getImageMatrix() {
+        return imageMatrix;
     }
 
     public void setMaxWidth(int maxWidth) {

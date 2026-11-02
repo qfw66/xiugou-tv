@@ -6,7 +6,8 @@ import java.io.File;
  * companion android shim: android.os.Environment
  *
  * 手机端网盘系 spider（夸克 QuarkApi、Cloud 系等）用它取外部存储/缓存目录；
- * 桌面端映射到 ~/.xiugou_tv_companion/sdcard / 临时目录，保证可读写且跨会话稳定。
+ * 桌面端映射到 ~/.xiugou_tv_companion/sdcard（外部存储）与 ~/.xiugou_tv_companion/data（/data），
+ * 保证可读写且跨会话稳定；只有下载缓存目录仍放系统临时目录。
  *
  * 触发场景：dongli-spider.jar 的 Wogg.init → QuarkApi.getCache → NoClassDefFoundError.
  */
@@ -56,8 +57,12 @@ public class Environment {
         return true;
     }
 
+    /**
+     * Android 的 /data。原先映射到系统临时目录：载荷若在此存登录态，会被系统清理掉。
+     * 改为站源服务目录下的 data/（持久，「重置所有设置」会清掉）。
+     */
     public static File getDataDirectory() {
-        File dir = new File(System.getProperty("java.io.tmpdir"), "xiugou_tv_data");
+        File dir = new File(new File(System.getProperty("user.home", "."), ".xiugou_tv_companion"), "data");
         if (!dir.exists()) dir.mkdirs();
         return dir;
     }

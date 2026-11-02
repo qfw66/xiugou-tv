@@ -33,6 +33,15 @@ public class TextView extends View {
     private Typeface typeface = Typeface.DEFAULT;
     private OnEditorActionListener editorActionListener;
     private final List<TextWatcher> watchers = new CopyOnWriteArrayList<>();
+    private android.text.TextPaint paint;
+    private android.text.InputFilter[] filters = new android.text.InputFilter[0];
+    private boolean cursorVisible = true;
+    private int marqueeRepeatLimit = 3;
+    private Scroller scroller;
+    private float shadowRadius;
+    private float shadowDx;
+    private float shadowDy;
+    private int shadowColor;
 
     public TextView(Context context) {
         super(context);
@@ -209,6 +218,20 @@ public class TextView extends View {
         return typeface;
     }
 
+    /**
+     * 载荷有几个站点会拿 TextView 的画笔做文字测量（HTML→纯文本时算换行点）。
+     * 桌面端不复刻排版，只保证画笔状态与自身一致：字号/字色/字体跟着 TextView 走。
+     */
+    public android.text.TextPaint getPaint() {
+        if (paint == null) {
+            paint = new android.text.TextPaint();
+        }
+        paint.setTextSize(textSize);
+        paint.setColor(textColor);
+        paint.setTypeface(typeface);
+        return paint;
+    }
+
     /** 是否粗体（桌面扩展）。 */
     public boolean isBold() {
         return typeface != null && typeface.isBold();
@@ -283,6 +306,86 @@ public class TextView extends View {
 
     public int getSelectionEnd() {
         return getText().length();
+    }
+
+    /** 没有排版：按换行符计行数（空文本为 0 行），并受 maxLines 限制。 */
+    public int getLineCount() {
+        CharSequence value = getText();
+        if (value == null || value.length() == 0) return 0;
+        int lines = 1;
+        for (int i = 0; i < value.length(); i++) {
+            if (value.charAt(i) == '\n') lines++;
+        }
+        return Math.min(lines, getMaxLines());
+    }
+
+    public void setCursorVisible(boolean visible) {
+        this.cursorVisible = visible;
+    }
+
+    public boolean isCursorVisible() {
+        return cursorVisible;
+    }
+
+    public void setFilters(android.text.InputFilter[] filters) {
+        if (filters == null) throw new IllegalArgumentException();
+        this.filters = filters.clone();
+    }
+
+    public android.text.InputFilter[] getFilters() {
+        return filters.clone();
+    }
+
+    /** 按 Android 的方式依次套用输入过滤器（如 LengthFilter 截断超长输入）。 */
+    protected CharSequence applyFilters(CharSequence source) {
+        CharSequence out = source;
+        for (android.text.InputFilter f : filters) {
+            android.text.SpannableStringBuilder dest = new android.text.SpannableStringBuilder();
+            CharSequence r = f.filter(out, 0, out.length(), dest, 0, 0);
+            if (r != null) out = r;
+        }
+        return out;
+    }
+
+    public void setMarqueeRepeatLimit(int marqueeLimit) {
+        this.marqueeRepeatLimit = marqueeLimit;
+    }
+
+    public int getMarqueeRepeatLimit() {
+        return marqueeRepeatLimit;
+    }
+
+    public void setScroller(Scroller s) {
+        this.scroller = s;
+    }
+
+    /** 文字阴影只保存，宿主不渲染。 */
+    public void setShadowLayer(float radius, float dx, float dy, int color) {
+        this.shadowRadius = radius;
+        this.shadowDx = dx;
+        this.shadowDy = dy;
+        this.shadowColor = color;
+    }
+
+    public float getShadowRadius() {
+        return shadowRadius;
+    }
+
+    public float getShadowDx() {
+        return shadowDx;
+    }
+
+    public float getShadowDy() {
+        return shadowDy;
+    }
+
+    public int getShadowColor() {
+        return shadowColor;
+    }
+
+    @Override
+    public void computeScroll() {
+        if (scroller != null) scroller.computeScrollOffset();
     }
 
     public Layout getLayout() {

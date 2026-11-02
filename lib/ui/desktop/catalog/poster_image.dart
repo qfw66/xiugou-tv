@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 
 import '../../../core/api/douban_repository.dart';
+import '../../../core/net/http_client_factory.dart';
 import 'douban_poster_image.dart';
 
 /// 站源海报地址的解析结果。
@@ -132,8 +133,8 @@ class SitePosterImage extends ImageProvider<SitePosterImage> {
   final int? targetWidth;
 
   static const Duration _timeout = Duration(seconds: 20);
-  static final HttpClient _client = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 10);
+  static final HttpClient _client = HttpClientFactory.createHttpClient(
+      connectionTimeout: const Duration(seconds: 10));
 
   @override
   Future<SitePosterImage> obtainKey(ImageConfiguration configuration) =>

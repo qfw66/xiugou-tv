@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import '../api/models/vod_models.dart';
 import '../history/history_match.dart';
 import '../net/ascii_url.dart';
+import '../net/http_client_factory.dart';
 import '../net/relative_url.dart';
 import 'config_decoder.dart';
 import 'models/desktop_window_config.dart';
@@ -105,6 +106,7 @@ class ConfigRepository {
   /// 应用启动时由设置同步为偏好值，见 SET-05）
   static const int defaultHistoryLimit = 150;
 
+  /// 当前生效的点播配置（来自快照 / 缓存）
   VodConfig _currentVodConfig = VodConfig.empty();
   DesktopWindowConfig _currentWindowConfig = const DesktopWindowConfig();
   Site? _selectedSite;
@@ -153,10 +155,13 @@ class ConfigRepository {
   /// 场景不传，则沿用原来的「按可播性自动挑选」规则。
   final Site? fallbackHomeSite;
 
-  ConfigRepository({WindowsConfigStorage? storage, Dio? dio, this.fallbackHomeSite})
-      : _storage = storage ?? WindowsConfigStorage(),
+  ConfigRepository({
+    WindowsConfigStorage? storage,
+    Dio? dio,
+    this.fallbackHomeSite,
+  })  : _storage = storage ?? WindowsConfigStorage(),
         _dio = dio ??
-            Dio(
+            HttpClientFactory.createDio(
               BaseOptions(
                 connectTimeout: const Duration(seconds: 15),
                 receiveTimeout: const Duration(seconds: 20),
@@ -167,7 +172,9 @@ class ConfigRepository {
               ),
             );
 
+  /// 当前生效的点播配置
   VodConfig get currentVodConfig => _currentVodConfig;
+
   DesktopWindowConfig get currentWindowConfig => _currentWindowConfig;
   Site? get selectedSite => _selectedSite;
 
@@ -280,6 +287,7 @@ class ConfigRepository {
   ConfigSourceKind? get currentSourceKind => _currentSourceKind;
   String? get currentSourceLocation => _currentSourceLocation;
   String? get sourceRecoveryError => _sourceRecoveryError;
+
   List<HistoryRecord> get historyRecords => List.unmodifiable(_historyRecords);
 
   /// 当前播放历史保留上限（由设置同步；默认 [defaultHistoryLimit]）
@@ -370,11 +378,20 @@ class ConfigRepository {
   /// 历史按调用顺序保存，避免进度跟踪器与置顶 / 删除的快照乱序覆盖。
   Future<void> _historySaveChain = Future<void>.value();
 
+  /// 尚未开始执行的那次保存：连续变更合并为一次全量写入。
+  Future<void>? _pendingHistorySave;
+
+  /// 合并写入：已有排队未开始的保存时直接复用它——它开始执行时才取快照，
+  /// 必然包含本次变更，因此返回的 Future 完成即表示本次变更已落盘。
   Future<void> _persistHistory() {
-    final snapshot = List<HistoryRecord>.unmodifiable(_historyRecords);
-    final next = _historySaveChain
-        .catchError((_) {})
-        .then((_) => _storage.saveHistory(snapshot));
+    final pending = _pendingHistorySave;
+    if (pending != null) return pending;
+    final next = _historySaveChain.catchError((_) {}).then((_) {
+      _pendingHistorySave = null;
+      return _storage.saveHistory(
+          List<HistoryRecord>.unmodifiable(_historyRecords));
+    });
+    _pendingHistorySave = next;
     _historySaveChain = next;
     return next;
   }
@@ -395,8 +412,17 @@ class ConfigRepository {
     }
   }
 
+  /// 无痕浏览（§14）：开启时所有写历史入口（新增 / 进度 / 换线来源）静默跳过。
+  ///
+  /// 由设置的历史偏好同步（见 main.dart）；删除与清空不受影响。
+  bool get historyIncognito => _historyIncognito;
+  bool _historyIncognito = false;
+
+  void setHistoryIncognito(bool enabled) => _historyIncognito = enabled;
+
   /// 添加或更新播放历史记录（置顶；同一影片只保留最近一条；超出上限剔除最旧）
   Future<void> addHistory(HistoryRecord record) async {
+    if (_historyIncognito) return;
     // 去重按「站点 + 影片」：同一站点内保留最新一条（列表不堆集数），
     // 但不同站点的同名影片必须并存，否则跨站续播（SET-11）会失去进度来源。
     String siteOf(HistoryRecord r) {
@@ -457,6 +483,8 @@ class ConfigRepository {
   }) async {
     final index = _historyRecords.indexWhere((e) => e.id == id);
     if (index < 0) return false;
+    // 无痕：记录仍在（返回 true），只是不改进度
+    if (_historyIncognito) return true;
 
     final current = _historyRecords[index];
     final safePosition = positionMs < 0 ? 0 : positionMs;
@@ -487,6 +515,7 @@ class ConfigRepository {
     String? siteKey,
     String? siteName,
   }) async {
+    if (_historyIncognito) return;
     final index = _historyRecords.indexWhere((e) => e.id == id);
     if (index < 0) return;
     final current = _historyRecords[index];
@@ -627,10 +656,11 @@ class ConfigRepository {
       selectDepot: selectDepot,
       savedPath: _savedDepotPath(ConfigSourceKind.url, value),
     );
+    final remembered = _isHttpUrl(value);
     return _commitSnapshot(ConfigSnapshot(
       rawContent: resolved.rawContent,
-      sourceKind: _isHttpUrl(value) ? ConfigSourceKind.url : null,
-      sourceLocation: _isHttpUrl(value) ? value : null,
+      sourceKind: remembered ? ConfigSourceKind.url : null,
+      sourceLocation: remembered ? value : null,
       depotPath: resolved.depotPath,
     ), generation);
   }
@@ -674,7 +704,7 @@ class ConfigRepository {
     return kind == ConfigSourceKind.file ? loadFromFile(location) : loadFromInput(location);
   }
 
-  /// 导出当前生效配置到 [filePath]：优先写出缓存原文，缺失时写出规范化 JSON
+  /// 导出当前配置到 [filePath]：优先写出缓存原文，缺失时写出规范化 JSON。
   Future<void> exportCurrentConfig(String filePath) async {
     final raw = _currentSnapshot?.rawContent ?? await _storage.readCachedVodConfigRaw();
     final content = raw ?? const JsonEncoder.withIndent('  ').convert(_currentVodConfig.toJson());
@@ -1220,6 +1250,8 @@ class ConfigRepository {
     await next;
   }
 
+  /// 应用用户配置 [config]。
+  /// 首页站源偏好按配置身份保存。
   void _applyVodConfig(VodConfig config) {
     final previousIdentity = _configIdentity;
     final previousSite = _selectedSite;

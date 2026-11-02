@@ -69,6 +69,11 @@ public class Paint {
     private Typeface typeface = Typeface.DEFAULT;
     private boolean fakeBold;
     private Shader shader;
+    private ColorFilter colorFilter;
+    private float shadowRadius;
+    private float shadowDx;
+    private float shadowDy;
+    private int shadowColor;
 
     public Paint() {
     }
@@ -95,6 +100,11 @@ public class Paint {
         typeface = src.typeface;
         fakeBold = src.fakeBold;
         shader = src.shader;
+        colorFilter = src.colorFilter;
+        shadowRadius = src.shadowRadius;
+        shadowDx = src.shadowDx;
+        shadowDy = src.shadowDy;
+        shadowColor = src.shadowColor;
     }
 
     public void reset() {
@@ -199,6 +209,44 @@ public class Paint {
     public Shader setShader(Shader shader) {
         this.shader = shader;
         return shader;
+    }
+
+    /** 颜色滤镜只保存，Java2D 绘制时不应用。 */
+    public ColorFilter setColorFilter(ColorFilter filter) {
+        this.colorFilter = filter;
+        return filter;
+    }
+
+    public ColorFilter getColorFilter() {
+        return colorFilter;
+    }
+
+    /** 阴影参数只保存，Java2D 绘制时不画阴影。 */
+    public void setShadowLayer(float radius, float dx, float dy, int shadowColor) {
+        this.shadowRadius = radius;
+        this.shadowDx = dx;
+        this.shadowDy = dy;
+        this.shadowColor = shadowColor;
+    }
+
+    public void clearShadowLayer() {
+        shadowRadius = 0f;
+    }
+
+    public float getShadowLayerRadius() {
+        return shadowRadius;
+    }
+
+    public float getShadowLayerDx() {
+        return shadowDx;
+    }
+
+    public float getShadowLayerDy() {
+        return shadowDy;
+    }
+
+    public int getShadowLayerColor() {
+        return shadowColor;
     }
 
     public Shader getShader() {

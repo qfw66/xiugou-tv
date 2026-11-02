@@ -4,13 +4,14 @@ import '../player/models/player_settings.dart';
 import 'models/config_source_entry.dart';
 import 'models/appearance_preferences.dart';
 import 'models/history_preferences.dart';
+import 'models/network_preferences.dart';
 import 'models/play_skip_preferences.dart';
 import 'models/search_preferences.dart';
 import 'models/self_check_preferences.dart';
 import 'models/startup_preferences.dart';
 import 'settings_storage.dart';
 
-enum SettingsSaveTarget { player, sources, startup, search, history, selfCheck, playSkip, appearance }
+enum SettingsSaveTarget { player, sources, startup, search, history, selfCheck, playSkip, appearance, network }
 
 /// 磁盘保存状态，与内存值及播放器参数应用结果相互独立。
 class SettingsSaveState {
@@ -44,6 +45,9 @@ class SettingsRepository {
   AppearancePreferences _appearancePreferences = AppearancePreferences.none;
   bool _appearanceReadFailed = false;
   Future<void> _appearanceSaveChain = Future.value();
+  NetworkPreferences _networkPreferences = const NetworkPreferences();
+  bool _networkReadFailed = false;
+  Future<void> _networkSaveChain = Future.value();
 
   final _playerSettingsController = StreamController<PlayerSettings>.broadcast();
   final _configSourcesController = StreamController<List<ConfigSourceEntry>>.broadcast();
@@ -53,6 +57,7 @@ class SettingsRepository {
   final _selfCheckPreferencesController = StreamController<SelfCheckPreferences>.broadcast();
   final _playSkipPreferencesController = StreamController<PlaySkipPreferences>.broadcast();
   final _appearancePreferencesController = StreamController<AppearancePreferences>.broadcast();
+  final _networkPreferencesController = StreamController<NetworkPreferences>.broadcast();
 
   final _saveStateController = StreamController<SettingsSaveState>.broadcast();
   final _failedSaves = <SettingsSaveTarget>{};
@@ -104,6 +109,7 @@ class SettingsRepository {
       if (failed.contains(SettingsSaveTarget.selfCheck)) _persistSelfCheckPreferences(),
       if (failed.contains(SettingsSaveTarget.playSkip)) _persistPlaySkipPreferences(),
       if (failed.contains(SettingsSaveTarget.appearance)) _persistAppearancePreferences(),
+      if (failed.contains(SettingsSaveTarget.network)) _persistNetworkPreferences(),
     ]);
   }
 
@@ -184,6 +190,16 @@ class SettingsRepository {
     yield* _playSkipPreferencesController.stream;
   }
 
+  NetworkPreferences get networkPreferences => _networkPreferences;
+
+  /// 网络偏好文件读取失败（结构损坏等）；修复文件前禁止覆盖写入，按「关闭」运行
+  bool get networkReadFailed => _networkReadFailed;
+
+  Stream<NetworkPreferences> get networkPreferencesStream async* {
+    yield _networkPreferences;
+    yield* _networkPreferencesController.stream;
+  }
+
   AppearancePreferences get appearancePreferences => _appearancePreferences;
 
   /// 外观偏好文件读取失败（结构损坏等）；修复文件前禁止覆盖写入
@@ -207,7 +223,8 @@ class SettingsRepository {
 
     final storedSources = await _storage.readConfigSources();
     if (storedSources != null) {
-      _configSources = List.unmodifiable(_dedupe(storedSources).take(maxConfigSources));
+      _configSources = List.unmodifiable(
+          _dedupe(storedSources).take(maxConfigSources));
     } else if (legacyConfigUrl != null && legacyConfigUrl.trim().isNotEmpty) {
       _configSources = List.unmodifiable([
         ConfigSourceEntry(kind: ConfigSourceKind.url, location: legacyConfigUrl.trim(), lastUsedAt: _now()),
@@ -276,6 +293,17 @@ class SettingsRepository {
       _appearanceReadFailed = true;
     }
     _appearancePreferencesController.add(_appearancePreferences);
+
+    try {
+      _networkPreferences =
+          await _storage.readNetworkPreferences() ?? const NetworkPreferences();
+      _networkReadFailed = false;
+    } catch (_) {
+      // 结构损坏：保留原文件，按「关闭」（系统 DNS）运行，等待修复后重新读取
+      _networkPreferences = const NetworkPreferences();
+      _networkReadFailed = true;
+    }
+    _networkPreferencesController.add(_networkPreferences);
   }
 
   List<ConfigSourceEntry> _dedupe(List<ConfigSourceEntry> entries) {
@@ -614,6 +642,44 @@ class SettingsRepository {
     return next;
   }
 
+  // ---------------- 网络偏好（§14 安全 DNS） ----------------
+
+  /// 更新网络偏好（整体快照替换，随后串行落盘）。
+  ///
+  /// 调用方（设置页）负责先校验自定义地址；生效由 main.dart 订阅 [networkPreferencesStream] 完成。
+  Future<void> updateNetworkPreferences(NetworkPreferences preferences) async {
+    if (_networkReadFailed) {
+      throw StateError('网络偏好读取失败，请先修复文件并重新读取');
+    }
+    if (preferences == _networkPreferences) return;
+    _networkPreferences = preferences;
+    _networkPreferencesController.add(preferences);
+    await _persistNetworkPreferences();
+  }
+
+  /// 重新读取网络偏好（读取失败修复后的恢复入口）。
+  Future<void> reloadNetworkPreferences() async {
+    if (_failedSaves.contains(SettingsSaveTarget.network)) {
+      throw StateError('请先重试保存网络偏好，避免丢失本次修改');
+    }
+    try {
+      _networkPreferences =
+          await _storage.readNetworkPreferences() ?? const NetworkPreferences();
+      _networkReadFailed = false;
+    } catch (_) {
+      _networkReadFailed = true;
+    }
+    _networkPreferencesController.add(_networkPreferences);
+  }
+
+  Future<void> _persistNetworkPreferences() {
+    final snapshot = _networkPreferences;
+    final next = _enqueueSave(SettingsSaveTarget.network, _networkSaveChain,
+        () => _storage.saveNetworkPreferences(snapshot));
+    _networkSaveChain = next;
+    return next;
+  }
+
   /// 订阅配置仓库的成功加载事件并记入历史；返回的订阅由调用方负责取消
   StreamSubscription<ConfigLoadEvent> bindConfigRepository(ConfigRepository repository) {
     return repository.configLoadedStream.listen((event) {
@@ -632,6 +698,7 @@ class SettingsRepository {
       _selfCheckPreferencesSaveChain.catchError((_) {}),
       _playSkipSaveChain.catchError((_) {}),
       _appearanceSaveChain.catchError((_) {}),
+      _networkSaveChain.catchError((_) {}),
     ]);
   }
 
@@ -646,9 +713,11 @@ class SettingsRepository {
       _selfCheckPreferencesSaveChain.catchError((_) {}),
       _playSkipSaveChain.catchError((_) {}),
       _appearanceSaveChain.catchError((_) {}),
+      _networkSaveChain.catchError((_) {}),
     ]);
     await _playSkipPreferencesController.close();
     await _appearancePreferencesController.close();
+    await _networkPreferencesController.close();
     await _saveStateController.close();
     await _playerSettingsController.close();
     await _configSourcesController.close();

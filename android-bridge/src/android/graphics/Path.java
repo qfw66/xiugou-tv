@@ -59,6 +59,22 @@ public class Path {
         shape.lineTo(x, y);
     }
 
+    /** 相对当前点画线；空路径时以 (0,0) 为起点，与 Android 一致。 */
+    public void rLineTo(float dx, float dy) {
+        ensureStarted();
+        java.awt.geom.Point2D cur = shape.getCurrentPoint();
+        float x = cur == null ? 0f : (float) cur.getX();
+        float y = cur == null ? 0f : (float) cur.getY();
+        shape.lineTo(x + dx, y + dy);
+    }
+
+    public void rMoveTo(float dx, float dy) {
+        java.awt.geom.Point2D cur = shape.getCurrentPoint();
+        float x = cur == null ? 0f : (float) cur.getX();
+        float y = cur == null ? 0f : (float) cur.getY();
+        shape.moveTo(x + dx, y + dy);
+    }
+
     public void quadTo(float x1, float y1, float x2, float y2) {
         ensureStarted();
         shape.quadTo(x1, y1, x2, y2);

@@ -149,6 +149,16 @@ public class Dialog implements DialogInterface {
         return true;
     }
 
+    /** 内容视图里当前持有（载荷视角）焦点的控件。 */
+    public View getCurrentFocus() {
+        View content = contentView;
+        return content == null ? null : content.findFocus();
+    }
+
+    public android.window.OnBackInvokedDispatcher getOnBackInvokedDispatcher() {
+        return window.getOnBackInvokedDispatcher();
+    }
+
     public Window getWindow() {
         return window;
     }

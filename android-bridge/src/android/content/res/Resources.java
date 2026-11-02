@@ -10,6 +10,25 @@ public class Resources {
 
     private static final DisplayMetrics METRICS = new DisplayMetrics();
 
+    private static final Resources SYSTEM = new Resources();
+
+    /** 系统资源：桌面端与应用资源同为空资源表，只区分实例。 */
+    public static Resources getSystem() {
+        return SYSTEM;
+    }
+
+    public final Theme newTheme() {
+        return new Theme();
+    }
+
+    public android.graphics.drawable.Drawable getDrawable(int id, Theme theme) {
+        return getDrawable(id);
+    }
+
+    public int getColor(int id, Theme theme) {
+        return getColor(id);
+    }
+
     public DisplayMetrics getDisplayMetrics() {
         return METRICS;
     }
@@ -69,6 +88,29 @@ public class Resources {
 
     public String getResourceEntryName(int id) {
         throw new NotFoundException("Unable to find resource ID #0x" + Integer.toHexString(id));
+    }
+
+    /**
+     * 主题：桌面端没有主题属性表，resolveAttribute 一律报告「未找到」，载荷按它的默认值走。
+     */
+    public final class Theme {
+
+        Theme() {
+        }
+
+        public boolean resolveAttribute(int resid, android.util.TypedValue outValue, boolean resolveRefs) {
+            return false;
+        }
+
+        public void applyStyle(int resId, boolean force) {
+        }
+
+        public void setTo(Theme other) {
+        }
+
+        public Resources getResources() {
+            return Resources.this;
+        }
     }
 
     public static class NotFoundException extends RuntimeException {

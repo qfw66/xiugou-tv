@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../config/app_env.dart';
+import '../net/http_client_factory.dart';
 import 'danmaku_models.dart';
 
 /// §43 弹幕服务地址与访问令牌：由维护者在 `config/app.env` 里配置，代码与仓库里不保存真实值。
@@ -89,14 +90,11 @@ class DanmakuApi {
   static const Duration commentTimeout = Duration(seconds: 90);
 
   static HttpClient _defaultClient(String? Function() proxy) {
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 12)
-      ..userAgent = 'xiugou-tv';
-    client.findProxy = (uri) {
-      final p = proxy();
-      return p == null || p.isEmpty ? 'DIRECT' : 'PROXY $p; DIRECT';
-    };
-    return client;
+    return HttpClientFactory.createHttpClient(
+      connectionTimeout: const Duration(seconds: 12),
+      userAgent: 'xiugou-tv',
+      proxy: proxy,
+    );
   }
 
   /// 按片名 + 集名搜索候选（已按匹配度排序）。

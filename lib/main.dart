@@ -7,6 +7,7 @@ import 'core/companion/companion_process_manager.dart';
 import 'core/config/config_repository.dart';
 import 'core/config/models/builtin_sites.dart';
 import 'core/diagnostics/error_log.dart';
+import 'core/net/http_client_factory.dart';
 import 'core/danmaku/danmaku_api.dart';
 import 'core/player/mpv_player_engine.dart';
 import 'core/settings/models/appearance_preferences.dart';
@@ -65,11 +66,32 @@ Future<void> main() async {
     await configRepository.setHistoryLimit(
         settingsRepository.historyPreferences.limit,
         trim: false);
+    // §14 无痕浏览：跟随历史偏好（流先给当前值，再推送设置页 / 重新读取后的变更）
+    configRepository.setHistoryIncognito(settingsRepository.historyPreferences.incognito);
+    settingsRepository.historyPreferencesStream.listen(
+        (preferences) => configRepository.setHistoryIncognito(preferences.incognito));
+    // §14 安全 DNS：未经工厂创建的 HttpClient（如普通海报 NetworkImage）也接管建连；
+    // 选择跟随网络偏好实时切换（读取失败时偏好为默认「关闭」）。
+    HttpClientFactory.installGlobalOverrides();
+    HttpClientFactory.configureDoh(settingsRepository.networkPreferences.endpoint);
+    settingsRepository.networkPreferencesStream.listen(
+        (preferences) => HttpClientFactory.configureDoh(preferences.endpoint));
 
     final companionManager = CompanionProcessManager();
+    // §59 站源直连被重置时改走 Windows 系统代理（只在系统代理开启时生效）
+    companionManager.fallbackProxy = DanmakuApi.systemProxy;
+    // 播放器先于窗口管理器创建：退出钩子要先停播放（窗口已隐藏，声音不能再继续）
+    final playerEngine = MpvPlayerEngine();
     final windowManager = DesktopWindowManager(
       configRepository: configRepository,
-      beforeClose: companionManager.shutdown,
+      beforeClose: () async {
+        try {
+          await playerEngine.stop().timeout(const Duration(milliseconds: 500));
+        } catch (_) {
+          // 停播失败 / 超时不阻断关闭：进程退出时 mpv 随之结束
+        }
+        await companionManager.shutdown();
+      },
     );
     // 首帧前按已保存主题给原生窗口底色，避免浅色主题启动时闪深色边
     final appearance = settingsRepository.appearancePreferences;
@@ -89,7 +111,6 @@ Future<void> main() async {
     // 冷启动有效主入口：启动偏好 +「上次入口」解析（失败按点播首页）
     final startupEntry = settingsRepository.startupPreferences.effectiveEntry;
 
-    final playerEngine = MpvPlayerEngine();
     // 初始化时捕获默认音量 / 倍速；之后只更新即时参数，不覆盖当前播放默认值
     unawaited(
         playerEngine.applyPlaybackSettings(settingsRepository.playerSettings));

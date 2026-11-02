@@ -75,5 +75,11 @@ public class LinearLayout extends ViewGroup {
         public LayoutParams(ViewGroup.MarginLayoutParams source) {
             super(source);
         }
+
+        public LayoutParams(LayoutParams source) {
+            super((ViewGroup.MarginLayoutParams) source);
+            this.weight = source.weight;
+            this.gravity = source.gravity;
+        }
     }
 }

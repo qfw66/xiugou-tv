@@ -31,6 +31,14 @@ public class Display {
         outMetrics.heightPixels = getHeight();
     }
 
+    public void getSize(android.graphics.Point outSize) {
+        if (outSize != null) outSize.set(getWidth(), getHeight());
+    }
+
+    public void getRealSize(android.graphics.Point outSize) {
+        getSize(outSize);
+    }
+
     public void getRealMetrics(DisplayMetrics outMetrics) {
         getMetrics(outMetrics);
     }

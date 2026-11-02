@@ -13,13 +13,16 @@
     Skip generating the portable ZIP archive.
 .PARAMETER SkipInstaller
     Skip compiling the Inno Setup installer.
+.PARAMETER SkipSmoke
+    跳过发布产物冒烟门禁（scripts/verify_release.ps1）。仅限本地调试打包；发布不得使用。
 #>
 
 param (
     [string]$Version = "",
     [string]$FlutterPath = "",
     [switch]$SkipZip = $false,
-    [switch]$SkipInstaller = $false
+    [switch]$SkipInstaller = $false,
+    [switch]$SkipSmoke = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -261,6 +264,16 @@ New-Item -ItemType Directory -Path $TargetUnidbgDir -Force | Out-Null
 foreach ($lib in $CompanionUnidbgJars) {
     Copy-Item -LiteralPath $lib.FullName -Destination $TargetUnidbgDir -Force
 }
+# py 源运行时（companion/build.ps1 产出到 companion/dist）：PyRuntime 按 jar 同级的 dist/pyshell、
+# dist/pyruntime 查找；缺失时会回退到 PATH 上的 python —— 只有开发机有，发布包里必须自带。
+foreach ($pyDir in @("pyshell", "pyruntime")) {
+    $sourcePyDir = Join-Path $ProjectRoot "companion/dist/$pyDir"
+    if (Test-Path -LiteralPath $sourcePyDir -PathType Container) {
+        Copy-Item -LiteralPath $sourcePyDir -Destination $TargetCompanionDir -Recurse -Force
+    } elseif ($pyDir -eq "pyshell" -or (Test-Path -LiteralPath (Join-Path $ProjectRoot "companion/$pyDir"))) {
+        throw "Companion build did not produce companion/dist/$pyDir (py sources would break in the release package)."
+    }
+}
 $BundledCompanionFiles = @(Get-ChildItem -LiteralPath $TargetCompanionDir -Recurse -File)
 Write-Host "  [+] Bundled companion-service.jar + $($CompanionLibJars.Count) runtime lib(s) + $($CompanionUnidbgJars.Count) guard-decrypt lib(s) ($($BundledCompanionFiles.Count) files total)." -ForegroundColor Green
 
@@ -278,6 +291,44 @@ New-Item -ItemType Directory -Path $TargetRuntimeDir -Force | Out-Null
 Copy-Item -LiteralPath $EmbeddedJre -Destination $TargetRuntimeDir -Recurse -Force
 Write-Host "  [+] Bundled embedded JRE to release directory." -ForegroundColor Green
 
+# 3.3 VC++ 运行库应用本地部署（issue #2：用户机未装 vc_redist 时报缺 VCRUNTIME140_1.dll、打不开）。
+# xiugou_tv.exe 与各插件 DLL 以 /MD 链接 MSVCP140 / VCRUNTIME140 / VCRUNTIME140_1；Windows 先在 exe 目录
+# 找 DLL，因此随包放一份即可。来源优先取 VS 自带的可再发行目录（与编译器同版本），找不到才退回 System32。
+# 注意不要用 runtime/jre/bin 下的那份：版本 14.36 低于编译器，新编译器产物配旧 msvcp140 可能在加锁时崩溃。
+Write-Host "[3.3/5] Bundling VC++ runtime (app-local)..." -ForegroundColor Yellow
+$VcCrtFiles = @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+$VcCrtSource = $null
+$VsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
+if (Test-Path -LiteralPath $VsWhere -PathType Leaf) {
+    foreach ($vsRoot in @(& $VsWhere -all -products * -property installationPath)) {
+        $redistRoot = Join-Path $vsRoot "VC/Redist/MSVC"
+        if (-not (Test-Path -LiteralPath $redistRoot)) { continue }
+        $versions = Get-ChildItem -LiteralPath $redistRoot -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]$_.Name } -Descending
+        foreach ($ver in $versions) {
+            $crt = Get-ChildItem -LiteralPath (Join-Path $ver.FullName "x64") -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending | Select-Object -First 1
+            if ($crt -and -not ($VcCrtFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $crt.FullName $_)) })) {
+                $VcCrtSource = $crt.FullName
+                break
+            }
+        }
+        if ($VcCrtSource) { break }
+    }
+}
+if (-not $VcCrtSource) {
+    $VcCrtSource = [Environment]::GetFolderPath('System')
+    Write-Host "  [!] VS redist directory not found; falling back to $VcCrtSource" -ForegroundColor Yellow
+}
+foreach ($crtFile in $VcCrtFiles) {
+    $crtPath = Join-Path $VcCrtSource $crtFile
+    if (-not (Test-Path -LiteralPath $crtPath -PathType Leaf)) { throw "VC++ runtime file not found: $crtPath" }
+    Copy-Item -LiteralPath $crtPath -Destination $BuildOutputDir -Force
+}
+$crtVersion = (Get-Item -LiteralPath (Join-Path $BuildOutputDir "msvcp140.dll")).VersionInfo.FileVersion
+Write-Host "  [+] Bundled $($VcCrtFiles -join ', ') ($crtVersion) from $VcCrtSource" -ForegroundColor Green
+
 # Ensure dist directory exists
 if (-not (Test-Path $DistDir)) {
     New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
@@ -291,7 +342,23 @@ if (-not $SkipZip) {
     Write-Host "[4/5] Packaging Portable ZIP archive..." -ForegroundColor Yellow
     $ZipPath = Join-Path $PackageStage "xiugou-tv-windows-x64-v$Version-portable.zip"
 
-    Compress-Archive -Path "$BuildOutputDir/*" -DestinationPath $ZipPath -CompressionLevel Optimal
+    # 不用 Compress-Archive / ZipFile.CreateFromDirectory：在 Windows PowerShell 5.1（.NET Framework 兼容模式）下
+    # 两者都把条目路径写成反斜杠（runtime\jre\...），不符合 zip 规范（APPNOTE 4.4.17 要求 /），
+    # 部分解压工具会把整条路径当成文件名。这里逐个文件写入并显式用 / 作分隔。
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $ZipSourceRoot = [System.IO.Path]::GetFullPath($BuildOutputDir).TrimEnd([char]92, [char]47)
+    $ZipStream = [System.IO.File]::Open($ZipPath, [System.IO.FileMode]::CreateNew)
+    try {
+        $ZipArchive = New-Object System.IO.Compression.ZipArchive($ZipStream, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($zipFile in (Get-ChildItem -LiteralPath $ZipSourceRoot -Recurse -File)) {
+                $entryName = $zipFile.FullName.Substring($ZipSourceRoot.Length + 1).Replace([char]92, [char]47)
+                [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                    $ZipArchive, $zipFile.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+            }
+        } finally { $ZipArchive.Dispose() }
+    } finally { $ZipStream.Dispose() }
     $Artifacts += $ZipPath
     Write-Host "  [+] Portable ZIP staged: $ZipPath" -ForegroundColor Green
 } else {
@@ -332,7 +399,7 @@ if (-not $SkipInstaller) {
     }
 }
 
-# invariant: 所有本轮请求的产物就绪前，不覆盖 dist 中的旧版本。
+# invariant: 所有本轮请求的产物就绪、且冒烟门禁通过前，不覆盖 dist 中的旧版本。
 foreach ($artifact in $Artifacts) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         throw "Build produced no artifact: $artifact"
@@ -341,26 +408,42 @@ foreach ($artifact in $Artifacts) {
         throw "Build produced an empty artifact: $artifact"
     }
 }
-foreach ($artifact in $Artifacts) {
-    $destination = Join-Path $DistDir ([System.IO.Path]::GetFileName($artifact))
-    Move-Item -LiteralPath $artifact -Destination $destination -Force
-    Write-Host "  [+] Published artifact: $destination" -ForegroundColor Green
-}
 # 客户端强制校验：Release 必须带 SHA256SUMS（或资产自带 digest），
 # 否则「检测更新」会拒绝安装。格式与 sha256sum 一致：<hex>  <filename>。
+# 先在暂存目录生成，门禁对暂存目录做自检，通过后与产物一起移入 dist。
 if ($Artifacts.Count -gt 0) {
-    $SumsPath = Join-Path $DistDir "SHA256SUMS"
+    $StageSums = Join-Path $PackageStage "SHA256SUMS"
     $Sums = foreach ($artifact in $Artifacts) {
         $name = [System.IO.Path]::GetFileName($artifact)
-        $published = Join-Path $DistDir $name
-        $hash = (Get-FileHash -LiteralPath $published -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
         "$hash  $name"
     }
     # invariant: 清单必须是 LF 换行，标准 `sha256sum -c` 才能直接消费；
-    # Set-Content 在 Windows PowerShell 下写 CRLF，会把 \r 混进文件名。
+    # Set-Content 在 Windows PowerShell 下写 CRLF，会把回车符（CR）混进文件名。
     $SumsText = (($Sums -join "`n") + "`n")
-    [System.IO.File]::WriteAllText($SumsPath, $SumsText, [System.Text.Encoding]::ASCII)
-    Write-Host "  [+] Published checksums: $SumsPath" -ForegroundColor Green
+    [System.IO.File]::WriteAllText($StageSums, $SumsText, [System.Text.Encoding]::ASCII)
+
+    # 发布产物冒烟门禁：必需文件、依赖闭包、版本资源、解压 / 静默安装后启动。任何一项失败即中止，
+    # dist 保持上一轮内容不变；失败现场留在暂存目录与门禁临时目录供排查。
+    if ($SkipSmoke) {
+        Write-Host "[6/6] Skipped release smoke gate (-SkipSmoke). Do NOT publish these artifacts." -ForegroundColor DarkYellow
+    } else {
+        Write-Host "[6/6] Running release smoke gate..." -ForegroundColor Yellow
+        $GateArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "verify_release.ps1"),
+            "-Version", $Version, "-ArtifactDir", $PackageStage, "-BuildOutputDir", $BuildOutputDir)
+        if ($SkipZip) { $GateArgs += "-SkipZip" }
+        if ($SkipInstaller) { $GateArgs += "-SkipInstaller" }
+        & powershell @GateArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Release smoke gate FAILED (exit $LASTEXITCODE). Artifacts kept in $PackageStage; dist was not updated."
+        }
+    }
+
+    foreach ($artifact in ($Artifacts + $StageSums)) {
+        $destination = Join-Path $DistDir ([System.IO.Path]::GetFileName($artifact))
+        Move-Item -LiteralPath $artifact -Destination $destination -Force
+        Write-Host "  [+] Published: $destination" -ForegroundColor Green
+    }
 }
 if ($Artifacts.Count -eq 0) {
     Write-Host "  [*] Release bundled only; no distribution artifacts requested." -ForegroundColor Yellow

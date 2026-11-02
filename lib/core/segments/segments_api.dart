@@ -4,6 +4,7 @@ import 'dart:io';
 
 import '../config/app_env.dart';
 import '../danmaku/danmaku_api.dart' show DanmakuApi;
+import '../net/http_client_factory.dart';
 import 'segment_models.dart';
 
 /// §44 共享片段服务地址与令牌：与弹幕同口径，由维护者在 `config/app.env` 配置、打包注入，
@@ -63,14 +64,11 @@ class SegmentsApi {
   static const Duration timeout = Duration(seconds: 15);
 
   static HttpClient _defaultClient(String? Function() proxy) {
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 10)
-      ..userAgent = 'xiugou-tv';
-    client.findProxy = (uri) {
-      final p = proxy();
-      return p == null || p.isEmpty ? 'DIRECT' : 'PROXY $p; DIRECT';
-    };
-    return client;
+    return HttpClientFactory.createHttpClient(
+      connectionTimeout: const Duration(seconds: 10),
+      userAgent: 'xiugou-tv',
+      proxy: proxy,
+    );
   }
 
   Future<SegmentsResponse> fetch(String key, {required String clientId}) async {

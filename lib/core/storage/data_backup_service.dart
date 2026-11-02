@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../config/windows_config_storage.dart';
 import '../player/models/player_settings.dart';
 import '../settings/models/history_preferences.dart';
+import '../settings/models/network_preferences.dart';
 import '../settings/models/play_skip_preferences.dart';
 import '../settings/models/search_preferences.dart';
 import '../settings/models/self_check_preferences.dart';
@@ -486,6 +487,9 @@ class DataBackupService {
           break;
         case 'player_settings.json':
           PlayerSettings.fromJson(_map(content, name));
+          break;
+        case 'network_preferences.json':
+          NetworkPreferences.fromJson(_map(content, name));
           break;
         case 'history_preferences.json':
           HistoryPreferences.fromJson(_map(content, name));

@@ -47,8 +47,9 @@ void appendUniqueSearchItems(
 class SearchEngine {
   final SiteApi _siteApi;
 
-  /// 单站检索超时（保持既有 20 秒语义）
   static const Duration siteTimeout = Duration(seconds: 20);
+  // Includes lazy process startup (30s), the RPC (75s), and scheduling margin.
+  static const Duration companionSiteTimeout = Duration(seconds: 110);
 
   /// 伴随（Spider）站源的并发上限。
   ///
@@ -148,10 +149,17 @@ class SearchEngine {
 
   Future<_SiteSearchOutcome> _searchSiteOutcome(Site site, String query,
       {SearchCancelToken? cancelToken}) async {
+    final child = SearchCancelToken();
+    var finished = false;
+    cancelToken?.onCancel(() { if (!finished) child.cancel(); });
+    final budget = site.usesCompanion ? companionSiteTimeout : siteTimeout;
     try {
       final res = await _siteApi
-          .search(site, keyword: query, cancelToken: cancelToken)
-          .timeout(siteTimeout);
+          .search(site, keyword: query, cancelToken: child)
+          .timeout(budget, onTimeout: () {
+            child.cancel();
+            throw TimeoutException('站源搜索超时，请稍后重试', budget);
+          });
       // 取消后结果不再使用：既不打标签也不上报，直接收尾
       if (cancelToken?.isCancelled ?? false) {
         return _SiteSearchOutcome(site: site, items: const <VodItem>[]);
@@ -174,6 +182,8 @@ class SearchEngine {
       }
       _log('  -> 站源 [${site.name}] 检索异常: $e');
       return _SiteSearchOutcome(site: site, items: const <VodItem>[], error: e);
+    } finally {
+      finished = true;
     }
   }
 

@@ -88,6 +88,7 @@ class Site {
   }
 
   Site copyWith({
+    String? key,
     String? name,
     int? type,
     String? api,
@@ -95,7 +96,7 @@ class Site {
     String? jar,
   }) =>
       Site(
-        key: key,
+        key: key ?? this.key,
         name: name ?? this.name,
         type: type ?? this.type,
         api: api ?? this.api,

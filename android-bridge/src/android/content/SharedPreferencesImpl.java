@@ -3,10 +3,11 @@ package android.content;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * SharedPreferences 的桌面实现：内存 Map + JSON 行格式文件持久化，
@@ -26,79 +27,152 @@ class SharedPreferencesImpl implements SharedPreferences {
         load();
     }
 
-    @SuppressWarnings("unchecked")
     private void load() {
+        if (!file.exists()) return;
+        int skipped = 0;
+        boolean loadedLegacy = false;
         try {
-            if (!file.exists()) return;
             byte[] bytes = Files.readAllBytes(file.toPath());
             String text = new String(bytes, StandardCharsets.UTF_8);
             for (String line : text.split("\n")) {
+                if (line.endsWith("\r")) line = line.substring(0, line.length() - 1);
                 if (line.isEmpty()) continue;
-                // 每行格式：<type-tag>\t<base64(json key)>=<base64(json value)>
-                int tab = line.indexOf('\t');
-                int eq = line.indexOf('=', tab + 1);
-                if (tab < 0 || eq < 0) continue;
-                char tag = line.charAt(tab + 1);
-                String key = decode(line.substring(tab + 2, eq));
-                String value = decode(line.substring(eq + 1));
-                switch (tag) {
-                    case 's':
-                        map.put(key, value);
-                        break;
-                    case 'i':
-                        map.put(key, Integer.parseInt(value));
-                        break;
-                    case 'l':
-                        map.put(key, Long.parseLong(value));
-                        break;
-                    case 'f':
-                        map.put(key, Float.parseFloat(value));
-                        break;
-                    case 'b':
-                        map.put(key, Boolean.parseBoolean(value));
-                        break;
-                    default:
-                        break;
+                try {
+                    if (line.startsWith("v2\t")) {
+                        loadV2Line(line);
+                    } else {
+                        loadLegacyLine(line);
+                        loadedLegacy = true;
+                    }
+                } catch (Throwable ignored) {
+                    skipped++;
                 }
             }
-        } catch (Throwable ignored) {
+            // 旧版已经写到磁盘但因解析错位而从未能恢复；读回后立即迁移为无歧义格式。
+            if (loadedLegacy && !map.isEmpty()) save();
+        } catch (Throwable error) {
+            System.err.println("[SharedPreferences] load failed: " + file.getName()
+                    + " (" + error.getClass().getSimpleName() + ")");
+            return;
+        }
+        if (skipped > 0) {
+            System.err.println("[SharedPreferences] skipped " + skipped
+                    + " invalid record(s): " + file.getName());
         }
     }
 
-    private void save() {
-        try {
-            synchronized (ioLock) {
+    private void loadV2Line(String line) {
+        String[] parts = line.split("\\t", -1);
+        if (parts.length != 5 || !"v2".equals(parts[0]) || parts[1].length() != 1) {
+            throw new IllegalArgumentException("invalid v2 record");
+        }
+        char tag = parts[1].charAt(0);
+        String key = "n".equals(parts[2]) ? null : decodeUrl(parts[3]);
+        if (!"n".equals(parts[2]) && !"s".equals(parts[2])) {
+            throw new IllegalArgumentException("invalid key kind");
+        }
+        putDecoded(tag, key, decodeUrl(parts[4]));
+    }
+
+    /**
+     * v1 格式为 {@code tag<TAB>base64(key)=base64(value)}。标准 Base64 自带 '=' 补位，
+     * 因此不能用 indexOf/lastIndexOf；逐个候选分隔点验证两侧的规范 Base64，唯一命中才接受。
+     */
+    private void loadLegacyLine(String line) {
+        if (line.length() < 3 || line.charAt(1) != '\t') {
+            throw new IllegalArgumentException("invalid legacy record");
+        }
+        char tag = line.charAt(0);
+        String payload = line.substring(2);
+        String decodedKey = null;
+        String decodedValue = null;
+        int matches = 0;
+        for (int i = 0; i < payload.length(); i++) {
+            if (payload.charAt(i) != '=') continue;
+            String key = decodeStandardCanonical(payload.substring(0, i));
+            String value = decodeStandardCanonical(payload.substring(i + 1));
+            if (key == null || value == null) continue;
+            decodedKey = key;
+            decodedValue = value;
+            matches++;
+        }
+        if (matches != 1) throw new IllegalArgumentException("ambiguous legacy record");
+        putDecoded(tag, decodedKey, decodedValue);
+    }
+
+    private void putDecoded(char tag, String key, String value) {
+        switch (tag) {
+            case 's': map.put(key, value); break;
+            case 'i': map.put(key, Integer.parseInt(value)); break;
+            case 'l': map.put(key, Long.parseLong(value)); break;
+            case 'f': map.put(key, Float.parseFloat(value)); break;
+            case 'b':
+                if (!"true".equals(value) && !"false".equals(value)) {
+                    throw new IllegalArgumentException("invalid boolean");
+                }
+                map.put(key, Boolean.parseBoolean(value));
+                break;
+            default: throw new IllegalArgumentException("unknown type");
+        }
+    }
+
+    private boolean save() {
+        synchronized (ioLock) {
+            File pending = null;
+            try {
                 File dir = file.getParentFile();
-                if (dir != null && !dir.exists()) dir.mkdirs();
+                if (dir != null && !dir.exists() && !dir.mkdirs() && !dir.isDirectory()) {
+                    throw new java.io.IOException("cannot create prefs directory");
+                }
+                pending = File.createTempFile(file.getName() + ".", ".tmp", dir);
                 StringBuilder sb = new StringBuilder();
                 synchronized (map) {
                     for (Map.Entry<String, Object> e : map.entrySet()) {
-                        Object v = e.getValue();
+                        Object value = e.getValue();
                         char tag;
-                        if (v instanceof String) tag = 's';
-                        else if (v instanceof Integer) tag = 'i';
-                        else if (v instanceof Long) tag = 'l';
-                        else if (v instanceof Float) tag = 'f';
-                        else if (v instanceof Boolean) tag = 'b';
+                        if (value instanceof String) tag = 's';
+                        else if (value instanceof Integer) tag = 'i';
+                        else if (value instanceof Long) tag = 'l';
+                        else if (value instanceof Float) tag = 'f';
+                        else if (value instanceof Boolean) tag = 'b';
                         else continue;
-                        sb.append(tag).append('\t').append(encode(e.getKey())).append('=').append(encode(String.valueOf(v))).append('\n');
+                        sb.append("v2\t").append(tag).append('\t')
+                                .append(e.getKey() == null ? 'n' : 's').append('\t')
+                                .append(e.getKey() == null ? "" : encodeUrl(e.getKey())).append('\t')
+                                .append(encodeUrl(String.valueOf(value))).append('\n');
                     }
                 }
-                Files.write(file.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
+                Files.write(pending.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
+                Files.move(pending.toPath(), file.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                return true;
+            } catch (Throwable error) {
+                if (pending != null) {
+                    try { Files.deleteIfExists(pending.toPath()); } catch (Throwable ignored) {}
+                }
+                System.err.println("[SharedPreferences] save failed: " + file.getName()
+                        + " (" + error.getClass().getSimpleName() + ")");
+                return false;
             }
-        } catch (Throwable ignored) {
         }
     }
 
-    private static String encode(String s) {
-        return java.util.Base64.getEncoder().encodeToString(s.getBytes(StandardCharsets.UTF_8));
+    private static String encodeUrl(String value) {
+        return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(value.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static String decode(String s) {
+    private static String decodeUrl(String value) {
+        return new String(Base64.getUrlDecoder().decode(value), StandardCharsets.UTF_8);
+    }
+
+    private static String decodeStandardCanonical(String value) {
         try {
-            return new String(java.util.Base64.getDecoder().decode(s), StandardCharsets.UTF_8);
-        } catch (Throwable t) {
-            return "";
+            byte[] decoded = Base64.getDecoder().decode(value);
+            if (!Base64.getEncoder().encodeToString(decoded).equals(value)) return null;
+            return new String(decoded, StandardCharsets.UTF_8);
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
@@ -227,8 +301,7 @@ class SharedPreferencesImpl implements SharedPreferences {
                 if (e.getValue() == null) map.remove(e.getKey());
                 else map.put(e.getKey(), e.getValue());
             }
-            save();
-            return true;
+            return save();
         }
 
         @Override

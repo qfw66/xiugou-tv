@@ -48,6 +48,9 @@ public class Main {
                 if (on) {
                     System.out.println("[SelfCheck] toggle=on");
                 }
+            } else if (arg.startsWith("--fallback-proxy=")) {
+                // §59 直连失败再走系统代理；须在 AndroidBridge.install() / 任何 OkHttp 之前安装。
+                FallbackProxySelector.install(arg.substring("--fallback-proxy=".length()));
             } else if (arg.startsWith("--stdin-watch=")) {
                 // 与 --self-check 同口径：只有显式 on/true/1 才启用，缺省关闭。
                 String value = arg.substring("--stdin-watch=".length()).trim();
@@ -59,6 +62,8 @@ public class Main {
 
         // 安装 Android 运行时补丁（AES/CBC/PKCS7Padding 等），幂等。
         AndroidBridge.install();
+        // 旧版本把原生库/解库目录留在 %TEMP%（每次启动 unidbg 一份），启动时尽力清一次
+        com.fongmi.companion.fs.NativeCache.sweepLegacyTemp();
 
         try {
             int boundPort = AndroidBridge.serve(port);

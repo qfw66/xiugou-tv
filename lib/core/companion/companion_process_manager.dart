@@ -5,7 +5,9 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
+import '../net/http_client_factory.dart';
 import 'companion_stderr_filter.dart';
+import 'process_job.dart';
 
 /// 伴随服务运行状态枚举
 enum CompanionStatus {
@@ -28,7 +30,7 @@ class CompanionProcessManager {
   /// .do-it/tmp-mem/jvm-matrix.txt：空闲 PrivateBytes 628.9MB → 66.5MB）。
   static const List<String> companionJvmTuningArgs = [
     '-Xms16m',
-    '-Xmx256m',
+    '-Xmx768m',
     '-XX:MaxMetaspaceSize=128m',
     '-XX:+UseSerialGC',
   ];
@@ -61,15 +63,31 @@ class CompanionProcessManager {
     this.idleTimeout = const Duration(minutes: 30),
     this.idleCheckInterval = const Duration(minutes: 1),
   })  : _dio = dio ??
-            Dio(BaseOptions(
+            HttpClientFactory.createDio(BaseOptions(
                 connectTimeout: const Duration(seconds: 3),
                 receiveTimeout: const Duration(seconds: 3))),
         _applicationDirectory = applicationDirectory == null
             ? File(Platform.resolvedExecutable).parent.path
             : p.normalize(p.absolute(applicationDirectory)),
         _javaResolver = javaResolver,
-        _processStarter = processStarter ??
-            ((executable, arguments) => Process.start(executable, arguments));
+        _processStarter = processStarter ?? _startAdopted;
+
+  /// 默认启动方式：拉起后立即交给 Job Object，主程序崩溃 / 被强杀时整棵 companion 进程树随之终止。
+  /// companion 的孙进程（密码服务、python）都是首次用到站点时才派生，晚于这里的收养，因此全部在 Job 内。
+  static Future<Process> _startAdopted(
+      String executable, List<String> arguments) async {
+    final process = await Process.start(executable, arguments);
+    final adopted = await ProcessJob.adopt(process.pid);
+    if (!adopted) {
+      debugPrint('[companion] 未能加入进程 Job（pid=${process.pid}），退出兜底仅依赖看门狗');
+    }
+    return process;
+  }
+
+  /// §59 每次拉起 companion 时读取的回退代理（`host:port`）；返回非空时传
+  /// `--fallback-proxy`，让站源「直连失败再走代理」。默认不设（行为与以前一致），
+  /// 由 main.dart 接到 Windows 系统代理。
+  String? Function()? fallbackProxy;
 
   final String _applicationDirectory;
   final Future<String?> Function()? _javaResolver;
@@ -254,6 +272,12 @@ class CompanionProcessManager {
         throw StateError('Companion service jar not found at $resolvedJar');
       }
       final ready = Completer<int?>();
+      String? fallback;
+      try {
+        fallback = fallbackProxy?.call();
+      } catch (_) {
+        fallback = null; // 读代理失败按无代理处理，不影响启动
+      }
       // ⑥ 内存收紧与孤儿回收：收紧 JVM 参数（对照实验见静态常量注释）；
       // --stdin-watch=on 让 Java 侧在主进程异常退出（stdin 管道关闭）时自杀，
       // 避免留下无人回收的孤儿进程（见 companion/src/.../Main.java）。
@@ -272,6 +296,7 @@ class CompanionProcessManager {
         // PATH 上的 java 可能是「再 exec 一个真 JVM」的包装器，或有进程继承了管道句柄，
         // 那些情况下 EOF 可能永远不来。
         '--parent-pid=$pid',
+        if (fallback != null && fallback.isNotEmpty) '--fallback-proxy=$fallback',
       ]);
       _process = process;
       _stdoutSubscription = process.stdout
@@ -324,7 +349,9 @@ class CompanionProcessManager {
       final port = await Future.any<int?>([
         ready.future,
         _cancelStartup!.future.then((_) => null),
-      ]).timeout(const Duration(seconds: 5));
+      // 冷启动要读 ~38 MB 的 jar 并加载类；虚拟机 / Defender 实时扫描下实测可到 10~20 秒，
+      // 原来只等 5 秒会把「正在正常启动」判成失败（表现为「站点服务启动失败」且永远不再重试）。
+      ]).timeout(const Duration(seconds: 30));
       if (_stopRequested) return false;
       if (port == null || !identical(_process, process)) {
         throw StateError('Companion exited before ready');
@@ -451,11 +478,12 @@ class CompanionProcessManager {
   Future<void> _killProcessTree(Process process) async {
     if (Platform.isWindows) {
       try {
+        // taskkill 本身也可能卡住（系统繁忙 / 杀软拦截），不能让它拖住退出链
         await Process.run(
           'taskkill',
           ['/F', '/T', '/PID', '${process.pid}'],
           runInShell: true,
-        );
+        ).timeout(const Duration(seconds: 3));
       } catch (_) {
         // taskkill 不可用时下面的 kill 仍然生效。
       }

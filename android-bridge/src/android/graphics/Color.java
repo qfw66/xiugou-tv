@@ -89,4 +89,63 @@ public class Color {
     public static int blue(int color) {
         return color & 0xFF;
     }
+    /** RGB 转 HSV（hsv[0] 色相 0..360，hsv[1] 饱和度、hsv[2] 明度 0..1），与 AOSP 结果一致。 */
+    public static void RGBToHSV(int red, int green, int blue, float[] hsv) {
+        if (hsv == null || hsv.length < 3) throw new IllegalArgumentException("3 components required for hsv");
+        float r = red / 255f;
+        float g = green / 255f;
+        float b = blue / 255f;
+        float max = Math.max(r, Math.max(g, b));
+        float min = Math.min(r, Math.min(g, b));
+        float delta = max - min;
+        float h;
+        if (delta == 0f) {
+            h = 0f;
+        } else if (max == r) {
+            h = 60f * (((g - b) / delta) % 6f);
+        } else if (max == g) {
+            h = 60f * (((b - r) / delta) + 2f);
+        } else {
+            h = 60f * (((r - g) / delta) + 4f);
+        }
+        if (h < 0f) h += 360f;
+        hsv[0] = h;
+        hsv[1] = max == 0f ? 0f : delta / max;
+        hsv[2] = max;
+    }
+
+    public static void colorToHSV(int color, float[] hsv) {
+        RGBToHSV(red(color), green(color), blue(color), hsv);
+    }
+
+    public static int HSVToColor(float[] hsv) {
+        return HSVToColor(0xFF, hsv);
+    }
+
+    public static int HSVToColor(int alpha, float[] hsv) {
+        if (hsv == null || hsv.length < 3) throw new IllegalArgumentException("3 components required for hsv");
+        float h = ((hsv[0] % 360f) + 360f) % 360f;
+        float s = Math.max(0f, Math.min(1f, hsv[1]));
+        float v = Math.max(0f, Math.min(1f, hsv[2]));
+        float c = v * s;
+        float x = c * (1 - Math.abs((h / 60f) % 2f - 1));
+        float m = v - c;
+        float r;
+        float g;
+        float b;
+        if (h < 60) {
+            r = c; g = x; b = 0;
+        } else if (h < 120) {
+            r = x; g = c; b = 0;
+        } else if (h < 180) {
+            r = 0; g = c; b = x;
+        } else if (h < 240) {
+            r = 0; g = x; b = c;
+        } else if (h < 300) {
+            r = x; g = 0; b = c;
+        } else {
+            r = c; g = 0; b = x;
+        }
+        return argb(alpha, Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255));
+    }
 }

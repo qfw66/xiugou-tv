@@ -40,6 +40,8 @@ public final class ParseStage {
     public static final String INSTANTIATE = "instantiate";
     /** 方法调用自身抛错（homeContent / categoryContent ...）。 */
     public static final String CALL = "call";
+    /** 上游明确拒绝或返回错误页，而载荷把它吞成了空结果。 */
+    public static final String UPSTREAM = "upstream";
 
     /** 一次失败记录。 */
     public static final class Failure {
@@ -91,6 +93,13 @@ public final class ParseStage {
             }
             BY_TAG.put(tag, f);
         }
+    }
+
+    /** Clear a completed preparation diagnostic without losing the current RPC identity. */
+    public static void clearFailure() {
+        CURRENT.remove();
+        String tag = TAG.get();
+        if (tag != null) BY_TAG.remove(tag);
     }
 
     /** 当前线程最后一次失败；无失败返回 null。 */

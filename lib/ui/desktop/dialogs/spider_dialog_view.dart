@@ -246,7 +246,11 @@ class _SpiderDialogViewState extends State<SpiderDialogView> {
     );
   }
 
-  Widget _node(BuildContext context, SpiderUiNode node) {
+  /// [inTap]：祖先节点可点（如整行可点的网盘列表项）。此时子孙文字不能用 [SelectableText]——
+  /// 它会在手势竞争中吃掉点击，点文字时整行收不到 onTap（2026-10-31 aowu「网盘登录」点了没反应的根因）。
+  /// [fill]：父级是纵向排列，可点整行可以撑满宽度；横向排列（宽度可能无界）时不撑。
+  Widget _node(BuildContext context, SpiderUiNode node,
+      {bool inTap = false, bool fill = true}) {
     final palette = AppPalette.of(context);
     final textStyle =
         TextStyle(fontSize: AppType.body, height: 1.5, color: palette.textBody);
@@ -261,7 +265,11 @@ class _SpiderDialogViewState extends State<SpiderDialogView> {
           fontWeight: node.bold ? FontWeight.bold : null,
           color: onTap != null ? palette.accentInk : null,
         );
-        if (onTap == null) return SelectableText(node.text, style: style);
+        if (onTap == null) {
+          return inTap
+              ? Text(node.text, style: style)
+              : SelectableText(node.text, style: style);
+        }
         return InkWell(
           borderRadius: BorderRadius.circular(AppRadii.xs),
           onTap: onTap,
@@ -398,13 +406,19 @@ class _SpiderDialogViewState extends State<SpiderDialogView> {
             runSpacing: gap,
             children: [
               for (final child in node.children)
-                SizedBox(width: itemWidth, child: _node(context, child)),
+                SizedBox(
+                    width: itemWidth,
+                    child: _node(context, child, inTap: inTap)),
             ],
           );
         });
       default: // group
+        final onTap = click();
+        final childInTap = inTap || onTap != null;
         final children = [
-          for (final child in node.children) _node(context, child)
+          for (final child in node.children)
+            _node(context, child,
+                inTap: childInTap, fill: fill && node.axis != 'h')
         ];
         Widget group = node.axis == 'h'
             ? Wrap(
@@ -428,8 +442,28 @@ class _SpiderDialogViewState extends State<SpiderDialogView> {
             ),
           );
         }
-        final onTap = click();
-        return onTap == null ? group : InkWell(onTap: onTap, child: group);
+        if (onTap == null) return group;
+        // 可点整行：撑满可用宽度并加边框，整块区域都能点中，也能看出可点
+        return SizedBox(
+          key: ValueKey('spider-node-${node.id}'),
+          width: fill ? double.infinity : null,
+          child: Material(
+            type: MaterialType.transparency,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(AppRadii.sm),
+              onTap: onTap,
+              child: Ink(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(AppRadii.sm),
+                  border: Border.all(color: palette.border),
+                ),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.md, vertical: AppSpacing.sm),
+                child: group,
+              ),
+            ),
+          ),
+        );
     }
   }
 }
