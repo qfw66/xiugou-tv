@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui';
 
@@ -7,11 +8,13 @@ import 'package:flutter/services.dart';
 
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
+import '../widgets/app_message.dart';
 import '../widgets/focus_ring.dart';
 import '../widgets/horizontal_scroll_area.dart';
 
 /// 播放页「选集」抽屉里的一集（宿主装配，组件保持哑视图）。
 class PlayerEpisodeOption {
+  /// 0 基列表下标：只用于回调定位与测试构造，界面一律读 [ordinal]。
   final int index;
   final String name;
   final bool current;
@@ -21,6 +24,12 @@ class PlayerEpisodeOption {
     required this.name,
     this.current = false,
   });
+
+  /// 1 基**列表位置**（`index + 1`，不补零）：显示 / Tooltip / 复制共用。
+  ///
+  /// 它回答「这次返回的列表里排第几」，不是「这是哪一集」；片段身份由
+  /// `SegmentEpisodeKey` 按集名解析（失败才位置兜底），两者绝不互相换算。
+  int get ordinal => index + 1;
 }
 
 /// 抽屉顶部的一条线路（`index` 是 `PlaybackSession.sources` 的下标）。
@@ -108,6 +117,12 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
   static const double _topInset = 54;
   static const double _bottomInset = 96;
   static const double _itemExtent = 46;
+
+  /// 悬停显示完整集名的等待时长（Tooltip 默认是 0，划过就会闪）。
+  static const Duration _tooltipWait = Duration(milliseconds: 400);
+
+  /// 右键菜单文案；复制内容与界面 / Tooltip 同源，避免「界面 1、复制 01」。
+  static const String _copyMenuLabel = '复制集信息（序号 : 原名）';
 
   final ScrollController _scrollController = ScrollController();
 
@@ -216,6 +231,65 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
     widget.onClose();
   }
 
+  /// 显示 / Tooltip / 复制共用的唯一格式源：`序号 : 原名`（序号不补零）。
+  String _episodeLabel(PlayerEpisodeOption episode) =>
+      '${episode.ordinal} : ${episode.name}';
+
+  Future<void> _copyEpisode(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    showAppMessage('已复制选集序号与集名', type: AppMessageType.success);
+  }
+
+  /// 行右键菜单：只复制，**绝不触发切集**（与时间轴右键菜单同一范式）。
+  Future<void> _showEpisodeMenu(PlayerEpisodeOption episode, String copyText,
+      TapUpDetails details) async {
+    // 右键顺带把键盘游标移到这一行（不改变当前播放集）。
+    if (_cursor != episode.index) {
+      setState(() => _cursor = episode.index);
+    }
+    final palette = context.palette;
+    final choice = await showMenu<int>(
+      context: context,
+      color: palette.raised,
+      shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadii.md)),
+      position: RelativeRect.fromLTRB(
+        details.globalPosition.dx,
+        details.globalPosition.dy,
+        details.globalPosition.dx,
+        details.globalPosition.dy,
+      ),
+      items: [
+        PopupMenuItem<int>(
+          key: const ValueKey('episode-drawer-copy-menu-item'),
+          value: 0,
+          height: 40,
+          child: Row(
+            children: [
+              Icon(
+                Icons.content_copy_rounded,
+                size: 15,
+                color: palette.playerText.withValues(alpha: 0.8),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Text(
+                _copyMenuLabel,
+                style: TextStyle(
+                    color: palette.playerText, fontSize: AppType.label),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+    if (!mounted) return;
+    // 菜单是独立路由：关闭后把焦点还给抽屉，键盘游标才能继续用（方案 §4.3）。
+    _focusNode.requestFocus();
+    if (choice != 0) return;
+    await _copyEpisode(copyText);
+  }
+
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
@@ -223,6 +297,16 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.escape) {
       widget.onClose();
+      return KeyEventResult.handled;
+    }
+    // Ctrl+C：复制游标行（不切集、不收起抽屉）。
+    if (key == LogicalKeyboardKey.keyC &&
+        HardwareKeyboard.instance.isControlPressed) {
+      final episodes = widget.nav?.episodes ?? const <PlayerEpisodeOption>[];
+      if (episodes.isNotEmpty) {
+        final episode = episodes[_cursor.clamp(0, episodes.length - 1)];
+        unawaited(_copyEpisode(_episodeLabel(episode)));
+      }
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowUp) {
@@ -553,16 +637,24 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
     final episode = nav.episodes[index];
     final isCurrent = episode.current;
     final isCursor = index == _cursor;
+    // 序号只表示「这次列表里的位置」（1 基、不补零），不是集号。
+    final ordinalText = episode.ordinal.toString();
+    final copyText = _episodeLabel(episode);
     final item = MergeSemantics(
       child: Semantics(
         selected: isCurrent,
         child: FocusRing(
           onTap: nav.switching ? null : () => _select(index),
-          semanticLabel: episode.name,
+          semanticLabel: '第 ${episode.ordinal} 项，${episode.name}',
           borderRadius: BorderRadius.circular(AppRadii.sm),
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: nav.switching ? null : () => _select(index),
+            // 右键只给「复制」入口，绝不切集（切集仍只走左键 / Enter）。
+            onSecondaryTapUp: nav.switching
+                ? null
+                : (details) =>
+                    unawaited(_showEpisodeMenu(episode, copyText, details)),
             child: MouseRegion(
               cursor: SystemMouseCursors.click,
               onEnter: (_) {
@@ -593,6 +685,9 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
                 child: Row(
                   children: [
                     Container(
+                      // 三位数（100+ 集）自然撑开，两位及以内固定 30 宽，不挤爆 320 面板。
+                      constraints: const BoxConstraints(minWidth: 30),
+                      alignment: Alignment.center,
                       padding: const EdgeInsets.symmetric(
                           horizontal: 5, vertical: 2),
                       decoration: BoxDecoration(
@@ -602,7 +697,8 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
                         borderRadius: BorderRadius.circular(AppRadii.xs),
                       ),
                       child: Text(
-                        (index + 1).toString().padLeft(2, '0'),
+                        ordinalText,
+                        key: ValueKey('episode-drawer-ordinal-$index'),
                         style: TextStyle(
                           color: isCurrent
                               ? palette.accentInk
@@ -613,19 +709,34 @@ class _EpisodeDrawerLayerState extends State<EpisodeDrawerLayer> {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    // 分隔独立成 Text：名字仍是独立 Text，语义 / 测试按原名检索不受影响。
+                    Text(
+                      ' : ',
+                      style: TextStyle(
+                        color: palette.playerText.withValues(alpha: 0.4),
+                        fontSize: AppType.caption,
+                      ),
+                    ),
                     Expanded(
-                      child: Text(
-                        episode.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: isCurrent
-                              ? palette.playerText
-                              : palette.playerText.withValues(alpha: 0.82),
-                          fontSize: AppType.body,
-                          fontWeight:
-                              isCurrent ? FontWeight.w700 : FontWeight.w500,
+                      child: Tooltip(
+                        message: copyText,
+                        waitDuration: _tooltipWait,
+                        excludeFromSemantics: true,
+                        constraints:
+                            const BoxConstraints(maxWidth: _panelMaxWidth),
+                        child: Text(
+                          episode.name,
+                          key: ValueKey('episode-drawer-name-$index'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: isCurrent
+                                ? palette.playerText
+                                : palette.playerText.withValues(alpha: 0.82),
+                            fontSize: AppType.body,
+                            fontWeight:
+                                isCurrent ? FontWeight.w700 : FontWeight.w500,
+                          ),
                         ),
                       ),
                     ),

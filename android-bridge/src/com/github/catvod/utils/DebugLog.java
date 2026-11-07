@@ -3,6 +3,8 @@ package com.github.catvod.utils;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -15,7 +17,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *   -Dxiugou.debug.rpc=false         单独关闭 RPC 明细
  *   -Dxiugou.debug.full=true         不截断响应体（默认每段最多 4000 字符）
  *   -Dxiugou.debug.max=8000          自定义截断长度
- *   -Dxiugou.debug.secrets=false     Cookie/Authorization 打码（默认原样输出）
+ *   -Dxiugou.debug.secrets=true      Cookie/Authorization 原样输出（默认打码成 ***）
+ *   -Dxiugou.debug.ranges=true       带 Range 的分段下载逐条打印（默认按主机每 5 秒汇总一行）
  * </pre>
  *
  * <p>输出统一带 {@code [DBG]} 前缀，方便在控制台过滤：
@@ -26,6 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *   [DBG][HTTP #12]     {"code":0,"data":[...]}
  *   [DBG][RPC  #7] --> categoryContent site=seed api=csp_SeedhubGuard tid=1 pg=1
  *   [DBG][RPC  #7] <-- 1234ms 18234B
+ *   [DBG][HTTP] 分段下载 dl-c-zb-u.drive.quark.cn：5.0s 内 96 次 / 6.0 MB / 均 180ms / 206×96
  * </pre>
  */
 public final class DebugLog {
@@ -34,9 +38,20 @@ public final class DebugLog {
     private static final boolean HTTP = MASTER && bool("xiugou.debug.http", true);
     private static final boolean RPC = MASTER && bool("xiugou.debug.rpc", true);
     private static final boolean FULL = MASTER && bool("xiugou.debug.full", false);
-    private static final boolean SECRETS = MASTER && bool("xiugou.debug.secrets", true);
+    // 默认打码：调试日志会被整段复制、贴进 issue / 聊天，网盘 Cookie 一贴出去就等于交出账号。
+    private static final boolean SECRETS = MASTER && bool("xiugou.debug.secrets", false);
+    // 网盘播放走载荷的多线程分段代理，每 64 KB 一个带 Range 的请求，一秒几十上百个；
+    // 逐条打印会刷屏，还会让 Flutter 端的 debugPrint（每秒约 12 KB 限流）越积越多、
+    // 播完很久还在往外吐。默认只按主机定时汇总，出错的那一条照旧立即打印。
+    private static final boolean RANGES = MASTER && bool("xiugou.debug.ranges", false);
+    private static final long BULK_WINDOW_MS = 5000;
     private static final int MAX = MASTER ? intProp("xiugou.debug.max", 4000) : 0;
     private static final AtomicLong SEQ = new AtomicLong();
+    /** 正在进行的分段请求：id → 主机。响应 / 出错时取走。 */
+    private static final Map<Long, String> BULK_INFLIGHT = new ConcurrentHashMap<>();
+    /** 每个主机当前窗口的分段请求统计。 */
+    private static final Map<String, BulkStats> BULK = new ConcurrentHashMap<>();
+    private static volatile boolean bulkFlusherStarted;
 
     private DebugLog() {
     }
@@ -67,6 +82,11 @@ public final class DebugLog {
 
     public static void httpRequest(long id, String method, String url, Map<String, String> headers, byte[] body) {
         if (!HTTP) return;
+        if (!RANGES && hasRange(headers)) {
+            BULK_INFLIGHT.put(id, hostOf(url));
+            startBulkFlusher();
+            return;
+        }
         out("HTTP", id, "--> " + method + " " + url);
         String hdr = formatHeaders(headers);
         if (!hdr.isEmpty()) out("HTTP", id, "    hdr: " + hdr);
@@ -76,6 +96,11 @@ public final class DebugLog {
 
     public static void httpResponse(long id, int code, long costMs, String contentType, long length, byte[] body) {
         if (!HTTP) return;
+        String bulkHost = BULK_INFLIGHT.remove(id);
+        if (bulkHost != null) {
+            BULK.computeIfAbsent(bulkHost, h -> new BulkStats()).add(code, costMs, length);
+            return;
+        }
         out("HTTP", id, "<-- " + code + " " + costMs + "ms "
                 + (contentType == null ? "-" : contentType) + " "
                 + (length >= 0 ? length + "B" : "chunked"));
@@ -85,7 +110,110 @@ public final class DebugLog {
 
     public static void httpError(long id, Throwable t) {
         if (!HTTP) return;
+        String bulkHost = BULK_INFLIGHT.remove(id);
+        if (bulkHost != null) {
+            BULK.computeIfAbsent(bulkHost, h -> new BulkStats()).fail();
+            out("HTTP", id, "!! 分段下载 " + bulkHost + "：" + describe(t));
+            return;
+        }
         out("HTTP", id, "!! " + describe(t));
+    }
+
+    /** 把各主机当前窗口的分段下载统计各打一行；窗口内没有新请求的主机不打。后台线程每 5 秒调用一次。 */
+    static void flushBulk() {
+        for (Map.Entry<String, BulkStats> e : BULK.entrySet()) {
+            String line = e.getValue().drain();
+            if (line != null) out("HTTP", 0, "分段下载 " + e.getKey() + "：" + line);
+        }
+    }
+
+    private static void startBulkFlusher() {
+        if (bulkFlusherStarted) return;
+        synchronized (BULK) {
+            if (bulkFlusherStarted) return;
+            Thread flusher = new Thread(() -> {
+                while (true) {
+                    try {
+                        Thread.sleep(BULK_WINDOW_MS);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    flushBulk();
+                }
+            }, "debuglog-bulk");
+            flusher.setDaemon(true);
+            flusher.start();
+            bulkFlusherStarted = true;
+        }
+    }
+
+    private static boolean hasRange(Map<String, String> headers) {
+        if (headers == null) return false;
+        for (String name : headers.keySet()) {
+            if ("range".equalsIgnoreCase(name)) return true;
+        }
+        return false;
+    }
+
+    /** 只取主机：汇总行不带路径和查询串（网盘直链的 auth_key / token 都在查询串里）。 */
+    private static String hostOf(String url) {
+        if (url == null) return "?";
+        int start = url.indexOf("://");
+        start = start < 0 ? 0 : start + 3;
+        int end = start;
+        while (end < url.length() && "/?#".indexOf(url.charAt(end)) < 0) end++;
+        String host = url.substring(start, end);
+        int at = host.lastIndexOf('@');
+        if (at >= 0) host = host.substring(at + 1);
+        return host.isEmpty() ? "?" : host;
+    }
+
+    /** 一个主机在一个汇总窗口里的分段请求统计。 */
+    private static final class BulkStats {
+        private int count;
+        private int failures;
+        private long bytes;
+        private long costMs;
+        private final Map<Integer, Integer> codes = new TreeMap<>();
+        private long windowStart = System.nanoTime();
+
+        synchronized void add(int code, long cost, long length) {
+            count++;
+            costMs += Math.max(0, cost);
+            if (length > 0) bytes += length;
+            codes.merge(code, 1, Integer::sum);
+        }
+
+        synchronized void fail() {
+            failures++;
+        }
+
+        /** 取走本窗口的汇总并清零；本窗口没有新请求时返回 null。 */
+        synchronized String drain() {
+            long now = System.nanoTime();
+            if (count == 0 && failures == 0) {
+                windowStart = now;
+                return null;
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format(Locale.ROOT, "%.1fs 内 %d 次", (now - windowStart) / 1e9, count));
+            if (failures > 0) sb.append("，失败 ").append(failures);
+            sb.append(String.format(Locale.ROOT, " / %.1f MB", bytes / 1048576.0));
+            if (count > 0) sb.append(" / 均 ").append(costMs / count).append("ms");
+            if (!codes.isEmpty()) {
+                sb.append(" /");
+                for (Map.Entry<Integer, Integer> c : codes.entrySet()) {
+                    sb.append(' ').append(c.getKey()).append('×').append(c.getValue());
+                }
+            }
+            count = 0;
+            failures = 0;
+            bytes = 0;
+            costMs = 0;
+            codes.clear();
+            windowStart = now;
+            return sb.toString();
+        }
     }
 
     // ==================================================================================

@@ -13,6 +13,7 @@ setCache 4 / getCache 3 / proxyM3u8|proxyMedia|proxyTs 各 3，
 
 import gzip
 import io
+import ipaddress
 import json
 import os
 import ssl
@@ -21,6 +22,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
+
+from .cache import ScriptCache
+from .local import RuntimeLocal
+from .net import RuntimeNet
 
 
 def _normalize_url(url):
@@ -102,7 +107,7 @@ class _ProxyUrl(str):
 class Spider(object):
 
     def __init__(self):
-        self._cache = {}
+        self._cache = ScriptCache()
         self._proxy_base = _ProxyUrl(os.environ.get("XIUGOU_PROXY_BASE", ""))
 
     def init(self, extend=""):
@@ -119,6 +124,17 @@ class Spider(object):
             pass
 
     # ---------------------------------------------------------------- 网络
+
+    @property
+    def net(self):
+        """Each script owns a runtime, including subclasses without super().__init__."""
+        if "_net" not in self.__dict__:
+            self._net = RuntimeNet()
+        return self._net
+
+    @net.setter
+    def net(self, value):
+        self._net = value
 
     def _request(self, url, data=None, headers=None, timeout=10, method=None, verify=True):
         url = _normalize_url(url)
@@ -157,6 +173,71 @@ class Spider(object):
 
     # ---------------------------------------------------------------- 代理
 
+    def proxyUrl(self, params=None, local=True):
+        """Build a script proxy URL using host-owned routing and string parameters."""
+        if type(local) is not bool:
+            raise TypeError("local must be a bool")
+        if not local:
+            raise NotImplementedError("LAN script proxy URLs are not supported")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict) or any(
+                not isinstance(key, str) or not isinstance(value, str)
+                for key, value in params.items()):
+            raise TypeError("proxy params must be a dict of strings")
+        base = os.environ.get("XIUGOU_SCRIPT_PROXY_BASE", "")
+        site_key = os.environ.get("XIUGOU_SCRIPT_SITE_KEY", "")
+        if not base or not site_key.strip():
+            raise RuntimeError("script proxy is not configured")
+        try:
+            parsed = urllib.parse.urlsplit(base)
+            if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None
+                    or parsed.fragment or parsed.port == 0
+                    or any(ord(char) < 32 or ord(char) == 127 for char in base)):
+                raise ValueError()
+            pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True,
+                                           encoding="utf-8", errors="strict")
+        except ValueError:
+            raise RuntimeError("script proxy configuration is invalid") from None
+        reserved = {"do", "siteKey", "token"} | {key for key, _ in pairs}
+        if reserved.intersection(params):
+            raise ValueError("proxy params cannot override host routing")
+        pairs = [(key, value) for key, value in pairs if key not in ("do", "siteKey")]
+        pairs.extend((("do", "py"), ("siteKey", site_key)))
+        pairs.extend(params.items())
+        return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(pairs)))
+
+    def danmakuUrl(self, id):
+        """Attach a room id to the host-owned, token-bearing loopback endpoint."""
+        if not isinstance(id, str):
+            raise TypeError("danmaku id must be a room string")
+        if not id.strip() or len(id) > 4096 or any(ord(char) < 32 or ord(char) == 127 for char in id):
+            raise ValueError("danmaku id is invalid")
+        base = os.environ.get("XIUGOU_SCRIPT_DANMAKU_BASE", "")
+        site_key = os.environ.get("XIUGOU_SCRIPT_SITE_KEY", "")
+        if not base or not site_key.strip():
+            raise RuntimeError("script danmaku is not configured")
+        try:
+            parsed = urllib.parse.urlsplit(base)
+            if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None
+                    or parsed.fragment or parsed.port == 0 or "\\" in base
+                    or any(ord(char) < 32 or ord(char) == 127 for char in base)):
+                raise ValueError()
+            if parsed.hostname != "localhost" and not ipaddress.ip_address(parsed.hostname).is_loopback:
+                raise ValueError()
+            pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True,
+                                           encoding="utf-8", errors="strict")
+            tokens = [value for key, value in pairs if key == "token"]
+            if len(tokens) != 1 or not tokens[0].strip():
+                raise ValueError()
+        except ValueError:
+            raise RuntimeError("script danmaku configuration is invalid") from None
+        pairs = [(key, value) for key, value in pairs if key not in ("do", "siteKey", "id")]
+        pairs.extend((("do", "py"), ("siteKey", site_key), ("id", id)))
+        return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(pairs)))
+
     def getProxyUrl(self, local=False):
         """宿主把本地代理前缀注入环境变量；脚本据此拼接播放地址。"""
         return self._proxy_base
@@ -172,11 +253,60 @@ class Spider(object):
 
     # ---------------------------------------------------------------- 缓存
 
+    @property
+    def local(self):
+        """Site settings are available even without super().__init__."""
+        if "_local" not in self.__dict__:
+            self._local = RuntimeLocal()
+        return self._local
+
+    @local.setter
+    def local(self, value):
+        self._local = value
+
+    def _host_cache(self):
+        if not hasattr(self, "_cache"):
+            self._cache = ScriptCache()
+        return self._cache
+
     def getCache(self, key):
-        return self._cache.get(key)
+        return self._host_cache().get(key)
 
     def setCache(self, key, value):
-        self._cache[key] = value
+        self._host_cache()[key] = value
+
+    @property
+    def js(self):
+        """Create the optional JS runtime only when the source uses it."""
+        if "_js" not in self.__dict__:
+            from .js import RuntimeJS
+            self._js = RuntimeJS()
+        return self._js
+
+    @js.setter
+    def js(self, value):
+        self._js = value
+
+    def loadModule(self, name):
+        """Load only helpers declared by this source, relative to its original entry."""
+        if "_modules" not in self.__dict__:
+            from .modules import RuntimeModules
+            self._modules = RuntimeModules()
+        return self._modules.load(name, self.getDependence)
+
+    def page(self, items, current, limit, total=None):
+        """Slice a complete list, or preserve an upstream page with an explicit total."""
+        if not isinstance(items, (list, tuple)):
+            raise TypeError("page items must be a list or tuple")
+        if type(current) is not int or current < 1 or type(limit) is not int or limit < 1:
+            raise ValueError("page and limit must be positive integers")
+        if total is None:
+            total = len(items)
+            items = items[(current - 1) * limit:current * limit]
+        elif type(total) is not int or total < 0:
+            raise ValueError("total must be a nonnegative integer")
+        return {"list": list(items), "page": current, "pagecount": max(1, (total + limit - 1) // limit),
+                "limit": limit, "total": total}
 
     # ---------------------------------------------------------------- 生命周期
 

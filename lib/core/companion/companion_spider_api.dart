@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import '../api/models/vod_models.dart';
 import '../api/search_cancel_token.dart';
 import '../config/models/vod_config.dart';
 import '../net/http_client_factory.dart';
+import '../player/models/player_state.dart';
 import 'companion_process_manager.dart';
 import 'site_self_check_report.dart';
 
@@ -160,8 +162,14 @@ class CompanionSpiderApi {
   }
 
   /// 获取分类视频列表
+  ///
+  /// [extend] 是用户选的筛选条件（key → v），为空时不下发，请求与无筛选时完全一致。
   Future<VodPageResult> fetchCategory(Site site,
-      {required String categoryId, int page = 1, bool filter = true}) async {
+      {required String categoryId,
+      int page = 1,
+      bool filter = true,
+      Map<String, String> extend = const {},
+      SearchCancelToken? cancelToken}) async {
     final rawJson = await _callSpider(
       site: site,
       method: 'categoryContent',
@@ -169,7 +177,9 @@ class CompanionSpiderApi {
         'tid': categoryId,
         'pg': page.toString(),
         'filter': filter.toString(),
+        if (extend.isNotEmpty) 'extend': jsonEncode(extend),
       },
+      cancelToken: cancelToken,
     );
     return _parseVodPageResult(rawJson, site: site);
   }
@@ -201,6 +211,21 @@ class CompanionSpiderApi {
     return null;
   }
 
+  /// 保留直播目录的原始 JSON / M3U / TXT，由直播仓库解析频道。
+  Future<String> fetchLiveContent(Site site, {
+    required String url,
+    Duration? timeout,
+  }) {
+    final budget = timeout ?? rpcServerTimeout;
+    return _callSpider(
+      site: site,
+      method: 'liveContent',
+      params: {'url': url},
+      serverTimeout: budget,
+      receiveTimeout: budget + const Duration(seconds: 5),
+    );
+  }
+
   /// 搜索视频
   Future<VodPageResult> search(Site site,
       {required String keyword,
@@ -228,7 +253,10 @@ class CompanionSpiderApi {
       method: 'playerContent',
       params: {'flag': flag, 'id': id},
     );
-    if (raw.trim().isEmpty) throw const FormatException('Spider 未返回播放地址');
+    if (raw.trim().isEmpty) {
+      debugPrint('--> [播放地址为空] ${describeEmptyPlayResult(site.key, flag, id, raw)}');
+      throw const FormatException('Spider 未返回播放地址');
+    }
     dynamic decoded;
     try {
       decoded = jsonDecode(raw);
@@ -237,8 +265,16 @@ class CompanionSpiderApi {
     }
     if (decoded is String) decoded = {'url': decoded, 'parse': 0};
     if (decoded is! Map) throw const FormatException('Spider 播放响应格式无效');
-    final url = selectSpiderPlayUrl(decoded['url']);
-    if (url == null) {
+    final selection = _readSpiderQualities(decoded['url']);
+    final qualities = selection.qualities;
+    if (qualities.isEmpty) {
+      debugPrint('--> [播放地址为空] ${describeEmptyPlayResult(site.key, flag, id, raw)}');
+      // 网盘载荷没给地址时常在 msg 里说明原因（如「还没有配置百度网盘 Cookie」），
+      // 原样交给用户，比笼统的「站源没有返回播放地址」更能指明下一步。
+      final hint = playResultHint(decoded);
+      if (hint != null) {
+        throw SpiderCallException(hint, stage: 'player', siteKey: site.key, method: 'playerContent');
+      }
       throw const FormatException('Spider 未返回播放地址');
     }
     final parse = int.tryParse('${decoded['parse'] ?? 0}');
@@ -259,12 +295,28 @@ class CompanionSpiderApi {
     if (header != null && header != '' && header is! Map) {
       throw const FormatException('Spider 请求头格式无效');
     }
+    final needsParse = parse == 1 || jx == 1;
+    final headers = Map<String, String>.unmodifiable(header is Map
+        ? header.map((k, v) => MapEntry(k.toString(), v.toString()))
+        : const <String, String>{});
     return SpiderPlayResult(
-      url: url.trim(),
-      needsParse: parse == 1 || jx == 1,
-      headers: header is Map
-          ? header.map((k, v) => MapEntry(k.toString(), v.toString()))
-          : const {},
+      url: qualities[selection.index].url,
+      needsParse: needsParse,
+      headers: headers,
+      qualityIndex: selection.index,
+      liveDanmakuSources: _readLiveDanmakuSources(
+          decoded['danmaku'], processManager.baseUrl, site.key),
+      qualities: qualities.length < 2
+          ? const []
+          : List<PlaybackQuality>.unmodifiable([
+              for (final quality in qualities)
+                PlaybackQuality(
+                  name: quality.name,
+                  url: quality.url,
+                  headers: headers,
+                  needsParse: needsParse,
+                ),
+            ]),
     );
   }
 
@@ -314,6 +366,7 @@ class CompanionSpiderApi {
     required Map<String, String> params,
     SearchCancelToken? cancelToken,
     Duration? receiveTimeout,
+    Duration? serverTimeout,
   }) async {
     if (cancelToken?.isCancelled ?? false) return '';
     if (!processManager.isRunning) throw const SpiderCallException('站源服务尚未就绪，请重试', stage: 'service');
@@ -328,7 +381,7 @@ class CompanionSpiderApi {
     var finished = false;
     cancelToken?.onCancel(() {
       if (finished) return;
-      dioCancelToken.cancel('搜索已取消');
+      dioCancelToken.cancel('请求已取消');
       unawaited(_cancelRemote(rpcId));
     });
 
@@ -340,7 +393,7 @@ class CompanionSpiderApi {
         'jar': site.jar ?? '',
         'method': method,
         'rpcId': rpcId,
-        'timeoutMs': '${rpcServerTimeout.inMilliseconds}',
+        'timeoutMs': '${(serverTimeout ?? rpcServerTimeout).inMilliseconds}',
         ...params,
       };
 
@@ -446,6 +499,7 @@ class CompanionSpiderApi {
           limit: int.tryParse(decoded['limit']?.toString() ?? '20') ?? 20,
           categories: categories,
           list: items,
+          filters: parseVodFilters(decoded['filters']),
         );
       }
     } on FormatException {
@@ -455,38 +509,155 @@ class CompanionSpiderApi {
   }
 }
 
-/// Spider 返回的播放意图；需要解析的页面地址不能直接交给播放器。
-/// 从 playerContent 的 `url` 字段取实际播放地址。
-///
-/// FongMi / TVBox 允许 `url` 是多清晰度数组 `[名称, 地址, 名称, 地址, ...]`
-/// （嗷呜「嗷嗚┃动漫」返回 `["4K", ..., "1080P", ...]`）。以前只认字符串，这类站源一律
-/// 报「Spider 未返回播放地址」。现在与 FongMi 默认一致取第一档；数组里只有地址（无名称）
-/// 时取第一个像地址的元素。都取不到返回 null。
+/// 从 playerContent 的地址、数组或 values/position 对象取默认档地址。
 String? selectSpiderPlayUrl(Object? raw) {
+  final selection = _readSpiderQualities(raw);
+  return selection.qualities.isEmpty
+      ? null
+      : selection.qualities[selection.index].url;
+}
+
+({List<PlaybackQuality> qualities, int index}) _readSpiderQualities(Object? raw) {
   if (raw is String) {
-    final value = raw.trim();
-    return value.isEmpty ? null : value;
+    final url = raw.trim();
+    return (qualities: url.isEmpty ? const [] : [PlaybackQuality(name: '默认', url: url)], index: 0);
   }
-  if (raw is! List) return null;
-  final items = raw.map((e) => e?.toString().trim() ?? '').toList();
-  bool looksLikeUrl(String v) => v.contains('://');
-  // 成对数组：奇数位是地址
-  for (var i = 1; i < items.length; i += 2) {
-    if (looksLikeUrl(items[i])) return items[i];
+  bool looksLikeUrl(String value) => value.contains('://');
+  final qualities = <PlaybackQuality>[];
+  if (raw is Map) {
+    final values = raw['values'];
+    if (values is! List) return (qualities: qualities, index: 0);
+    final position = raw['position'];
+    var selected = 0;
+    for (var originalIndex = 0; originalIndex < values.length; originalIndex++) {
+      final item = values[originalIndex];
+      if (item is! Map || item['v'] is! String) continue;
+      final url = (item['v'] as String).trim();
+      if (!looksLikeUrl(url)) continue;
+      final name = item['n'] is String ? (item['n'] as String).trim() : '';
+      if (position is int && position == originalIndex) selected = qualities.length;
+      qualities.add(PlaybackQuality(
+        name: name.isEmpty ? '线路 ${qualities.length + 1}' : name,
+        url: url,
+      ));
+    }
+    return (qualities: qualities, index: selected);
   }
-  for (final item in items) {
-    if (looksLikeUrl(item)) return item;
+  if (raw is! List) return (qualities: qualities, index: 0);
+  final items = raw.map((item) => item?.toString().trim() ?? '').toList();
+  for (var index = 0; index < items.length; index++) {
+    final url = items[index];
+    if (!looksLikeUrl(url)) continue;
+    final previous = index == 0 ? '' : items[index - 1];
+    final name = previous.isNotEmpty && !looksLikeUrl(previous)
+        ? previous
+        : '清晰度 ${qualities.length + 1}';
+    qualities.add(PlaybackQuality(name: name, url: url));
+  }
+  return (qualities: qualities, index: 0);
+}
+
+List<LiveDanmakuSource> _readLiveDanmakuSources(
+    Object? raw, String companionBase, String siteKey) {
+  if (raw is! List) return const [];
+  final base = Uri.tryParse(companionBase);
+  if (base == null || base.scheme != 'http' ||
+      !const {'127.0.0.1', 'localhost', '::1'}.contains(base.host)) {
+    return const [];
+  }
+  final sources = <LiveDanmakuSource>[];
+  final seen = <String>{};
+  for (final item in raw.take(64)) {
+    if (item is! Map || item['url'] is! String) continue;
+    final url = (item['url'] as String).trim();
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.scheme != base.scheme || uri.host != base.host ||
+        uri.port != base.port || uri.userInfo.isNotEmpty || uri.hasFragment ||
+        uri.path != '/script-danmaku/start') {
+      continue;
+    }
+    final Map<String, List<String>> query;
+    try {
+      query = uri.queryParametersAll;
+    } on FormatException {
+      continue;
+    }
+    bool single(String key) => query[key]?.length == 1 && query[key]!.single.isNotEmpty;
+    if (!['token', 'do', 'siteKey', 'id'].every(single) ||
+        query['do']!.single != 'py' || query['siteKey']!.single != siteKey ||
+        !seen.add(url)) {
+      continue;
+    }
+    final name = item['name'] is String ? (item['name'] as String).trim() : '';
+    sources.add(LiveDanmakuSource(name: name.isEmpty ? '实时弹幕' : name, url: url));
+    if (sources.length == 16) break;
+  }
+  return List<LiveDanmakuSource>.unmodifiable(sources);
+}
+
+/// playerContent 没给地址时，载荷在 msg / message / error / tip 里写的原因；没有返回 null。
+/// 只取短文本（≤200 字），避免把整段 HTML 或堆栈当提示。
+String? playResultHint(Map<dynamic, dynamic> decoded) {
+  for (final key in const ['msg', 'message', 'error', 'tip', 'tips', 'toast']) {
+    final value = decoded[key];
+    if (value is! String) continue;
+    final text = value.trim();
+    if (text.isNotEmpty && text.length <= 200) return text;
   }
   return null;
 }
 
+/// playerContent 没给地址时的排查摘要，只进日志。
+///
+/// 只列字段名和长度，提示类字段（msg/error/tip 等）给前 200 字；不输出 header、cookie、token
+/// 之类的值，避免网盘凭据进日志。
+String describeEmptyPlayResult(String siteKey, String flag, String id, String raw) {
+  String clip(String s, int n) => s.length <= n ? s : '${s.substring(0, n)}…';
+  final head = 'site=$siteKey flag=$flag id=${clip(id, 120)} rawLen=${raw.length}';
+  dynamic decoded;
+  try {
+    decoded = jsonDecode(raw);
+  } catch (_) {
+    return '$head (非 JSON)';
+  }
+  if (decoded is! Map) return '$head type=${decoded.runtimeType}';
+  const hintKeys = {'msg', 'message', 'error', 'err', 'tip', 'tips', 'toast', 'desc'};
+  final fields = <String>[];
+  for (final entry in decoded.entries) {
+    final key = '${entry.key}';
+    final value = entry.value;
+    if (hintKeys.contains(key.toLowerCase()) && value is String) {
+      fields.add('$key="${clip(value.trim(), 200)}"');
+    } else if (value is String) {
+      fields.add('$key(${value.length})');
+    } else if (value is List) {
+      fields.add('$key[${value.length}]');
+    } else if (value is Map) {
+      fields.add('$key{${value.length}}');
+    } else {
+      fields.add('$key=$value');
+    }
+  }
+  return '$head fields: ${fields.join(', ')}';
+}
+
+/// Spider 返回的播放意图；单档时 [qualities] 为空，默认地址仍由 [url] 提供。
 class SpiderPlayResult {
   final String url;
   final bool needsParse;
   final Map<String, String> headers;
+  final List<PlaybackQuality> qualities;
+  final int qualityIndex;
+  final List<LiveDanmakuSource> liveDanmakuSources;
 
-  const SpiderPlayResult(
-      {required this.url, required this.needsParse, this.headers = const {}});
+  const SpiderPlayResult({
+    required this.url,
+    required this.needsParse,
+    this.headers = const {},
+    this.qualities = const [],
+    this.qualityIndex = 0,
+    this.liveDanmakuSources = const [],
+  });
 }
 
 /// 伴随服务给出的明确失败原因（SpiderServer 的 code/stage/detail 契约）。
@@ -501,6 +672,20 @@ class SpiderCallException implements Exception {
   final String? siteKey;
   final String? method;
   final String? rpcId;
+
+  /// 排查用的一行摘要：阶段、调用、HTTP 状态与服务端 detail（如 NPE 的完整消息）。
+  /// 只进日志，不进界面文案。
+  String get diagnostic {
+    final parts = <String>[
+      message,
+      if (stage != null) 'stage=$stage',
+      if (method != null || siteKey != null) 'call=${method ?? '?'}@${siteKey ?? '?'}',
+      if (httpStatus != null) 'http=$httpStatus',
+      if (rpcId != null) 'rpc=$rpcId',
+      if (detail != null && detail!.trim().isNotEmpty) 'detail=${detail!.trim()}',
+    ];
+    return parts.join(' | ');
+  }
 
   @override
   String toString() => message;

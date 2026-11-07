@@ -18,6 +18,8 @@ class DanmakuSettings {
     this.scrollDuration = 8.0,
     this.fixedDuration = 4.0,
     this.lineHeight = 1.4,
+    this.density = 1,
+    this.mergeDuplicates = false,
   });
 
   static const DanmakuSettings defaults = DanmakuSettings();
@@ -65,6 +67,13 @@ class DanmakuSettings {
   /// 行高（字号的倍数）
   final double lineHeight;
 
+  /// 弹幕密度：每 N 条显示 1 条（1 = 全部）。取值只能是 [densityOptions] 里的档位。
+  final int density;
+
+  /// 合并重复弹幕（issue #14）：短时间内内容相同的弹幕只显示一条并标注条数，见 `danmaku_merge.dart`。
+  /// 默认关：服务端已按分钟合并完全相同的弹幕，这里额外合并写法略有不同的（全半角 / 叠字 / 末尾标点）。
+  final bool mergeDuplicates;
+
   // ---- 取值范围（设置页滑块与校验共用）----
   static const double minArea = 0.1, maxArea = 1.0;
   static const double minOpacity = 0.1, maxOpacity = 1.0;
@@ -74,6 +83,9 @@ class DanmakuSettings {
   static const double minScroll = 3, maxScroll = 20;
   static const double minFixed = 1, maxFixed = 10;
   static const double minLineHeight = 1.0, maxLineHeight = 2.5;
+
+  /// 合并重复弹幕的时间窗（秒）：从一组的首条算起，这段时间内的重复并成一条（设置页说明文案共用）。
+  static const double mergeWindow = 10;
 
   /// 显示区域档位（设置页下拉）
   static const List<(double, String)> areaOptions = [
@@ -94,6 +106,15 @@ class DanmakuSettings {
     (900, '特粗'),
   ];
 
+  /// 弹幕密度档位（issue #14）
+  static const List<(int, String)> densityOptions = [
+    (1, '全部'),
+    (2, '1/2'),
+    (4, '1/4'),
+    (8, '1/8'),
+    (10, '1/10'),
+  ];
+
   factory DanmakuSettings.fromJson(Object? raw) {
     if (raw is! Map) return defaults;
     double number(String k, double fallback, double min, double max) {
@@ -106,6 +127,15 @@ class DanmakuSettings {
     bool flag(String k, bool fallback) {
       final v = raw[k];
       return v is bool ? v : fallback;
+    }
+
+    int density() {
+      final v = raw['density'];
+      if (v is! num) return 1;
+      for (final o in densityOptions) {
+        if (o.$1 == v) return o.$1;
+      }
+      return 1;
     }
 
     return DanmakuSettings(
@@ -124,6 +154,8 @@ class DanmakuSettings {
       scrollDuration: number('scrollDuration', 8, minScroll, maxScroll),
       fixedDuration: number('fixedDuration', 4, minFixed, maxFixed),
       lineHeight: number('lineHeight', 1.4, minLineHeight, maxLineHeight),
+      density: density(),
+      mergeDuplicates: flag('mergeDuplicates', false),
     );
   }
 
@@ -143,6 +175,8 @@ class DanmakuSettings {
         'scrollDuration': scrollDuration,
         'fixedDuration': fixedDuration,
         'lineHeight': lineHeight,
+        'density': density,
+        'mergeDuplicates': mergeDuplicates,
       };
 
   DanmakuSettings copyWith({
@@ -161,6 +195,8 @@ class DanmakuSettings {
     double? scrollDuration,
     double? fixedDuration,
     double? lineHeight,
+    int? density,
+    bool? mergeDuplicates,
   }) =>
       DanmakuSettings(
         blockScroll: blockScroll ?? this.blockScroll,
@@ -178,6 +214,8 @@ class DanmakuSettings {
         scrollDuration: scrollDuration ?? this.scrollDuration,
         fixedDuration: fixedDuration ?? this.fixedDuration,
         lineHeight: lineHeight ?? this.lineHeight,
+        density: density ?? this.density,
+        mergeDuplicates: mergeDuplicates ?? this.mergeDuplicates,
       );
 
   @override
@@ -197,9 +235,12 @@ class DanmakuSettings {
       other.fullscreenFontSize == fullscreenFontSize &&
       other.scrollDuration == scrollDuration &&
       other.fixedDuration == fixedDuration &&
-      other.lineHeight == lineHeight;
+      other.lineHeight == lineHeight &&
+      other.density == density &&
+      other.mergeDuplicates == mergeDuplicates;
 
   @override
   int get hashCode => Object.hash(blockScroll, blockTop, blockBottom, blockColorful, blockAdvanced, area, pipArea,
-      opacity, fontWeight, strokeWidth, fontSize, fullscreenFontSize, scrollDuration, fixedDuration, lineHeight);
+      opacity, fontWeight, strokeWidth, fontSize, fullscreenFontSize, scrollDuration, fixedDuration, lineHeight,
+      density, mergeDuplicates);
 }

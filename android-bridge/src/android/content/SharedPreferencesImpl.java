@@ -181,8 +181,21 @@ class SharedPreferencesImpl implements SharedPreferences {
         return new HashMap<>(map);
     }
 
+    /**
+     * 桌面端固定的字符串项：读取时总是返回这里的值，不管文件里存了什么、载荷传了什么默认值。
+     *
+     * <p>{@code pan.thread_proxy_mode}：网盘载荷默认 {@code go}，要加载 Android 版 Go 多线程库
+     * （ELF），Windows 上永远起不来，playerContent 只返回
+     * 「Go 多线程启动失败: Go 多线程未在启动阶段初始化完成」和空地址，所有网盘线路都播不了。
+     * {@code java} 模式走载荷自带的 Java 分块代理，桌面端可用。
+     */
+    static final Map<String, String> DESKTOP_FORCED_STRINGS =
+            java.util.Collections.singletonMap("pan.thread_proxy_mode", "java");
+
     @Override
     public String getString(String key, String defValue) {
+        String forced = key == null ? null : DESKTOP_FORCED_STRINGS.get(key);
+        if (forced != null) return forced;
         Object v = map.get(key);
         return v instanceof String ? (String) v : defValue;
     }

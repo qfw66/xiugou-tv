@@ -6,6 +6,8 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import '../config/windows_config_storage.dart';
+import '../live/live_direct_mode_memory.dart';
+import '../live/live_source_history.dart';
 import '../player/models/player_settings.dart';
 import '../settings/models/history_preferences.dart';
 import '../settings/models/network_preferences.dart';
@@ -444,6 +446,31 @@ class DataBackupService {
           break;
         case 'live_sources.json':
           _validateList(content, name, maxItems: 1000);
+          break;
+        case 'live_last.json':
+          final key = _map(content, name)['lastChannelKey'];
+          if (key != null && key is! String) {
+            throw const FormatException('上次直播频道格式无效');
+          }
+          break;
+        case 'live_source_history.json':
+          final history = _map(content, name);
+          final entries = history['entries'];
+          final active = history['active'];
+          if (entries is! List ||
+              entries.length > LiveSourceHistory.maxEntries ||
+              entries.any((entry) => LiveSourceEntry.tryFromJson(entry) == null) ||
+              (active != null && active is! String)) {
+            throw const FormatException('直播源历史格式无效');
+          }
+          break;
+        case 'live_direct_modes.json':
+          final hosts = _map(content, name)['hosts'];
+          if (hosts is! Map ||
+              hosts.length > LiveDirectModeMemory.maxEntries ||
+              hosts.values.any((mode) => mode != 'live' && mode != 'vod')) {
+            throw const FormatException('直链播放方式记忆格式无效');
+          }
           break;
         case 'config_sources.json':
           _validateList(content, name, maxItems: 500);

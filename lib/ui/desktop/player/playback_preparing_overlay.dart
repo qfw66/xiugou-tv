@@ -6,6 +6,8 @@ import '../../../core/player/playback_intent.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../catalog/poster_image.dart';
+import 'playback_source_nav.dart';
+import 'player_source_switch_actions.dart';
 
 /// 播放页的「起播准备」覆盖层：解析播放地址期间盖在播放器上。
 ///
@@ -22,6 +24,7 @@ class PlaybackPreparingOverlay extends StatefulWidget {
     required this.intent,
     this.onRetry,
     this.onCancel,
+    this.sourceSwitchNav,
     this.topInset = 0,
   });
 
@@ -32,6 +35,8 @@ class PlaybackPreparingOverlay extends StatefulWidget {
 
   /// 「返回」回调（退出准备态，回到列表）。
   final VoidCallback? onCancel;
+
+  final PlayerSourceSwitchNav? sourceSwitchNav;
 
   /// 顶部让出的高度（通常是播放器顶栏）：让顶栏的返回按钮保持可点（§39）。
   final double topInset;
@@ -99,53 +104,56 @@ class _PlaybackPreparingOverlayState extends State<PlaybackPreparingOverlay> {
         child: ColoredBox(
           color: palette.background.withValues(alpha: 0.94),
           child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _cover(palette),
-                  const SizedBox(height: AppSpacing.lg),
-                  Text(
-                    intent.title,
-                    textAlign: TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: AppType.heading,
-                      fontWeight: FontWeight.w600,
-                      color: palette.textTitle,
-                    ),
-                  ),
-                  if (intent.subtitle != null && intent.subtitle!.isNotEmpty) ...[
-                    const SizedBox(height: AppSpacing.xs),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(AppSpacing.lg),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 420),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _cover(palette),
+                    const SizedBox(height: AppSpacing.lg),
                     Text(
-                      intent.subtitle!,
+                      intent.title,
                       textAlign: TextAlign.center,
-                      maxLines: 1,
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: AppType.caption,
-                        color: palette.textSub,
+                        fontSize: AppType.heading,
+                        fontWeight: FontWeight.w600,
+                        color: palette.textTitle,
                       ),
                     ),
+                    if (intent.subtitle != null && intent.subtitle!.isNotEmpty) ...[
+                      const SizedBox(height: AppSpacing.xs),
+                      Text(
+                        intent.subtitle!,
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: AppType.caption,
+                          color: palette.textSub,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: AppSpacing.xl),
+                    if (intent.isFailed)
+                      _failed(palette, intent.error ?? '播放解析失败，请稍后重试')
+                    else
+                      _preparing(palette, reduceMotion),
+                    // §39：加载中也必须能退出 —— 曾经只有失败态才有「返回」，
+                    // 弱网站源卡住时用户只能干等或杀进程。
+                    if (!intent.isFailed && widget.onCancel != null) ...[
+                      const SizedBox(height: AppSpacing.lg),
+                      TextButton(
+                        key: const ValueKey('preparing-cancel'),
+                        onPressed: widget.onCancel,
+                        child: const Text('返回'),
+                      ),
+                    ],
                   ],
-                  const SizedBox(height: AppSpacing.xl),
-                  if (intent.isFailed)
-                    _failed(palette, intent.error ?? '播放解析失败，请稍后重试')
-                  else
-                    _preparing(palette, reduceMotion),
-                  // §39：加载中也必须能退出 —— 曾经只有失败态才有「返回」，
-                  // 弱网站源卡住时用户只能干等或杀进程。
-                  if (!intent.isFailed && widget.onCancel != null) ...[
-                    const SizedBox(height: AppSpacing.lg),
-                    TextButton(
-                      key: const ValueKey('preparing-cancel'),
-                      onPressed: widget.onCancel,
-                      child: const Text('返回'),
-                    ),
-                  ],
-                ],
+                ),
               ),
             ),
           ),
@@ -226,16 +234,16 @@ class _PlaybackPreparingOverlayState extends State<PlaybackPreparingOverlay> {
           style: TextStyle(fontSize: AppType.body, color: palette.textMain),
         ),
         const SizedBox(height: AppSpacing.lg),
-        Row(
-          mainAxisSize: MainAxisSize.min,
+        Wrap(
+          spacing: AppSpacing.sm,
+          runSpacing: AppSpacing.xs,
+          alignment: WrapAlignment.center,
           children: [
             if (widget.onRetry != null)
               OutlinedButton(
                 onPressed: widget.onRetry,
                 child: const Text('重试'),
               ),
-            if (widget.onRetry != null && widget.onCancel != null)
-              const SizedBox(width: AppSpacing.sm),
             if (widget.onCancel != null)
               TextButton(
                 onPressed: widget.onCancel,
@@ -243,6 +251,8 @@ class _PlaybackPreparingOverlayState extends State<PlaybackPreparingOverlay> {
               ),
           ],
         ),
+        if (widget.sourceSwitchNav != null)
+          PlayerSourceSwitchActions(nav: widget.sourceSwitchNav!),
       ],
     );
   }

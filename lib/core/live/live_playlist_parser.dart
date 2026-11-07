@@ -33,42 +33,54 @@ class LivePlaylistParser {
 
     void add(String name, String address, Map<String, String> attributes) {
       if (name.trim().isEmpty) return;
-      final parts = address.split('|');
-      final firstUrl = parts.first
-          .split(
-            RegExp(r'#(?=(?:https?|rtmps?|rtsps?|udp|rtp)://)',
-                caseSensitive: false),
-          )
-          .first;
-      // TXT 的 $ 后缀是线路标签；M3U 中的 $ 仍属于 URL 正文。
-      final streamUrl = m3u ? firstUrl : firstUrl.split(r'$').first;
-      final url = resolveAddress(streamUrl, baseUri);
-      if (!isStreamUrl(url)) return;
-      final requestHeaders = {...pendingHeaders};
-      if (parts.length > 1) {
+      final addresses = m3u
+          ? [address]
+          : address.split(RegExp(
+              r'#(?=(?:https?|rtmps?|rtsps?|udp|rtp|file)://)',
+              caseSensitive: false));
+      final commonHeaders = {...pendingHeaders};
+      void readHeaders(String value, Map<String, String> target) {
+        final separator = value.indexOf('|');
+        if (separator < 0) return;
         try {
-          requestHeaders
-              .addAll(Uri.splitQueryString(parts.sublist(1).join('|')));
+          target.addAll(Uri.splitQueryString(value.substring(separator + 1)));
         } on FormatException {
           // 非法请求头不应损坏同一清单中的其他频道。
         }
       }
-      var live = Live.fromJson({
-        'name': name.trim(),
-        'url': url,
-        'group': _nonEmpty(attributes['group-title']) ?? activeGroup,
-        'logo': _nonEmpty(attributes['tvg-logo']),
-        'epg': _nonEmpty(attributes['tvg-url']),
-        'epgId': attributes['tvg-id'],
-        'epgName': attributes['tvg-name'],
-        'headers': requestHeaders,
-        'isPlaylist': false,
-      }, defaultEpg: activeEpg, defaultLogo: logo);
-      live = live.copyWith(
-        logo: resolveAddress(live.logo ?? '', baseUri),
-        epg: resolveAddress(live.epg ?? '', baseUri),
-      );
-      channels.putIfAbsent(live.key, () => live);
+
+      // invariant: 只有行末带 pipe 的 TXT 沿用整行公共请求头语义。
+      if (addresses.length > 1 &&
+          addresses.take(addresses.length - 1).every((url) => !url.contains('|'))) {
+        readHeaders(addresses.last, commonHeaders);
+      }
+      for (final candidate in addresses) {
+        final rawUrl = candidate.split('|').first;
+        final labelAt = m3u ? -1 : rawUrl.indexOf(r'$');
+        final label = labelAt < 0 ? null : _nonEmpty(rawUrl.substring(labelAt + 1));
+        final streamUrl = labelAt < 0 ? rawUrl : rawUrl.substring(0, labelAt);
+        final url = resolveAddress(streamUrl, baseUri);
+        if (!isStreamUrl(url)) continue;
+        final requestHeaders = {...commonHeaders};
+        readHeaders(candidate, requestHeaders);
+        var live = Live.fromJson({
+          'name': name.trim(),
+          'url': url,
+          'group': _nonEmpty(attributes['group-title']) ?? activeGroup,
+          'logo': _nonEmpty(attributes['tvg-logo']),
+          'epg': _nonEmpty(attributes['tvg-url']),
+          'epgId': attributes['tvg-id'],
+          'epgName': attributes['tvg-name'],
+          'headers': requestHeaders,
+          if (label != null) 'lines': [{'name': label, 'url': url}],
+          'isPlaylist': false,
+        }, defaultEpg: activeEpg, defaultLogo: logo);
+        live = live.copyWith(
+          logo: resolveAddress(live.logo ?? '', baseUri),
+          epg: resolveAddress(live.epg ?? '', baseUri),
+        );
+        channels.putIfAbsent(live.key, () => live);
+      }
     }
 
     for (final rawLine in text.split(RegExp(r'\r?\n'))) {

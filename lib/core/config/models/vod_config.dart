@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../../player/models/player_state.dart';
 import '../config_decoder.dart';
 
 /// 站点定义模型
@@ -174,6 +175,16 @@ class Parse {
   };
 }
 
+/// 同一频道的一条已解析线路；请求头由频道提供。
+class LiveLine {
+  const LiveLine({required this.name, required this.url});
+
+  final String name;
+  final String url;
+
+  Map<String, String> toJson() => {'name': name, 'url': url};
+}
+
 /// 直播频道或待展开的直播清单；清单不能直接作为播放器输入。
 class Live {
   final String name;
@@ -183,8 +194,23 @@ class Live {
   final String? epg;
   final String? epgId;
   final String? epgName;
+  final List<LiveLine> lines;
   final Map<String, String> headers;
   final bool isPlaylist;
+  final String? api;
+  final Object? ext;
+  /// 配置的脚本身份；[key] 仍是频道的收藏与选中身份。
+  final String? scriptKey;
+  final String? timeZone;
+  /// 脚本调用超时，单位为秒。
+  final int? timeout;
+  final String? format;
+  /// 播放模式（仅直链：自动识别/手动点播/手动直播）；null = 未指定，默认按直播
+  final PlaybackMode? playbackMode;
+  /// 模式来源（仅用于诊断，不落盘）
+  final PlaybackModeSource? playbackModeSource;
+  /// 模式依据字符串（如 "endlist", "probe-timeout"；仅用于诊断，不落盘）
+  final String? playbackModeReason;
 
   const Live({
     required this.name,
@@ -194,12 +220,29 @@ class Live {
     this.epg,
     this.epgId,
     this.epgName,
+    this.lines = const [],
     this.headers = const {},
     this.isPlaylist = false,
+    this.api,
+    this.ext,
+    this.scriptKey,
+    this.timeZone,
+    this.timeout,
+    this.format,
+    this.playbackMode,
+    this.playbackModeSource,
+    this.playbackModeReason,
   });
+
+  bool get isScripted => api?.trim().isNotEmpty == true;
 
   String get groupName => _liveText(group) ?? '未分组';
   String get key => '$groupName\u0000$name\u0000$url';
+
+  /// 兼容合并前以备用地址保存的频道身份，不改变收藏或书签的存储格式。
+  bool matchesKey(String candidate) => candidate == key ||
+      lines.any((line) =>
+          candidate == '$groupName\u0000$name\u0000${line.url}');
 
   String? get logoUrl {
     final template = logo;
@@ -216,10 +259,34 @@ class Live {
     String? defaultEpg,
     String? defaultLogo,
   }) {
+    final lines = <LiveLine>[];
+    final rawLines = json['lines'];
+    if (rawLines is List) {
+      for (final raw in rawLines) {
+        if (raw is! Map || raw['url'] is! String) continue;
+        final url = (raw['url'] as String).trim();
+        if (url.isEmpty) continue;
+        lines.add(LiveLine(
+          name: _liveText(raw['name']) ?? '线路${lines.length + 1}',
+          url: url,
+        ));
+      }
+    }
+    final primary = _liveText(json['url']);
     final urls = json['urls'];
-    final url = _liveText(json['url']) ??
-        (urls is List && urls.isNotEmpty ? _liveText(urls.first) : null) ??
-        '';
+    if (lines.isEmpty && urls is List) {
+      final addresses = <String>{};
+      if (primary != null) addresses.add(primary);
+      for (final raw in urls) {
+        if (raw is String && raw.trim().isNotEmpty) {
+          addresses.add(raw.trim());
+        }
+      }
+      for (final address in addresses) {
+        lines.add(LiveLine(name: '线路${lines.length + 1}', url: address));
+      }
+    }
+    final url = primary ?? (lines.isNotEmpty ? lines.first.url : '');
     final path = Uri.tryParse(url)?.path.toLowerCase() ?? '';
     final rawHeaders = json['headers'] ?? json['header'];
     final headers = <String, String>{};
@@ -251,11 +318,24 @@ class Live {
           _liveText(json['tvg-name']) ??
           _liveText(json['tvgName']),
       headers: Map.unmodifiable(headers),
+      lines: List.unmodifiable(lines),
+      api: _liveText(json['api']),
+      ext: json['ext'],
+      scriptKey: _liveText(json['key']),
+      timeZone: _liveText(json['timeZone']),
+      timeout: json['timeout'] == null ? null : _asInt(json['timeout']),
+      format: _liveText(json['format']),
       isPlaylist: json['isPlaylist'] is bool
           ? json['isPlaylist'] as bool
           : json.containsKey('type') ||
               path.endsWith('.m3u') ||
               path.endsWith('.txt'),
+      // 只认 live|vod；旧文件无此键 → null（= 现状：按直播）
+      playbackMode: switch (json['playbackMode']?.toString().trim().toLowerCase()) {
+        'live' => PlaybackMode.live,
+        'vod' => PlaybackMode.vod,
+        _ => null,
+      },
     );
   }
 
@@ -264,8 +344,18 @@ class Live {
     String? group,
     String? logo,
     String? epg,
+    List<LiveLine>? lines,
     Map<String, String>? headers,
     bool? isPlaylist,
+    String? api,
+    Object? ext,
+    String? scriptKey,
+    String? timeZone,
+    int? timeout,
+    String? format,
+    PlaybackMode? playbackMode,
+    PlaybackModeSource? playbackModeSource,
+    String? playbackModeReason,
   }) => Live(
     name: name,
     url: url ?? this.url,
@@ -274,8 +364,18 @@ class Live {
     epg: epg ?? this.epg,
     epgId: epgId,
     epgName: epgName,
+    lines: lines ?? this.lines,
     headers: headers ?? this.headers,
     isPlaylist: isPlaylist ?? this.isPlaylist,
+    api: api ?? this.api,
+    ext: ext ?? this.ext,
+    scriptKey: scriptKey ?? this.scriptKey,
+    timeZone: timeZone ?? this.timeZone,
+    timeout: timeout ?? this.timeout,
+    format: format ?? this.format,
+    playbackMode: playbackMode ?? this.playbackMode,
+    playbackModeSource: playbackModeSource ?? this.playbackModeSource,
+    playbackModeReason: playbackModeReason ?? this.playbackModeReason,
   );
 
   Map<String, dynamic> toJson() => {
@@ -286,8 +386,17 @@ class Live {
     if (epg != null) 'epg': epg,
     if (epgId != null) 'epgId': epgId,
     if (epgName != null) 'epgName': epgName,
+    if (lines.isNotEmpty) 'lines': lines.map((line) => line.toJson()).toList(),
     if (headers.isNotEmpty) 'headers': headers,
     'isPlaylist': isPlaylist,
+    if (api != null) 'api': api,
+    if (ext != null) 'ext': ext,
+    if (scriptKey != null) 'key': scriptKey,
+    if (timeZone != null) 'timeZone': timeZone,
+    if (timeout != null) 'timeout': timeout,
+    if (format != null) 'format': format,
+    // 非 null 才写，保持旧文件形状（回滚后未知键被忽略）
+    if (playbackMode != null) 'playbackMode': playbackMode!.name,
   };
 }
 
@@ -406,15 +515,32 @@ class VodConfig {
       String? group,
       String? epg,
       String? logo,
+      String? format,
+      String? timeZone,
       Map<String, String> headers = const {},
       bool channel = false,
     }) {
       final own = Live.fromJson(item);
       final inheritedEpg = own.epg ?? epg;
       final inheritedLogo = own.logo ?? logo;
+      final inheritedFormat = own.format ?? format;
+      final inheritedTimeZone = own.timeZone ?? timeZone;
       final inheritedHeaders = {...headers, ...own.headers};
+      if (own.isScripted) {
+        result.add(own.copyWith(
+          group: own.group ?? group,
+          epg: _inheritLiveTemplate(own.epg, epg, 'epg'),
+          logo: _inheritLiveTemplate(own.logo, logo, 'logo'),
+          format: inheritedFormat,
+          timeZone: inheritedTimeZone,
+          headers: Map.unmodifiable(inheritedHeaders),
+        ));
+        return;
+      }
       final groups = item['groups'];
-      final channels = item['channels'];
+      final channels = item['channels'] is List
+          ? item['channels']
+          : item['channel'];
       if (groups is List || channels is List) {
         final children = groups is List ? groups : channels as List;
         final childGroup = channels is List
@@ -426,6 +552,8 @@ class VodConfig {
             group: childGroup,
             epg: inheritedEpg,
             logo: inheritedLogo,
+            format: inheritedFormat,
+            timeZone: inheritedTimeZone,
             headers: inheritedHeaders,
             channel: channels is List,
           );
@@ -436,6 +564,8 @@ class VodConfig {
           epg: _inheritLiveTemplate(own.epg, epg, 'epg'),
           logo: _inheritLiveTemplate(own.logo, logo, 'logo'),
           headers: Map.unmodifiable(inheritedHeaders),
+          format: inheritedFormat,
+          timeZone: inheritedTimeZone,
           isPlaylist: channel ? false : own.isPlaylist,
         ));
       }

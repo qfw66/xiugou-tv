@@ -3,7 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-// --- 快捷键意图 (Intents) ---
+import '../../../core/settings/models/player_shortcut_bindings.dart';
+export '../../../core/settings/models/player_shortcut_bindings.dart';
 
 class PlayPauseIntent extends Intent {
   const PlayPauseIntent();
@@ -45,71 +46,235 @@ class NextEpisodeIntent extends Intent {
   const NextEpisodeIntent();
 }
 
-/// §43 弹幕开 / 关
 class ToggleDanmakuIntent extends Intent {
   const ToggleDanmakuIntent();
 }
 
-/// 默认桌面播放器键位绑定字典
-final Map<ShortcutActivator, Intent> defaultPlayerShortcuts = {
-  // 播放 / 暂停
-  const SingleActivator(LogicalKeyboardKey.space): const PlayPauseIntent(),
-  const SingleActivator(LogicalKeyboardKey.keyK): const PlayPauseIntent(),
-
-  // 快退 / 快进 (小步进 10 秒)
-  const SingleActivator(LogicalKeyboardKey.arrowLeft): const SeekIntent(Duration(seconds: -10)),
-  // → 单击快进由 [HoldToSpeedGesture] 判定（长按改为临时倍速），这里保留同一意图作兜底：
-  // 宿主未接管（如直播切台）时仍经此触发。
-  const SingleActivator(LogicalKeyboardKey.arrowRight): const SeekIntent(Duration(seconds: 10)),
-  const SingleActivator(LogicalKeyboardKey.keyJ): const SeekIntent(Duration(seconds: -10)),
-  const SingleActivator(LogicalKeyboardKey.keyL): const SeekIntent(Duration(seconds: 10)),
-
-  // 快退 / 快进 (大步进 30 秒)
-  const SingleActivator(LogicalKeyboardKey.arrowLeft, shift: true):
-      const SeekIntent(Duration(seconds: -30)),
-  const SingleActivator(LogicalKeyboardKey.arrowRight, shift: true):
-      const SeekIntent(Duration(seconds: 30)),
-  const SingleActivator(LogicalKeyboardKey.arrowLeft, control: true):
-      const SeekIntent(Duration(seconds: -30)),
-  const SingleActivator(LogicalKeyboardKey.arrowRight, control: true):
-      const SeekIntent(Duration(seconds: 30)),
-
-  // 音量微调 (步进 5%)
-  const SingleActivator(LogicalKeyboardKey.arrowUp): const VolumeIntent(5.0),
-  const SingleActivator(LogicalKeyboardKey.arrowDown): const VolumeIntent(-5.0),
-
-  // 一键静音
-  const SingleActivator(LogicalKeyboardKey.keyM): const ToggleMuteIntent(),
-
-  // 全屏切换
-  const SingleActivator(LogicalKeyboardKey.keyF): const ToggleFullscreenIntent(),
-  const SingleActivator(LogicalKeyboardKey.f11): const ToggleFullscreenIntent(),
-
-  // 退出全屏 / 返回
-  const SingleActivator(LogicalKeyboardKey.escape): const ExitFullscreenIntent(),
-
-  // 倍速控制 (C 加速, X 减速, Z 恢复 1.0x)
-  const SingleActivator(LogicalKeyboardKey.keyC): const RateAdjustIntent(0.25),
-  const SingleActivator(LogicalKeyboardKey.keyX): const RateAdjustIntent(-0.25),
-  const SingleActivator(LogicalKeyboardKey.keyZ): const RateAdjustIntent(0.0, reset: true),
-
-  // 上一集 / 下一集 (PAGE UP / PAGE DOWN)
-  const SingleActivator(LogicalKeyboardKey.pageUp): const PrevEpisodeIntent(),
-  const SingleActivator(LogicalKeyboardKey.pageDown): const NextEpisodeIntent(),
-
-  // 弹幕开 / 关
-  const SingleActivator(LogicalKeyboardKey.keyD): const ToggleDanmakuIntent(),
+const _logicalKeys = <String, LogicalKeyboardKey>{
+  'space': LogicalKeyboardKey.space,
+  'escape': LogicalKeyboardKey.escape,
+  'arrowLeft': LogicalKeyboardKey.arrowLeft,
+  'arrowRight': LogicalKeyboardKey.arrowRight,
+  'arrowUp': LogicalKeyboardKey.arrowUp,
+  'arrowDown': LogicalKeyboardKey.arrowDown,
+  'pageUp': LogicalKeyboardKey.pageUp,
+  'pageDown': LogicalKeyboardKey.pageDown,
+  'home': LogicalKeyboardKey.home,
+  'end': LogicalKeyboardKey.end,
+  'insert': LogicalKeyboardKey.insert,
+  'delete': LogicalKeyboardKey.delete,
+  'backspace': LogicalKeyboardKey.backspace,
+  'minus': LogicalKeyboardKey.minus,
+  'equal': LogicalKeyboardKey.equal,
+  'bracketLeft': LogicalKeyboardKey.bracketLeft,
+  'bracketRight': LogicalKeyboardKey.bracketRight,
+  'backslash': LogicalKeyboardKey.backslash,
+  'semicolon': LogicalKeyboardKey.semicolon,
+  'quote': LogicalKeyboardKey.quote,
+  'comma': LogicalKeyboardKey.comma,
+  'period': LogicalKeyboardKey.period,
+  'slash': LogicalKeyboardKey.slash,
+  'backquote': LogicalKeyboardKey.backquote,
+  'keyA': LogicalKeyboardKey.keyA,
+  'keyB': LogicalKeyboardKey.keyB,
+  'keyC': LogicalKeyboardKey.keyC,
+  'keyD': LogicalKeyboardKey.keyD,
+  'keyE': LogicalKeyboardKey.keyE,
+  'keyF': LogicalKeyboardKey.keyF,
+  'keyG': LogicalKeyboardKey.keyG,
+  'keyH': LogicalKeyboardKey.keyH,
+  'keyI': LogicalKeyboardKey.keyI,
+  'keyJ': LogicalKeyboardKey.keyJ,
+  'keyK': LogicalKeyboardKey.keyK,
+  'keyL': LogicalKeyboardKey.keyL,
+  'keyM': LogicalKeyboardKey.keyM,
+  'keyN': LogicalKeyboardKey.keyN,
+  'keyO': LogicalKeyboardKey.keyO,
+  'keyP': LogicalKeyboardKey.keyP,
+  'keyQ': LogicalKeyboardKey.keyQ,
+  'keyR': LogicalKeyboardKey.keyR,
+  'keyS': LogicalKeyboardKey.keyS,
+  'keyT': LogicalKeyboardKey.keyT,
+  'keyU': LogicalKeyboardKey.keyU,
+  'keyV': LogicalKeyboardKey.keyV,
+  'keyW': LogicalKeyboardKey.keyW,
+  'keyX': LogicalKeyboardKey.keyX,
+  'keyY': LogicalKeyboardKey.keyY,
+  'keyZ': LogicalKeyboardKey.keyZ,
+  'digit0': LogicalKeyboardKey.digit0,
+  'digit1': LogicalKeyboardKey.digit1,
+  'digit2': LogicalKeyboardKey.digit2,
+  'digit3': LogicalKeyboardKey.digit3,
+  'digit4': LogicalKeyboardKey.digit4,
+  'digit5': LogicalKeyboardKey.digit5,
+  'digit6': LogicalKeyboardKey.digit6,
+  'digit7': LogicalKeyboardKey.digit7,
+  'digit8': LogicalKeyboardKey.digit8,
+  'digit9': LogicalKeyboardKey.digit9,
+  'numpad0': LogicalKeyboardKey.numpad0,
+  'numpad1': LogicalKeyboardKey.numpad1,
+  'numpad2': LogicalKeyboardKey.numpad2,
+  'numpad3': LogicalKeyboardKey.numpad3,
+  'numpad4': LogicalKeyboardKey.numpad4,
+  'numpad5': LogicalKeyboardKey.numpad5,
+  'numpad6': LogicalKeyboardKey.numpad6,
+  'numpad7': LogicalKeyboardKey.numpad7,
+  'numpad8': LogicalKeyboardKey.numpad8,
+  'numpad9': LogicalKeyboardKey.numpad9,
+  'numpadAdd': LogicalKeyboardKey.numpadAdd,
+  'numpadSubtract': LogicalKeyboardKey.numpadSubtract,
+  'numpadMultiply': LogicalKeyboardKey.numpadMultiply,
+  'numpadDivide': LogicalKeyboardKey.numpadDivide,
+  'numpadDecimal': LogicalKeyboardKey.numpadDecimal,
+  'f1': LogicalKeyboardKey.f1,
+  'f2': LogicalKeyboardKey.f2,
+  'f3': LogicalKeyboardKey.f3,
+  'f4': LogicalKeyboardKey.f4,
+  'f5': LogicalKeyboardKey.f5,
+  'f6': LogicalKeyboardKey.f6,
+  'f7': LogicalKeyboardKey.f7,
+  'f8': LogicalKeyboardKey.f8,
+  'f9': LogicalKeyboardKey.f9,
+  'f10': LogicalKeyboardKey.f10,
+  'f11': LogicalKeyboardKey.f11,
+  'f12': LogicalKeyboardKey.f12,
+  'f13': LogicalKeyboardKey.f13,
+  'f14': LogicalKeyboardKey.f14,
+  'f15': LogicalKeyboardKey.f15,
+  'f16': LogicalKeyboardKey.f16,
+  'f17': LogicalKeyboardKey.f17,
+  'f18': LogicalKeyboardKey.f18,
+  'f19': LogicalKeyboardKey.f19,
+  'f20': LogicalKeyboardKey.f20,
+  'f21': LogicalKeyboardKey.f21,
+  'f22': LogicalKeyboardKey.f22,
+  'f23': LogicalKeyboardKey.f23,
+  'f24': LogicalKeyboardKey.f24,
 };
 
-/// §14 播放页 → 键「短按快进 / 长按临时倍速」判定。
-///
-/// → 不再走 [defaultPlayerShortcuts] 的 SingleActivator（那条会随系统按键重复连续快进），
-/// 由宿主在 Focus.onKeyEvent 里先交给 [handleKeyEvent]：
-/// - 按下：开始计时；重复事件一律吞掉；
-/// - 未到 [holdThreshold] 松开：触发 [onTap]（宿主按原逻辑快进 10 秒）；
-/// - 到点：触发 [onHoldStart]（宿主切到长按倍率），松开时 [onHoldEnd] 恢复原倍速。
-/// 窗口失焦 / 播放器失去焦点 / 销毁时宿主调用 [cancel]，避免倍速卡住。
-/// 带修饰键的 →（Shift / Ctrl 大步进）不在此处理，仍由快捷键表负责。
+PlayerKeyBinding? playerKeyBindingFromEvent(KeyEvent event) {
+  final keyboard = HardwareKeyboard.instance;
+  if (keyboard.isMetaPressed) return null;
+  for (final entry in _logicalKeys.entries) {
+    if (entry.value == event.logicalKey) {
+      return PlayerKeyBinding(entry.key,
+          control: keyboard.isControlPressed,
+          alt: keyboard.isAltPressed,
+          shift: keyboard.isShiftPressed);
+    }
+  }
+  return null;
+}
+
+Intent _intentFor(PlayerShortcutAction action) => switch (action) {
+      PlayerShortcutAction.playPause => const PlayPauseIntent(),
+      PlayerShortcutAction.seekBackward =>
+        const SeekIntent(Duration(seconds: -10)),
+      PlayerShortcutAction.seekForward =>
+        const SeekIntent(Duration(seconds: 10)),
+      PlayerShortcutAction.seekBackwardLarge =>
+        const SeekIntent(Duration(seconds: -30)),
+      PlayerShortcutAction.seekForwardLarge =>
+        const SeekIntent(Duration(seconds: 30)),
+      PlayerShortcutAction.volumeUp => const VolumeIntent(5),
+      PlayerShortcutAction.volumeDown => const VolumeIntent(-5),
+      PlayerShortcutAction.toggleMute => const ToggleMuteIntent(),
+      PlayerShortcutAction.toggleFullscreen => const ToggleFullscreenIntent(),
+      PlayerShortcutAction.exitFullscreen => const ExitFullscreenIntent(),
+      PlayerShortcutAction.rateUp => const RateAdjustIntent(0.25),
+      PlayerShortcutAction.rateDown => const RateAdjustIntent(-0.25),
+      PlayerShortcutAction.rateReset => const RateAdjustIntent(0, reset: true),
+      PlayerShortcutAction.previousEpisode => const PrevEpisodeIntent(),
+      PlayerShortcutAction.nextEpisode => const NextEpisodeIntent(),
+      PlayerShortcutAction.toggleDanmaku => const ToggleDanmakuIntent(),
+    };
+
+Map<ShortcutActivator, Intent> buildPlayerShortcuts(
+        PlayerShortcutBindings bindings) =>
+    {
+      for (final action in PlayerShortcutAction.values)
+        for (final binding in bindings.keysFor(action))
+          SingleActivator(_logicalKeys[binding.key]!,
+              control: binding.control,
+              alt: binding.alt,
+              shift: binding.shift): _intentFor(action),
+    };
+
+final Map<ShortcutActivator, Intent> defaultPlayerShortcuts =
+    buildPlayerShortcuts(PlayerShortcutBindings.defaults);
+
+bool playerShortcutHasEditableFocus() {
+  final context = FocusManager.instance.primaryFocus?.context;
+  return context != null &&
+      (context.widget is EditableText ||
+          context.findAncestorStateOfType<EditableTextState>() != null);
+}
+
+class _PlayerShortcutManager extends ShortcutManager {
+  bool enabled = true;
+
+  @override
+  KeyEventResult handleKeypress(BuildContext context, KeyEvent event) {
+    if (!enabled || playerShortcutHasEditableFocus()) {
+      return KeyEventResult.ignored;
+    }
+    return super.handleKeypress(context, event);
+  }
+}
+
+/// Hosts disable the scope while drawers or other player panels own navigation.
+class PlayerShortcutScope extends StatefulWidget {
+  final PlayerShortcutBindings bindings;
+  final bool enabled;
+  final Widget child;
+
+  const PlayerShortcutScope({
+    super.key,
+    this.bindings = PlayerShortcutBindings.defaults,
+    this.enabled = true,
+    required this.child,
+  });
+
+  @override
+  State<PlayerShortcutScope> createState() => _PlayerShortcutScopeState();
+}
+
+class _PlayerShortcutScopeState extends State<PlayerShortcutScope> {
+  late final _PlayerShortcutManager _manager = _PlayerShortcutManager();
+
+  @override
+  void initState() {
+    super.initState();
+    _updateManager();
+  }
+
+  @override
+  void didUpdateWidget(covariant PlayerShortcutScope oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.bindings != widget.bindings ||
+        oldWidget.enabled != widget.enabled) {
+      _updateManager();
+    }
+  }
+
+  void _updateManager() {
+    _manager.enabled = widget.enabled;
+    _manager.shortcuts = buildPlayerShortcuts(widget.bindings);
+  }
+
+  @override
+  void dispose() {
+    _manager.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      Shortcuts.manager(manager: _manager, child: widget.child);
+}
+
+/// Short press seeks, hold temporarily changes rate. The host cancels on focus
+/// loss and preference changes; the primary seek-forward binding owns the gesture.
 class HoldToSpeedGesture {
   static const Duration defaultHoldThreshold = Duration(milliseconds: 400);
 
@@ -117,12 +282,11 @@ class HoldToSpeedGesture {
   final VoidCallback onTap;
   final VoidCallback onHoldStart;
   final VoidCallback onHoldEnd;
-
-  /// 返回 false 时（如直播）不接管，事件继续交给快捷键表。
   final bool Function() isEnabled;
+  final PlayerKeyBinding Function()? getBinding;
 
   Timer? _timer;
-  bool _pressed = false;
+  PlayerKeyBinding? _activeBinding;
   bool _holding = false;
 
   HoldToSpeedGesture({
@@ -130,37 +294,43 @@ class HoldToSpeedGesture {
     required this.onHoldStart,
     required this.onHoldEnd,
     required this.isEnabled,
+    this.getBinding,
     this.holdThreshold = defaultHoldThreshold,
   });
 
   bool get isHolding => _holding;
 
-  static bool _isPlainArrowRight(KeyEvent event) {
-    if (event.logicalKey != LogicalKeyboardKey.arrowRight) return false;
-    final keyboard = HardwareKeyboard.instance;
-    return !keyboard.isShiftPressed &&
-        !keyboard.isControlPressed &&
-        !keyboard.isAltPressed &&
-        !keyboard.isMetaPressed;
-  }
+  PlayerKeyBinding get _binding =>
+      getBinding?.call() ?? const PlayerKeyBinding('arrowRight');
+
+  bool get _canHandle => isEnabled() && !playerShortcutHasEditableFocus();
 
   KeyEventResult handleKeyEvent(KeyEvent event) {
-    if (event.logicalKey != LogicalKeyboardKey.arrowRight) {
-      return KeyEventResult.ignored;
-    }
+    final active = _activeBinding;
+    if (active != null && (!_canHandle || active != _binding)) cancel();
     if (event is KeyDownEvent) {
-      if (!_isPlainArrowRight(event) || !isEnabled()) return KeyEventResult.ignored;
+      if (!_canHandle || playerKeyBindingFromEvent(event) != _binding) {
+        return KeyEventResult.ignored;
+      }
       cancel();
-      _pressed = true;
+      _activeBinding = _binding;
       _timer = Timer(holdThreshold, () {
         _timer = null;
-        if (!_pressed) return;
+        if (_activeBinding == null) return;
+        if (!_canHandle || _activeBinding != _binding) {
+          cancel();
+          return;
+        }
         _holding = true;
         onHoldStart();
       });
       return KeyEventResult.handled;
     }
-    if (!_pressed) return KeyEventResult.ignored;
+    if (_activeBinding == null ||
+        event.logicalKey != _logicalKeys[_activeBinding!.key]) {
+      return KeyEventResult.ignored;
+    }
+    // The primary key owns release, even if its modifiers were released first.
     if (event is KeyRepeatEvent) return KeyEventResult.handled;
     if (event is KeyUpEvent) {
       final wasHolding = _holding;
@@ -175,7 +345,6 @@ class HoldToSpeedGesture {
     return KeyEventResult.ignored;
   }
 
-  /// 放弃本次按压：已进入长按则恢复（触发 [onHoldEnd]），否则静默丢弃（不快进）。
   void cancel() {
     final wasHolding = _holding;
     _reset();
@@ -185,7 +354,7 @@ class HoldToSpeedGesture {
   void _reset() {
     _timer?.cancel();
     _timer = null;
-    _pressed = false;
+    _activeBinding = null;
     _holding = false;
   }
 

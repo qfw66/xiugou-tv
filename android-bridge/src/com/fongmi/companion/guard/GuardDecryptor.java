@@ -32,7 +32,8 @@ import java.nio.file.Files;
  * 壳的 `assets/ftyshinidie.guard` 只能由 `assets/ftyguard_v7|v8.so` 里的 native 例程还原，
  * 桌面 JVM 无法直接执行 ARM 原生库，因此用 unidbg 跑一段 Android 运行时：
  * 构造 DalvikVM（以壳 jar 为 apk）、加载 so、调用 `DexNative.getLoader(Context)`，
- * 再把壳写出的 `cache/sharedb/config.db.saved`（= 明文载荷 zip）复制到指定输出路径。
+ * 再把壳写出的 `cache/sharedb/config.db` / `config.jar` 或其 `.saved` 备份
+ * （= 明文载荷 zip）复制到指定输出路径。
  *
  * 刻意做成**独立进程**：
  * 1. unidbg 需要 27 MB 依赖与 unicorn 原生库，不该污染 companion 的运行时 classpath；
@@ -217,11 +218,10 @@ public class GuardDecryptor {
                 "getLoader(Ljava/lang/Object;)Ljava/lang/Object;", context);
         System.out.println("== getLoader returned: " + loader);
 
-        // 壳在 getLoader 内部完成解密：把明文载荷 zip 写到 codeCacheDir/sharedb/config.db，
-        // 随后因写入校验失败会 delete 它 —— JNI 桥在 delete 前已备份为 config.db.saved。
-        File payload = new File(workDir, "sharedb/config.db.saved");
-        if (!payload.isFile() || payload.length() == 0) payload = new File(workDir, "sharedb/config.db");
-        if (!payload.isFile() || payload.length() == 0) {
+        // 壳在 getLoader 内写出 sharedb/config.db 或 config.jar；
+        // 若壳随后删除产物，JNI 桥已在 delete 前备份为同名 .saved 文件。
+        File payload = findPayload(workDir);
+        if (payload == null) {
             System.err.println("[GuardDecryptor] payload not produced; workDir listing:");
             try {
                 Files.walk(workDir.toPath()).forEach(p -> {
@@ -257,6 +257,13 @@ public class GuardDecryptor {
         } catch (Throwable ignored) {
         }
         System.exit(0);
+    }
+
+    /** 只查已知产物路径；旧 .db 名称优先，同名的删除前备份优先。 */
+    static File findPayload(File cacheDir) {
+        return pick(cacheDir,
+                "sharedb/config.db.saved", "sharedb/config.db",
+                "sharedb/config.jar.saved", "sharedb/config.jar");
     }
 
     /**

@@ -65,6 +65,16 @@ class CurrentEpisode {
       this.episodeName == episodeName;
 }
 
+final _localConfigCenterUrl =
+    RegExp(r'http://127\.0\.0\.1:\d{2,5}/proxy\?do=pan&action=config');
+
+/// 简介里的本机配置中心地址；没有返回 null。
+///
+/// 网盘配置站（如 newwex 的 Wexconfig）在简介里写「请打开网页版配置中心：局域网 IP:19988/config」，
+/// 那个入口会跳到只绑本机的代理端口，桌面上打不开；companion 已把它换成本机代理地址（issue #6）。
+String? localConfigCenterUrlOf(String? content) =>
+    content == null ? null : _localConfigCenterUrl.firstMatch(content)?.group(0);
+
 /// 桌面端影视详情与多源选集弹窗（Infuse × Netflix 沉浸大画幅风格）。
 class VodDetailDialog extends StatefulWidget {
   final VodDetail detail;
@@ -75,6 +85,9 @@ class VodDetailDialog extends StatefulWidget {
   /// 当前播放集；为 `null` 时与改动前完全一致（普通浏览零高亮）。
   final CurrentEpisode? currentEpisode;
 
+  /// 用系统浏览器打开地址；简介里有本机配置中心地址时据此显示「在本机打开配置页」。
+  final Future<bool> Function(String url)? onOpenUrl;
+
   const VodDetailDialog({
     super.key,
     required this.detail,
@@ -82,6 +95,7 @@ class VodDetailDialog extends StatefulWidget {
     this.isFavorite = false,
     this.onToggleFavorite,
     this.currentEpisode,
+    this.onOpenUrl,
   });
 
   @override
@@ -100,6 +114,14 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
   /// §49：详情里出现的网盘分享链接；为空时不显示「复制分享链接」
   late final List<NetdiskShareLink> _shareLinks =
       extractNetdiskShareLinks(widget.detail);
+
+  Future<void> _openConfigCenter(String url) async {
+    final opened = await widget.onOpenUrl!(url);
+    if (opened || !mounted) return;
+    await Clipboard.setData(ClipboardData(text: url));
+    showAppMessage('无法打开浏览器，配置页地址已复制：$url',
+        type: AppMessageType.warning);
+  }
 
   Future<void> _copyShareLinks(List<NetdiskShareLink> links) async {
     await Clipboard.setData(
@@ -366,6 +388,21 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                       ),
                     ),
                   ),
+                  if (widget.onOpenUrl != null &&
+                      localConfigCenterUrlOf(item.content) != null) ...[
+                    const SizedBox(height: 10),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: OutlinedButton.icon(
+                        key: const ValueKey('vod-open-config-center'),
+                        onPressed: () => _openConfigCenter(
+                            localConfigCenterUrlOf(item.content)!),
+                        icon: const Icon(Icons.open_in_browser_rounded,
+                            size: 18),
+                        label: const Text('在本机打开配置页'),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

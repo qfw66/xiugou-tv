@@ -129,6 +129,13 @@ String buildPlaybackDiagnosticText({
     buffer.writeln('影片: $title');
   }
   buffer.writeln('直播: ${spec?.isLive == true ? '是' : '否'}');
+  if (spec != null) {
+    // 模式 / 来源 / 依据（探测结果与回退原因的编码值，不含请求头等敏感信息）。
+    final detail = spec.modeDetail;
+    buffer.writeln('播放模式: ${spec.isLive ? '直播' : '点播'}'
+        '（来源: ${playbackModeSourceLabel(spec.modeSource)}'
+        '${detail == null || detail.isEmpty ? '' : '；依据: $detail'}）');
+  }
   final raw = rawError?.trim() ?? '';
   final rawMasked = raw.isEmpty
       ? ''

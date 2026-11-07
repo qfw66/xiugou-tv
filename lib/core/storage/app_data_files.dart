@@ -30,7 +30,8 @@ class AppDataFile {
   const AppDataFile(this.name, this.category, {this.sensitive = false});
 }
 
-/// 应用数据目录中的 17 个持久化文件（2026-10-26 增补 §33 直播收藏；2026-10-31 增补 §14 网络偏好）。
+/// 应用数据目录中的 20 个持久化文件（2026-10-26 增补 §33 直播收藏；2026-10-31 增补 §14 网络偏好；
+/// 2026-11-04 补登直播仓库写的「上次频道」与「直链播放方式主机记忆」；2026-11-05 增补独立直播源）。
 const List<AppDataFile> appDataFiles = [
   AppDataFile('appearance_preferences.json', AppDataCategory.appearance),
   AppDataFile('cached_vod_config.json', AppDataCategory.configSnapshot, sensitive: true),
@@ -41,10 +42,17 @@ const List<AppDataFile> appDataFiles = [
   AppDataFile('history.json', AppDataCategory.history),
   AppDataFile('history_preferences.json', AppDataCategory.preference),
   AppDataFile('home_site_preferences.json', AppDataCategory.preference),
-  AppDataFile('live_sources.json', AppDataCategory.live, sensitive: true),
+  // 直链播放方式记忆（issue #9-1）：只存主机名 → live / vod，不含路径或令牌。
+  AppDataFile('live_direct_modes.json', AppDataCategory.live),
   // §33 直播收藏：与点播收藏分开存（模型不同），但同属「收藏」这一类，
   // 所以跟随 backupAppDataFiles 一起进备份 —— 用户换机后两个收藏都要在。
   AppDataFile('live_favorites.json', AppDataCategory.favorite),
+  // 上次直播频道：频道键里含播放地址，按敏感处理。
+  AppDataFile('live_last.json', AppDataCategory.live, sensitive: true),
+  // 独立直播源（当前项 + 历史）：含订阅地址，按敏感处理。
+  AppDataFile('live_source_history.json', AppDataCategory.live,
+      sensitive: true),
+  AppDataFile('live_sources.json', AppDataCategory.live, sensitive: true),
   // §14 安全 DNS 选择：属于偏好，随备份走
   AppDataFile('network_preferences.json', AppDataCategory.preference),
   AppDataFile('play_skip_preferences.json', AppDataCategory.preference),

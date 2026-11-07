@@ -13,8 +13,11 @@ import '../../../core/diagnostics/error_log.dart';
 import '../../../core/danmaku/danmaku_api.dart';
 import '../../../core/danmaku/danmaku_settings.dart';
 import '../../../core/live/epg_repository.dart';
+import '../../../core/live/live_repository.dart';
+import '../../../core/live/live_source_history.dart';
 import '../../../core/player/models/player_settings.dart';
 import '../../../core/settings/models/appearance_preferences.dart';
+import '../../../core/settings/models/external_player_settings.dart';
 import '../../theme/app_icon_assets.dart';
 import '../../theme/app_palette.dart';
 import '../widgets/app_message.dart';
@@ -41,9 +44,21 @@ import '../wallpaper/wallpaper_size_probe.dart';
 import 'about_update_section.dart';
 import 'error_log_dialog.dart';
 import 'site_self_check_dialog.dart';
+import '../keyboard/player_shortcuts.dart';
+
+part 'player_shortcuts_panel.dart';
+part 'external_player_panel.dart';
 
 /// 设置中心分区
-enum SettingsSection { configSources, general, appearance, player, about }
+enum SettingsSection {
+  configSources,
+  liveSources,
+  general,
+  appearance,
+  player,
+  shortcuts,
+  about
+}
 
 /// 独立全屏设置中心：左侧分区导航 + 右侧内容面板
 class SettingsPage extends StatefulWidget {
@@ -104,6 +119,9 @@ class SettingsPage extends StatefulWidget {
   /// 自建实例会带一个孤立的进程管理器，`isRunning` 恒为 false，设置根本发不到运行中的服务。
   final CompanionSpiderApi? companionSpiderApi;
 
+  /// 独立直播源（「直播源」分区）；缺省不显示该分区。
+  final LiveRepository? liveRepository;
+
   const SettingsPage({
     super.key,
     required this.configRepository,
@@ -127,6 +145,7 @@ class SettingsPage extends StatefulWidget {
     this.onResetAll,
     this.danmakuAvailable,
     this.companionSpiderApi,
+    this.liveRepository,
   });
 
   @override
@@ -196,6 +215,14 @@ class _SettingsPageState extends State<SettingsPage> {
                                 pickExportPath: widget.pickExportPath,
                                 companionSpiderApi: widget.companionSpiderApi,
                               ),
+                            SettingsSection.liveSources =>
+                              switch (widget.liveRepository) {
+                                final liveRepository? => LiveSourcesPanel(
+                                    key: const ValueKey('settings-live-sources'),
+                                    liveRepository: liveRepository,
+                                  ),
+                                null => const SizedBox.shrink(),
+                              },
                             SettingsSection.general => GeneralSettingsPanel(
                                 key: const ValueKey('settings-general'),
                                 configRepository: widget.configRepository,
@@ -221,6 +248,10 @@ class _SettingsPageState extends State<SettingsPage> {
                                 settingsRepository: widget.settingsRepository,
                                 application: widget.playerSettingsApplication,
                                 danmakuAvailable: widget.danmakuAvailable,
+                              ),
+                            SettingsSection.shortcuts => PlayerShortcutsPanel(
+                                key: const ValueKey('settings-shortcuts'),
+                                settingsRepository: widget.settingsRepository,
                               ),
                             SettingsSection.about => AboutPanel(
                                 key: const ValueKey('settings-about'),
@@ -272,40 +303,70 @@ class _SettingsPageState extends State<SettingsPage> {
                     fontWeight: FontWeight.bold,
                     color: context.palette.textTitle)),
           ),
-          _SectionTab(
-            icon: Icons.cloud_sync_outlined,
-            label: '配置源管理',
-            selected: _section == SettingsSection.configSources,
-            onTap: () =>
-                setState(() => _section = SettingsSection.configSources),
-          ),
-          const SizedBox(height: 8),
-          _SectionTab(
-            icon: Icons.rocket_launch_outlined,
-            label: '通用',
-            selected: _section == SettingsSection.general,
-            onTap: () => setState(() => _section = SettingsSection.general),
-          ),
-          const SizedBox(height: 8),
-          _SectionTab(
-            icon: Icons.image_outlined,
-            label: '外观',
-            selected: _section == SettingsSection.appearance,
-            onTap: () => setState(() => _section = SettingsSection.appearance),
-          ),
-          const SizedBox(height: 8),
-          _SectionTab(
-            icon: Icons.tune_rounded,
-            label: '播放器与解码',
-            selected: _section == SettingsSection.player,
-            onTap: () => setState(() => _section = SettingsSection.player),
-          ),
-          const SizedBox(height: 8),
-          _SectionTab(
-            icon: Icons.info_outline,
-            label: '关于',
-            selected: _section == SettingsSection.about,
-            onTap: () => setState(() => _section = SettingsSection.about),
+          Expanded(
+            child: SingleChildScrollView(
+              key: const ValueKey('settings-section-scroll'),
+              primary: false,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _SectionTab(
+                    icon: Icons.cloud_sync_outlined,
+                    label: '配置源管理',
+                    selected: _section == SettingsSection.configSources,
+                    onTap: () =>
+                        setState(() => _section = SettingsSection.configSources),
+                  ),
+                  const SizedBox(height: 8),
+                  if (widget.liveRepository != null) ...[
+                    _SectionTab(
+                      icon: Icons.live_tv_rounded,
+                      label: '直播源',
+                      selected: _section == SettingsSection.liveSources,
+                      onTap: () =>
+                          setState(() => _section = SettingsSection.liveSources),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  _SectionTab(
+                    icon: Icons.rocket_launch_outlined,
+                    label: '通用',
+                    selected: _section == SettingsSection.general,
+                    onTap: () => setState(() => _section = SettingsSection.general),
+                  ),
+                  const SizedBox(height: 8),
+                  _SectionTab(
+                    icon: Icons.image_outlined,
+                    label: '外观',
+                    selected: _section == SettingsSection.appearance,
+                    onTap: () =>
+                        setState(() => _section = SettingsSection.appearance),
+                  ),
+                  const SizedBox(height: 8),
+                  _SectionTab(
+                    icon: Icons.tune_rounded,
+                    label: '播放器与解码',
+                    selected: _section == SettingsSection.player,
+                    onTap: () => setState(() => _section = SettingsSection.player),
+                  ),
+                  const SizedBox(height: 8),
+                  _SectionTab(
+                    icon: Icons.keyboard_outlined,
+                    label: '快捷键',
+                    selected: _section == SettingsSection.shortcuts,
+                    onTap: () =>
+                        setState(() => _section = SettingsSection.shortcuts),
+                  ),
+                  const SizedBox(height: 8),
+                  _SectionTab(
+                    icon: Icons.info_outline,
+                    label: '关于',
+                    selected: _section == SettingsSection.about,
+                    onTap: () => setState(() => _section = SettingsSection.about),
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
@@ -1226,6 +1287,542 @@ class _ProbeLine extends StatelessWidget {
 }
 
 // =====================================================================
+// 直播源（独立于主配置源，只影响直播）
+// =====================================================================
+
+class LiveSourcesPanel extends StatefulWidget {
+  final LiveRepository liveRepository;
+
+  const LiveSourcesPanel({super.key, required this.liveRepository});
+
+  @override
+  State<LiveSourcesPanel> createState() => _LiveSourcesPanelState();
+}
+
+class _LiveSourcesPanelState extends State<LiveSourcesPanel> {
+  final TextEditingController _input = TextEditingController();
+
+  /// 正在执行的动作（'apply' / 'main' / 历史地址）；同一时间只允许一个
+  String? _busyKey;
+  String? _inputError;
+
+  LiveRepository get _repo => widget.liveRepository;
+
+  /// 别处（直播频道列表「自定义源」菜单、播放器抽屉）改了直播源时同步刷新。
+  StreamSubscription<void>? _sourceChanges;
+
+  @override
+  void initState() {
+    super.initState();
+    _listenSourceChanges();
+    unawaited(_loadHistory());
+  }
+
+  @override
+  void didUpdateWidget(covariant LiveSourcesPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.liveRepository != widget.liveRepository) {
+      _listenSourceChanges();
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(_sourceChanges?.cancel());
+    _input.dispose();
+    super.dispose();
+  }
+
+  void _listenSourceChanges() {
+    unawaited(_sourceChanges?.cancel());
+    _sourceChanges = _repo.sourceChanges.listen((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  Future<void> _loadHistory() async {
+    await _repo.loadSourceHistory();
+    if (mounted) setState(() {});
+  }
+
+  void _toast(String message, {AppMessageType type = AppMessageType.info}) {
+    if (!mounted) return;
+    showAppMessage(message, type: type);
+  }
+
+  Future<void> _run(String key, Future<void> Function() task) async {
+    if (_busyKey != null) return;
+    setState(() => _busyKey = key);
+    try {
+      await task();
+    } finally {
+      if (mounted) setState(() => _busyKey = null);
+    }
+  }
+
+  Future<void> _apply() => _run('apply', () async {
+        setState(() => _inputError = null);
+        try {
+          final result = await _repo.applySourceInput(_input.text);
+          _input.clear();
+          if (result.source case final source?) {
+            _toast(
+                '已切换直播源：${source.displayName}（${source.channelCount} 个频道）',
+                type: AppMessageType.success);
+          } else if (result.channel case final channel?) {
+            // 单个地址不替换当前直播源：明确告诉用户频道去了哪里、在哪管理。
+            _toast(
+                result.updated
+                    ? '已更新直播频道列表「${LiveRepository.manualSourceName}」分组里的频道：${channel.name}'
+                    : '已添加到直播频道列表的「${LiveRepository.manualSourceName}」分组：${channel.name}（当前直播源未替换，可在下方「手动添加的频道」删除）',
+                type: AppMessageType.success);
+          }
+        } on DataRestorePendingRestartException catch (error) {
+          _toast(error.message, type: AppMessageType.warning);
+        } catch (error) {
+          if (mounted) {
+            setState(() => _inputError = '${_errorText(error)}（当前直播源未改变）');
+          }
+        }
+      });
+
+  Future<void> _use(LiveSourceEntry entry) => _run(entry.location, () async {
+        try {
+          final used = await _repo.useSourceEntry(entry.location);
+          _toast('已切换直播源：${used.displayName}（${used.channelCount} 个频道）',
+              type: AppMessageType.success);
+        } catch (error) {
+          _toast('切换失败：${_errorText(error)}（当前直播源未改变）',
+              type: AppMessageType.error);
+        }
+      });
+
+  Future<void> _followMain() => _run('main', () async {
+        try {
+          await _repo.clearActiveSource();
+          _toast('直播已改用主配置源', type: AppMessageType.success);
+        } catch (error) {
+          _toast('操作失败：${_errorText(error)}', type: AppMessageType.error);
+        }
+      });
+
+  Future<void> _remove(LiveSourceEntry entry) async {
+    if (_busyKey != null) return;
+    final isActive = _repo.sourceHistory.active == entry.location;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: context.palette.raised,
+        title: Text('删除直播源',
+            style: TextStyle(
+                fontSize: AppType.heading, color: context.palette.textTitle)),
+        content: Text(
+          isActive
+              ? '从历史中删除「${entry.displayName}」？\n它是当前直播源，删除后直播改用主配置源。'
+              : '从历史中删除「${entry.displayName}」？',
+          style: TextStyle(
+              fontSize: AppType.label,
+              height: 1.5,
+              color: context.palette.textBody),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text('删除', style: TextStyle(color: context.palette.danger)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _run(entry.location, () async {
+      try {
+        await _repo.removeSourceEntry(entry.location);
+        _toast(isActive ? '已删除，直播已改用主配置源' : '已从历史中删除',
+            type: AppMessageType.success);
+      } catch (error) {
+        _toast('删除失败：${_errorText(error)}', type: AppMessageType.error);
+      }
+    });
+  }
+
+  /// 删除「手动添加」里的一个频道（确认后）；删空后该分组自动消失。
+  Future<void> _removeManual(Live channel) async {
+    if (_busyKey != null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: context.palette.raised,
+        title: Text('删除频道',
+            style: TextStyle(
+                fontSize: AppType.heading, color: context.palette.textTitle)),
+        content: Text(
+          '从「${LiveRepository.manualSourceName}」删除「${channel.name}」？\n${channel.url}',
+          style: TextStyle(
+              fontSize: AppType.label,
+              height: 1.5,
+              color: context.palette.textBody),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text('删除', style: TextStyle(color: context.palette.danger)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _run('manual:${channel.url}', () async {
+      try {
+        await _repo.removeManualChannel(channel.url);
+        _toast('已删除频道：${channel.name}', type: AppMessageType.success);
+      } on DataRestorePendingRestartException catch (error) {
+        _toast(error.message, type: AppMessageType.warning);
+      } catch (error) {
+        _toast('删除失败：${_errorText(error)}', type: AppMessageType.error);
+      }
+    });
+  }
+
+  Widget _spinner() => const SizedBox(
+      width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2));
+
+  @override
+  Widget build(BuildContext context) {
+    final history = _repo.sourceHistory;
+    final active = history.activeEntry;
+    final manualChannels = _repo.manualChannels;
+    final labelStyle = TextStyle(
+        fontSize: AppType.label,
+        fontWeight: FontWeight.bold,
+        color: context.palette.textMain);
+    final noteStyle = TextStyle(
+        fontSize: AppType.body, height: 1.5, color: context.palette.textSub);
+
+    return _PanelScaffold(
+      title: '直播源',
+      subtitle: '单独指定直播的频道来源；只影响直播，点播始终使用主配置源',
+      children: [
+        _card(
+          context,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('当前直播源', style: labelStyle),
+              const SizedBox(height: 8),
+              SelectableText(
+                active == null
+                    ? '跟随主配置源：使用主配置里的直播（lives）'
+                    : '${_liveSourceKindLabel(active.kind)}：${active.location}',
+                style: TextStyle(
+                    fontSize: AppType.label, color: context.palette.textSub),
+              ),
+              if (active != null) ...[
+                const SizedBox(height: 10),
+                _StatChip(label: '频道', value: active.channelCount),
+                const SizedBox(height: 16),
+                OutlinedButton.icon(
+                  key: const ValueKey('live-source-follow-main'),
+                  onPressed: _busyKey == null ? _followMain : null,
+                  icon: _busyKey == 'main'
+                      ? _spinner()
+                      : const Icon(Icons.undo_rounded, size: 16),
+                  label: const Text('改用主配置源'),
+                  style: _outlinedStyle(context),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _card(
+          context,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('设置直播源', style: labelStyle),
+              const SizedBox(height: 4),
+              Text(
+                '填写 txt / m3u / m3u8 频道清单地址，或完整配置 JSON 地址（只读取其中的直播）；也可以填本地文件路径。'
+                '单个播放地址会加入「${LiveRepository.manualSourceName}」分组，不替换当前直播源。',
+                style: noteStyle,
+              ),
+              const SizedBox(height: 12),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      key: const ValueKey('live-source-input'),
+                      controller: _input,
+                      style: TextStyle(
+                          fontSize: AppType.label,
+                          color: context.palette.textMain),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: 'https://example.com/live.txt',
+                        errorText: _inputError,
+                        errorMaxLines: 3,
+                      ),
+                      onSubmitted: (_) => unawaited(_apply()),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  ElevatedButton(
+                    key: const ValueKey('live-source-apply'),
+                    onPressed: _busyKey == null ? _apply : null,
+                    style: _primaryStyle(context),
+                    child: _busyKey == 'apply' ? _spinner() : const Text('应用'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 24),
+        // 单个播放地址不替换直播源、不进历史，单独列出以便查看和删除。
+        Text('手动添加的频道（${manualChannels.length}）',
+            style: TextStyle(
+                fontSize: AppType.title,
+                fontWeight: FontWeight.bold,
+                color: context.palette.textMain)),
+        const SizedBox(height: 4),
+        Text(
+          '单个播放地址加入直播频道列表的「${LiveRepository.manualSourceName}」分组，和当前直播源的频道一起显示。',
+          style: noteStyle,
+        ),
+        const SizedBox(height: 12),
+        if (manualChannels.isEmpty)
+          _card(
+            context,
+            child: Text(
+              '暂无。在上方填写单个播放地址（如 .m3u8 / rtmp 地址），或「名称,地址」即可添加。',
+              style: TextStyle(
+                  fontSize: AppType.label, color: context.palette.textSub),
+            ),
+          )
+        else
+          for (final channel in manualChannels) ...[
+            _ManualChannelRow(
+              channel: channel,
+              busy: _busyKey == 'manual:${channel.url}',
+              disabled: _busyKey != null,
+              onRemove: () => unawaited(_removeManual(channel)),
+            ),
+            const SizedBox(height: 8),
+          ],
+        const SizedBox(height: 24),
+        Text('直播源历史（${history.entries.length}）',
+            style: TextStyle(
+                fontSize: AppType.title,
+                fontWeight: FontWeight.bold,
+                color: context.palette.textMain)),
+        const SizedBox(height: 12),
+        if (history.entries.isEmpty)
+          _card(
+            context,
+            child: Text(
+              '暂无记录。成功设置的直播源会出现在这里，可随时切换或删除。',
+              style: TextStyle(
+                  fontSize: AppType.label, color: context.palette.textSub),
+            ),
+          )
+        else
+          for (final entry in history.entries) ...[
+            _LiveSourceRow(
+              entry: entry,
+              isCurrent: entry.location == history.active,
+              busy: _busyKey == entry.location,
+              disabled: _busyKey != null,
+              onUse: () => unawaited(_use(entry)),
+              onRemove: () => unawaited(_remove(entry)),
+            ),
+            const SizedBox(height: 8),
+          ],
+      ],
+    );
+  }
+}
+
+String _liveSourceKindLabel(LiveSourceKind kind) =>
+    kind == LiveSourceKind.config ? '配置 JSON' : '频道清单';
+
+/// 「手动添加」分组里的一个频道（名称 + 地址 + 删除）
+class _ManualChannelRow extends StatelessWidget {
+  final Live channel;
+  final bool busy;
+  final bool disabled;
+  final VoidCallback onRemove;
+
+  const _ManualChannelRow({
+    required this.channel,
+    required this.busy,
+    required this.disabled,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return _card(
+      context,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          Icon(Icons.podcasts_rounded, size: 18, color: context.palette.textSub),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  channel.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: AppType.label,
+                      fontWeight: FontWeight.w600,
+                      color: context.palette.textMain),
+                ),
+                const SizedBox(height: 2),
+                Text(channel.url,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: AppType.body, color: context.palette.textSub)),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          busy
+              ? const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2)),
+                )
+              : IconButton(
+                  key: ValueKey('live-manual-remove:${channel.url}'),
+                  tooltip: '删除',
+                  onPressed: disabled ? null : onRemove,
+                  icon: const Icon(Icons.delete_outline_rounded, size: 18),
+                ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 直播源行（直播源历史中的一条）
+class _LiveSourceRow extends StatelessWidget {
+  final LiveSourceEntry entry;
+  final bool isCurrent;
+  final bool busy;
+  final bool disabled;
+  final VoidCallback onUse;
+  final VoidCallback onRemove;
+
+  const _LiveSourceRow({
+    required this.entry,
+    required this.isCurrent,
+    required this.busy,
+    required this.disabled,
+    required this.onUse,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final subStyle =
+        TextStyle(fontSize: AppType.body, color: context.palette.textSub);
+    return _card(
+      context,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: Row(
+        children: [
+          Icon(
+              entry.kind == LiveSourceKind.config
+                  ? Icons.data_object_rounded
+                  : Icons.live_tv_rounded,
+              size: 18,
+              color: context.palette.textSub),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        entry.displayName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: AppType.label,
+                            fontWeight: FontWeight.w600,
+                            color: context.palette.textMain),
+                      ),
+                    ),
+                    if (isCurrent) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                            color: context.palette.accent,
+                            borderRadius: BorderRadius.circular(AppRadii.xs)),
+                        child: Text('当前',
+                            style: TextStyle(
+                                fontSize: AppType.caption,
+                                color:
+                                    Theme.of(context).colorScheme.onPrimary)),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(entry.location,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: subStyle),
+                const SizedBox(height: 4),
+                Text(
+                  '${_liveSourceKindLabel(entry.kind)} · ${entry.channelCount} 个频道 · 上次使用 ${_formatTime(entry.lastUsedAt)}',
+                  style: subStyle,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          TextButton(
+            key: ValueKey('live-source-use:${entry.location}'),
+            onPressed: disabled ? null : onUse,
+            child: busy
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : Text(isCurrent ? '重新加载' : '使用'),
+          ),
+          IconButton(
+            key: ValueKey('live-source-remove:${entry.location}'),
+            tooltip: '删除',
+            onPressed: disabled ? null : onRemove,
+            icon: const Icon(Icons.delete_outline_rounded, size: 18),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =====================================================================
 // 播放器与解码
 // =====================================================================
 
@@ -1238,11 +1835,15 @@ class PlayerSettingsPanel extends StatefulWidget {
   /// §43 是否显示「弹幕」分组（null = 跟随 [danmakuServiceConfigured]）
   final bool? danmakuAvailable;
 
+  /// 第三方播放器程序选择器；缺省使用系统 .exe 文件选择框。
+  final Future<String?> Function()? pickExternalPlayerExecutable;
+
   const PlayerSettingsPanel(
       {super.key,
       required this.settingsRepository,
       this.application,
-      this.danmakuAvailable});
+      this.danmakuAvailable,
+      this.pickExternalPlayerExecutable});
 
   static const List<double> rateOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
 
@@ -1318,6 +1919,14 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
           ],
           children: [
             _PlayerApplicationStatus(application: widget.application),
+            const _GroupTitle('第三方播放器'),
+            _ExternalPlayerSettingsCard(
+              value: s.externalPlayer,
+              pickExecutable: widget.pickExternalPlayerExecutable,
+              onChanged: (value) => _update(
+                settingsRepository.playerSettings.copyWith(externalPlayer: value),
+              ),
+            ),
             const _GroupTitle('解码'),
             _card(
               context,
@@ -1419,7 +2028,7 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                   const _RowDivider(),
                   _SettingRow(
                     title: '长按倍速倍率',
-                    description: '播放页按住 → 键超过 0.4 秒临时加速，松开恢复原倍速；'
+                    description: '播放页按住 ${s.shortcuts.primarySeekForward.label} 超过 0.4 秒临时加速，松开恢复原倍速；'
                         '短按仍是快进 10 秒，直播不生效',
                     trailing: _OptionDropdown(
                       key: const ValueKey('setting-hold-rate'),
@@ -1487,6 +2096,19 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                       value: s.browserHeaders,
                       onChanged: (value) =>
                           _update(s.copyWith(browserHeaders: value)),
+                    ),
+                  ),
+                  const _RowDivider(),
+                  _SettingRow(
+                    title: '直链自动识别播放方式',
+                    description: '播放直链时先只读清单（最多 4 秒）判定点播 / 直播：'
+                        '识别为点播就启用进度条并按点播参数播放。'
+                        '识别失败按直播播放；播放中可在直播页左上角「播放方式」改成「按点播 / 按直播」',
+                    trailing: Switch(
+                      key: const ValueKey('setting-auto-detect-direct-mode'),
+                      value: s.autoDetectLiveDirectMode,
+                      onChanged: (value) => _update(
+                          s.copyWith(autoDetectLiveDirectMode: value)),
                     ),
                   ),
                   const _RowDivider(),
@@ -1777,6 +2399,28 @@ class _DanmakuSettingsRows extends StatelessWidget {
         ),
         const _RowDivider(),
         _SettingRow(
+          title: '弹幕密度',
+          description: '弹幕太多时只显示其中一部分（按条均匀抽取，拖动进度后显示的仍是同一批）',
+          trailing: _OptionDropdown(
+            key: const ValueKey('setting-danmaku-density'),
+            options: [for (final o in DanmakuSettings.densityOptions) PlayerOption('${o.$1}', o.$2)],
+            value: '${d.density}',
+            onChanged: (v) => onChanged(d.copyWith(density: int.parse(v))),
+          ),
+        ),
+        const _RowDivider(),
+        _SettingRow(
+          title: '合并重复弹幕',
+          description: '${DanmakuSettings.mergeWindow.round()} 秒内内容相同的弹幕只显示一条，并标出条数（如「哈哈 x 3」）；'
+              '全角半角、叠字、末尾标点不同也算相同',
+          trailing: Switch(
+            key: const ValueKey('setting-danmaku-merge'),
+            value: d.mergeDuplicates,
+            onChanged: (v) => onChanged(d.copyWith(mergeDuplicates: v)),
+          ),
+        ),
+        const _RowDivider(),
+        _SettingRow(
           title: '显示区域',
           description: '弹幕占用画面的范围（自上而下），当前：${_areaLabel(d.area)}',
           trailing: _areaDropdown('setting-danmaku-area', d.area, (v) => onChanged(d.copyWith(area: v))),
@@ -2048,6 +2692,13 @@ class GeneralSettingsPanel extends StatelessWidget {
     ));
   }
 
+  Future<void> _setFilterBarExpanded(bool expanded) {
+    final repository = settingsRepository;
+    return _saveWithStatus(repository.updateSearchPreferences(
+      repository.searchPreferences.copyWith(filterBarExpanded: expanded),
+    ));
+  }
+
   /// 切换「站点自检」开关：先落盘，成功后再同步给本地站点服务。
   ///
   /// 顺序很重要：先持久化再下发，避免"磁盘没记住、进程却已开启"的错位状态；
@@ -2255,6 +2906,33 @@ class GeneralSettingsPanel extends StatelessWidget {
                   onChanged: readFailed
                       ? null
                       : (value) => unawaited(_setSearchAggregate(value)),
+                ),
+              ),
+            );
+          },
+        ),
+        const SizedBox(height: 16),
+        // 分类页筛选条默认展开：与搜索偏好同存一个文件（search_preferences.json）。
+        StreamBuilder<SearchPreferences>(
+          stream: settingsRepository.searchPreferencesStream,
+          builder: (context, _) {
+            final repository = settingsRepository;
+            final preferences = repository.searchPreferences;
+            final readFailed = repository.searchReadFailed;
+            return _card(
+              context,
+              child: _SettingRow(
+                title: '分类页筛选条默认展开',
+                description: readFailed
+                    ? '暂不可用（搜索偏好读取失败），当前按默认收起；修复文件后可重新读取。'
+                    : '站源提供筛选条件时，进入分类页是否直接展开筛选行；关闭时只显示「筛选」按钮，点击可临时展开。',
+                descriptionColor: readFailed ? context.palette.warning : null,
+                trailing: Switch(
+                  key: const ValueKey('filter-bar-expanded'),
+                  value: preferences.filterBarExpanded,
+                  onChanged: readFailed
+                      ? null
+                      : (value) => unawaited(_setFilterBarExpanded(value)),
                 ),
               ),
             );

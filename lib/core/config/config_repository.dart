@@ -604,24 +604,25 @@ class ConfigRepository {
 
   /// 切换直播频道收藏；落盘失败时撤回内存变更，避免 UI 显示「已保存」。
   Future<bool> toggleLiveFavorite(Live channel) async {
-    final index = _liveFavorites.indexWhere((e) => e.key == channel.key);
-    Live? removed;
-    bool favorited;
-    if (index >= 0) {
-      removed = _liveFavorites.removeAt(index);
-      favorited = false;
-    } else {
+    final removed = _liveFavorites.asMap().entries
+        .where((entry) => channel.matchesKey(entry.value.key)).toList();
+    final favorited = removed.isEmpty;
+    if (favorited) {
       _liveFavorites.insert(0, channel);
-      favorited = true;
+    } else {
+      _liveFavorites.removeWhere((entry) => channel.matchesKey(entry.key));
     }
     _liveFavoritesController.add(_liveFavorites);
     try {
       await _storage.saveLiveFavorites(_liveFavorites);
     } catch (_) {
-      if (removed != null) {
-        _liveFavorites.insert(index, removed);
+      if (favorited) {
+        _liveFavorites.removeWhere((entry) => identical(entry, channel));
       } else {
-        _liveFavorites.removeWhere((e) => e.key == channel.key);
+        for (final entry in removed) {
+          final index = entry.key.clamp(0, _liveFavorites.length);
+          _liveFavorites.insert(index, entry.value);
+        }
       }
       _liveFavoritesController.add(_liveFavorites);
       rethrow;

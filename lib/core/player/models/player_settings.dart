@@ -1,4 +1,6 @@
 import '../../danmaku/danmaku_settings.dart';
+import '../../settings/models/external_player_settings.dart';
+import '../../settings/models/player_shortcut_bindings.dart';
 
 /// 可选项：显示名 + mpv 取值
 class PlayerOption {
@@ -71,8 +73,13 @@ class PlayerSettings {
   /// 关闭后出错只提示，由用户在线路抽屉里手动换。
   final bool autoLineSwitch;
 
-  /// §14 播放页长按 → 的临时倍速（取值见 [holdRateOptions]，默认 3x）；松开恢复原倍速。
+  /// 长按快进主快捷键的临时倍速；松开恢复原倍速。
   final double holdRate;
+
+  final PlayerShortcutBindings shortcuts;
+
+  /// 第三方播放器的程序路径与模式，嵌套保存为 `externalPlayer`。
+  final ExternalPlayerSettings externalPlayer;
 
   /// §55 播放中鼠标静止 [cursorIdleDelay] 后自动隐藏光标。默认 true；
   /// 关闭后光标在播放页始终可见。鼠标一动光标立即出现，与控制条显隐互不牵连。
@@ -83,6 +90,12 @@ class PlayerSettings {
   /// 有些源站按 UA 拦非浏览器请求：清单只给一半、或直接断连（实测 py1080p 专线）。
   /// 默认开启；若某个源反而被搞坏，可在这里关掉，回到「按站点原始请求头播放」。
   final bool browserHeaders;
+
+  /// 播放直链时自动识别播放方式（P1）：起播前只读清单 ≤1.2 s 判定点播 / 直播。
+  ///
+  /// 默认开启；关闭后不再探测，直接按主机记忆 / 直播播放（弹窗里仍可手动选）。
+  /// 应对「探测请求有副作用」的源（方案 R2/R3 的降级开关）。
+  final bool autoDetectLiveDirectMode;
 
   /// 鼠标静止多久后隐藏光标（§55 口径：5 秒）。
   static const Duration cursorIdleDelay = Duration(seconds: 5);
@@ -107,8 +120,11 @@ class PlayerSettings {
     this.showMiniProgress = true,
     this.autoLineSwitch = true,
     this.holdRate = defaultHoldRate,
+    this.shortcuts = PlayerShortcutBindings.defaults,
+    this.externalPlayer = ExternalPlayerSettings.defaults,
     this.autoHideCursor = true,
     this.browserHeaders = true,
+    this.autoDetectLiveDirectMode = true,
   });
 
   static const PlayerSettings defaults = PlayerSettings();
@@ -221,8 +237,11 @@ class PlayerSettings {
       showMiniProgress: json['showMiniProgress'] != false,
       autoLineSwitch: json['autoLineSwitch'] != false,
       holdRate: _pickHoldRate(json['holdRate']),
+      shortcuts: PlayerShortcutBindings.fromJson(json['shortcuts']),
+      externalPlayer: ExternalPlayerSettings.fromJson(json['externalPlayer']),
       autoHideCursor: json['autoHideCursor'] != false,
       browserHeaders: json['browserHeaders'] != false,
+      autoDetectLiveDirectMode: json['autoDetectLiveDirectMode'] != false,
     );
   }
 
@@ -251,8 +270,11 @@ class PlayerSettings {
         'showMiniProgress': showMiniProgress,
         'autoLineSwitch': autoLineSwitch,
         'holdRate': holdRate,
+        'shortcuts': shortcuts.toJson(),
+        'externalPlayer': externalPlayer.toJson(),
         'autoHideCursor': autoHideCursor,
         'browserHeaders': browserHeaders,
+        'autoDetectLiveDirectMode': autoDetectLiveDirectMode,
       };
 
   /// 画面缩放对应的 mpv 属性取值：比例模式强制对应比例，其余复位默认态。
@@ -302,8 +324,11 @@ class PlayerSettings {
     bool? showMiniProgress,
     bool? autoLineSwitch,
     double? holdRate,
+    PlayerShortcutBindings? shortcuts,
+    ExternalPlayerSettings? externalPlayer,
     bool? autoHideCursor,
     bool? browserHeaders,
+    bool? autoDetectLiveDirectMode,
   }) {
     return PlayerSettings(
       hwdec: hwdec ?? this.hwdec,
@@ -325,8 +350,12 @@ class PlayerSettings {
       showMiniProgress: showMiniProgress ?? this.showMiniProgress,
       autoLineSwitch: autoLineSwitch ?? this.autoLineSwitch,
       holdRate: holdRate ?? this.holdRate,
+      shortcuts: shortcuts ?? this.shortcuts,
+      externalPlayer: externalPlayer ?? this.externalPlayer,
       autoHideCursor: autoHideCursor ?? this.autoHideCursor,
       browserHeaders: browserHeaders ?? this.browserHeaders,
+      autoDetectLiveDirectMode:
+          autoDetectLiveDirectMode ?? this.autoDetectLiveDirectMode,
     );
   }
 
@@ -352,12 +381,15 @@ class PlayerSettings {
       other.showMiniProgress == showMiniProgress &&
       other.autoLineSwitch == autoLineSwitch &&
       other.holdRate == holdRate &&
+      other.shortcuts == shortcuts &&
+      other.externalPlayer == externalPlayer &&
       other.autoHideCursor == autoHideCursor &&
-      other.browserHeaders == browserHeaders;
+      other.browserHeaders == browserHeaders &&
+      other.autoDetectLiveDirectMode == autoDetectLiveDirectMode;
 
   @override
   int get hashCode => Object.hashAll([hwdec, defaultVolume, defaultRate, audioChannels, audioDelayMs,
       toneMapping, scale, brightness, contrast, saturation, gamma, cacheSecs, hideWindowTitleBar,
-      danmakuEnabled, danmaku, segmentsAutoApply, showMiniProgress, autoLineSwitch, holdRate,
-      autoHideCursor, browserHeaders]);
+      danmakuEnabled, danmaku, segmentsAutoApply, showMiniProgress, autoLineSwitch, holdRate, shortcuts,
+      externalPlayer, autoHideCursor, browserHeaders, autoDetectLiveDirectMode]);
 }

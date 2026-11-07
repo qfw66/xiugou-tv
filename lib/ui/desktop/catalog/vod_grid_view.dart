@@ -322,28 +322,31 @@ class _VodCardState extends State<_VodCard> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            // 标题
-                            Text(
-                              widget.item.name,
-                              style: TextStyle(
-                                color: _isHovered
-                                    ? Colors.white
-                                    : const Color(0xFFF0F1F5),
-                                fontSize: AppType.label,
-                                fontWeight: _isHovered
-                                    ? FontWeight.bold
-                                    : FontWeight.w600,
-                                letterSpacing: 0.2,
-                                shadows: const [
-                                  Shadow(
-                                    color: Color(0xCC000000),
-                                    blurRadius: 4,
-                                    offset: Offset(0, 1),
-                                  ),
-                                ],
+                            Tooltip(
+                              message: widget.item.name,
+                              excludeFromSemantics: true,
+                              child: Text(
+                                widget.item.name,
+                                style: TextStyle(
+                                  color: _isHovered
+                                      ? Colors.white
+                                      : const Color(0xFFF0F1F5),
+                                  fontSize: AppType.label,
+                                  fontWeight: _isHovered
+                                      ? FontWeight.bold
+                                      : FontWeight.w600,
+                                  letterSpacing: 0.2,
+                                  shadows: const [
+                                    Shadow(
+                                      color: Color(0xCC000000),
+                                      blurRadius: 4,
+                                      offset: Offset(0, 1),
+                                    ),
+                                  ],
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
                               ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
                             ),
 
                             // 评分角标（有真实评分时显示在标题下方）
@@ -358,15 +361,19 @@ class _VodCardState extends State<_VodCard> {
                                     color: Color(0xFFFFC107),
                                   ),
                                   const SizedBox(width: 3),
-                                  Text(
-                                    scoreText,
-                                    style: const TextStyle(
-                                      color: Color(0xFFFFC107),
-                                      fontSize: AppType.caption,
-                                      fontWeight: FontWeight.bold,
-                                      fontFeatures: [
-                                        FontFeature.tabularFigures()
-                                      ],
+                                  Flexible(
+                                    child: Text(
+                                      scoreText,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Color(0xFFFFC107),
+                                        fontSize: AppType.caption,
+                                        fontWeight: FontWeight.bold,
+                                        fontFeatures: [
+                                          FontFeature.tabularFigures()
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 ],

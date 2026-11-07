@@ -282,10 +282,47 @@ class _SegmentPanelState extends State<SegmentPanel> {
       _ => s.episode == null ? '' : '《${s.episode!.title}》第 ${s.episode!.episode} 集',
     };
     if (text.isEmpty) return const SizedBox.shrink();
+    // 次行只在「已有本集身份」时出现：把列表位置与身份集号并列展示，
+    // 两者绝不互相换算（2026-11-03 选集序号方案 §4.5）。
+    final showPosition =
+        s.phase == SegmentsPhase.idle || s.phase == SegmentsPhase.ready;
+    final positionHint = showPosition ? _positionHint(s) : null;
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-      child: Text(text, style: TextStyle(color: palette.textSub, fontSize: AppType.body)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            text,
+            key: const ValueKey('segment-episode-hint'),
+            style: TextStyle(color: palette.textSub, fontSize: AppType.body),
+          ),
+          if (positionHint != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                positionHint,
+                key: const ValueKey('segment-episode-position-hint'),
+                style:
+                    TextStyle(color: palette.textDim, fontSize: AppType.caption),
+              ),
+            ),
+        ],
+      ),
     );
+  }
+
+  /// 次行文案：「选集第 M 项」+ 身份集号的来源标注。
+  ///
+  /// M 是**正在播放线路**里的位置（抽屉序号可能属于另一条浏览线路，不能拿来对号）；
+  /// 标注规则：位置兜底 → 「集号按选集顺序推断」，解析号与位置不同 → 「集号取自集名」。
+  String? _positionHint(SegmentsState s) {
+    final ref = s.episodeRef;
+    if (ref == null || s.episode == null) return null;
+    final note = ref.inferred
+        ? ' · 集号按选集顺序推断'
+        : (ref.ordinal != ref.episode ? ' · 集号取自集名' : '');
+    return '选集第 ${ref.ordinal} 项$note';
   }
 
   Widget _section(String title) => Padding(

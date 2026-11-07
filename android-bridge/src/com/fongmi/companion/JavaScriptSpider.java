@@ -137,8 +137,11 @@ public final class JavaScriptSpider extends com.github.catvod.crawler.Spider {
     @Override
     public String categoryContent(String tid, String pg, boolean filter, java.util.HashMap<String, String> extend) {
         Map<String, Object> values = new LinkedHashMap<>();
-        values.put("tid", tid); values.put("pg", pg); values.put("page", pg); values.put("filter", filter);
+        // 筛选条件先铺底，再写分类参数：站源常用 tid 作筛选 key，后写才不会把分类 id 覆盖掉。
         if (extend != null) values.putAll(extend);
+        values.put("tid", tid); values.put("pg", pg); values.put("page", pg); values.put("filter", filter);
+        // 完整筛选条件另以 extend 提供，脚本可区分「分类参数」与「筛选条件」。
+        values.put("extend", extend == null ? new LinkedHashMap<String, String>() : new LinkedHashMap<>(extend));
         return call("category", env(values));
     }
 

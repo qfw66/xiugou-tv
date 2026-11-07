@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "scope": "Bounded additional dependencies for user-authorized YSP scripts; not a complete inventory of the bundled Python runtime.",
+  "runtime": {
+    "executable": "companion/pyruntime/python.exe",
+    "implementation": "CPython",
+    "verified_version": "3.14.6",
+    "platform": "win32",
+    "architecture": "AMD64",
+    "wheel_tag": "cp314-cp314-win_amd64",
+    "site_packages": "companion/pyruntime/Lib/site-packages"
+  },
+  "packages": [
+    {
+      "name": "pywasm",
+      "version": "1.0.8",
+      "artifact": {
+        "filename": "pywasm-1.0.8.tar.gz",
+        "type": "sdist",
+        "download_url": "https://files.pythonhosted.org/packages/40/ad/a8e9f90870697df8c91d26141317704f24844981edf2dcdfa9f6ac4e4aee/pywasm-1.0.8.tar.gz",
+        "metadata_url": "https://pypi.org/pypi/pywasm/1.0.8/json",
+        "sha256": "bdfb0b03394c601254caee415f3982107887a04ec7f40751ed878130d2ab7e15",
+        "size_bytes": 29695
+      },
+      "requires_python": ">=3.6",
+      "requires_dist": ["numpy"],
+      "bundled_dependencies": ["numpy==2.3.4"],
+      "dependency_evidence": "The sdist setup.py and pywasm.egg-info/requires.txt declare numpy; its PKG-INFO and PyPI requires_dist omit that requirement. setup.py was inspected, never executed.",
+      "license": {
+        "spdx": "MIT",
+        "notice": "companion/pyruntime/Lib/site-packages/pywasm-1.0.8.dist-info/LICENSE",
+        "preservation": "Complete unmodified upstream copyright and permission notice."
+      },
+      "installed_roots": [
+        "companion/pyruntime/Lib/site-packages/pywasm",
+        "companion/pyruntime/Lib/site-packages/pywasm-1.0.8.dist-info"
+      ],
+      "installed_files": 18,
+      "installed_size_bytes": 149292,
+      "installation": {
+        "method": "Extract the ten pywasm/*.py package files and upstream license from the verified local sdist; generate installed dist-info without setup.py, pip, or a build backend.",
+        "metadata": "METADATA preserves upstream PKG-INFO with Requires-Dist: numpy added from the upstream requirement. Original source/PKG-INFO, source/requires.txt and top_level.txt are retained. INSTALLER identifies xiugou-local-archive, direct_url.json records the sdist URL/hash, and RECORD hashes all installed pywasm files. No WHEEL is generated because no wheel was built.",
+        "source_code_modified": false
+      }
+    },
+    {
+      "name": "numpy",
+      "version": "2.3.4",
+      "artifact": {
+        "filename": "numpy-2.3.4-cp314-cp314-win_amd64.whl",
+        "type": "wheel",
+        "download_url": "https://files.pythonhosted.org/packages/dc/89/a231a5c43ede5d6f77ba4a91e915a87dea4aeea76560ba4d2bf185c683f0/numpy-2.3.4-cp314-cp314-win_amd64.whl",
+        "metadata_url": "https://pypi.org/pypi/numpy/2.3.4/json",
+        "sha256": "3da3491cee49cf16157e70f607c03a217ea6647b1cea4819c4f48e53d49139b9",
+        "size_bytes": 12920542,
+        "wheel_tag": "cp314-cp314-win_amd64"
+      },
+      "requires_python": ">=3.11",
+      "requires_dist": [],
+      "bundled_dependencies": [],
+      "native_libraries": "The wheel includes native CPython extensions and numpy.libs DLLs; this is not a pure-Python dependency set.",
+      "license": {
+        "primary_spdx": "BSD-3-Clause",
+        "notice": "companion/pyruntime/Lib/site-packages/numpy-2.3.4.dist-info/LICENSE.txt",
+        "binary_component_notices": [
+          {"name": "OpenBLAS", "spdx": "BSD-3-Clause"},
+          {"name": "LAPACK", "spdx": "BSD-3-Clause-Open-MPI"},
+          {"name": "GCC runtime library", "spdx": "GPL-3.0-or-later WITH GCC-exception-3.1"}
+        ],
+        "preservation": "The complete unmodified 950-line wheel LICENSE.txt is retained, including incorporated-component notices, full GPL text and GCC Runtime Library Exception 3.1. All other wheel license files are retained. The component list here is not a replacement for that notice."
+      },
+      "installed_roots": [
+        "companion/pyruntime/Lib/site-packages/numpy",
+        "companion/pyruntime/Lib/site-packages/numpy.libs",
+        "companion/pyruntime/Lib/site-packages/numpy-2.3.4.dist-info"
+      ],
+      "installed_files": 919,
+      "installed_size_bytes": 43253638,
+      "installation": {
+        "method": "Extract every file in the three allowlisted roots from the verified local wheel, preserving complete package, native libraries, metadata, RECORD and licenses byte-for-byte.",
+        "console_scripts_generated": false,
+        "console_scripts_note": "Upstream entry_points.txt is preserved; no f2py or numpy-config launchers are generated outside the owned package roots.",
+        "source_code_modified": false
+      }
+    }
+  ],
+  "packaging_policy": {
+    "artifact_sha256_verified_before_extraction": true,
+    "all_dependency_roots_must_be_absent": true,
+    "write_mode": "Sorted allowlisted archive members, exclusive file creation, no overwrite or deletion.",
+    "setup_pip_or_build_hooks_executed": false,
+    "existing_runtime_files_modified": false,
+    "python_path_configuration_modified": false,
+    "total_added_dependency_files": 937,
+    "total_added_dependency_bytes": 43402930,
+    "distribution_note": "The repository ignores companion/pyruntime; these packages are local bundled-runtime artifacts. Downstream packaging must include their files and complete license notices."
+  },
+  "compatibility": {
+    "claim": "Offline legacy Python ABI compatibility and the listed synthetic WASM operations on the verified bundled runtime.",
+    "legacy_api": [
+      "pywasm.load(path, {'wbg': callbacks})",
+      "runtime.machine.module.export_list entries expose name and value",
+      "runtime.machine.store.memory_list[export.value].data is a mutable bytearray",
+      "callbacks receive (runtime.machine.store, *wasm_scalar_arguments)",
+      "runtime.exec(name, list_of_args) returns a scalar or None for void",
+      "a callback can reenter runtime.exec('__wbindgen_malloc', [length, 1])"
+    ],
+    "synthetic_operations": ["UTF-8 callback round-trip", "struct pointer/length memory access", "WASM sees host memory mutation", "negative stack delta and restoration", "f32.add", "f64.sqrt"],
+    "unsupported": [
+      {"feature": "sign extension", "probe": "i32.extend8_s", "stage": "load", "failure": "Exception: ('unsupported opcode', 192)"},
+      {"feature": "bulk memory", "probe": "memory.copy; memory.fill", "stage": "load", "failure": "Exception: ('unsupported opcode', 252)"},
+      {"feature": "saturating float-to-integer conversion", "probe": "i32.trunc_sat_f32_s", "stage": "load", "failure": "Exception: ('unsupported opcode', 252)"},
+      {"feature": "SIMD", "probe": "v128.const", "stage": "load", "failure": "Exception: ('unsupported opcode', 253)"},
+      {"feature": "multi-return", "probe": "function returning two i32 values", "stage": "exec", "failure": "AssertionError: pywasm asserts len(function.type.rets.data) < 2"}
+    ],
+    "upgrade_constraint": "Prior local probes of pywasm 1.1.0, 1.2.3 and 2.2.3 found no pywasm.load entry point. They are not drop-in replacements for the original consumer. Adapting a modern interpreter is separate work.",
+    "not_verified": ["production author WASM", "other untested WASM instructions", "live YSP playback", "other Python ABIs or architectures"],
+    "external_author_requests_made": false
+  },
+  "verification": {
+    "test": "companion/pyshell/tests/test_wasm_compatibility.py",
+    "command": ".\\companion\\pyruntime\\python.exe -I -B .\\companion\\pyshell\\tests\\test_wasm_compatibility.py -v",
+    "import_resolution": "Normal bundled-runtime imports; the test does not add TEMP or extracted-package directories to sys.path and asserts installed package paths and metadata versions.",
+    "red_before_packaging": "ModuleNotFoundError: No module named 'pywasm'; preflight also found no numpy.",
+    "fixture_size_bytes": 421,
+    "fixture_sha256": "0df0d751d771afd195a89d125cc1eabeded0a4425f45005362f3fd7033987754",
+    "optional_reference": {
+      "default_path": "E:/code/tvbox_1102/live-python-20261107/live/yangshipin.py",
+      "environment_override": "XIUGOU_AUTHOR_YSP",
+      "sha256": "67c66cf3f36723f41eb1e10ca0f48a11f24a69eb81c6ccf46e64aea45e75c850",
+      "method": "Parse the read-only source and compile only the unchanged _Keygen class AST against the synthetic fixture. Verify token_random, signature, heap cleanup and stack restoration. Skip if absent; fail if the source hash changed. No top-level author module code runs."
+    },
+    "assertions_required": true,
+    "credentials_registration_or_realplay_used": false
+  }
+}

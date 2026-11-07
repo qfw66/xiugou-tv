@@ -79,6 +79,10 @@ class _DanmakuSettingsPanelState extends State<DanmakuSettingsPanel> {
           _toggleRow('block-colorful', '彩色弹幕', d.blockColorful, (v) => d.copyWith(blockColorful: v)),
           _toggleRow('block-advanced', '高级弹幕', d.blockAdvanced, (v) => d.copyWith(blockAdvanced: v)),
           _section('显示'),
+          _optionSlider<int>('density', '弹幕密度', DanmakuSettings.densityOptions,
+              (v) => v == d.density, (v) => d.copyWith(density: v)),
+          _toggleRow('merge', '合并重复', d.mergeDuplicates, (v) => d.copyWith(mergeDuplicates: v),
+              on: '合并', off: '关闭'),
           _optionSlider<double>('area', '显示区域', DanmakuSettings.areaOptions,
               (v) => (v - d.area).abs() < 0.01, (v) => d.copyWith(area: v)),
           _optionSlider<double>('pip-area', '画中画区域', DanmakuSettings.areaOptions,
@@ -184,8 +188,10 @@ class _DanmakuSettingsPanelState extends State<DanmakuSettingsPanel> {
   static const double _labelWidth = 84;
   static const double _valueWidth = 52;
 
-  /// 屏蔽开关行：开关靠右贴着数值列，与滑块行的末端对齐。
-  Widget _toggleRow(String key, String label, bool value, DanmakuSettings Function(bool) apply) => _row(
+  /// 开关行：开关靠右贴着数值列，与滑块行的末端对齐；右侧文字默认是屏蔽类的「屏蔽 / 显示」。
+  Widget _toggleRow(String key, String label, bool value, DanmakuSettings Function(bool) apply,
+          {String on = '屏蔽', String off = '显示'}) =>
+      _row(
         label,
         Align(
           alignment: Alignment.centerRight,
@@ -199,7 +205,7 @@ class _DanmakuSettingsPanelState extends State<DanmakuSettingsPanel> {
             ),
           ),
         ),
-        value: value ? '屏蔽' : '显示',
+        value: value ? on : off,
       );
 
   /// 档位滑块：选项按顺序排成离散刻度，右侧显示档位名；松手提交（与数值滑块同一节奏）。

@@ -6,6 +6,7 @@ import 'models/appearance_preferences.dart';
 import 'models/history_preferences.dart';
 import 'models/network_preferences.dart';
 import 'models/play_skip_preferences.dart';
+import 'models/player_shortcut_bindings.dart';
 import 'models/search_preferences.dart';
 import 'models/self_check_preferences.dart';
 import 'models/startup_preferences.dart';
@@ -127,10 +128,16 @@ class SettingsRepository {
   PlayerSettings get playerSettings => _playerSettings;
   List<ConfigSourceEntry> get configSources => _configSources;
 
-  Stream<PlayerSettings> get playerSettingsStream async* {
-    yield _playerSettings;
-    yield* _playerSettingsController.stream;
-  }
+  Stream<PlayerSettings> get playerSettingsStream => Stream.multi((events) {
+        // Subscribe before replaying the snapshot so an immediate edit is kept.
+        final subscription = _playerSettingsController.stream.listen(
+          events.addSync,
+          onError: events.addErrorSync,
+          onDone: events.closeSync,
+        );
+        events.onCancel = subscription.cancel;
+        events.addSync(_playerSettings);
+      }, isBroadcast: true);
 
   Stream<List<ConfigSourceEntry>> get configSourcesStream async* {
     yield _configSources;
@@ -323,6 +330,15 @@ class SettingsRepository {
   }
 
   Future<void> resetPlayerSettings() => updatePlayerSettings(PlayerSettings.defaults);
+
+  Future<void> setPlayerShortcut(
+      PlayerShortcutAction action, PlayerKeyBinding binding) async {
+    final shortcuts = _playerSettings.shortcuts.replace(action, binding);
+    await updatePlayerSettings(_playerSettings.copyWith(shortcuts: shortcuts));
+  }
+
+  Future<void> resetPlayerShortcuts() => updatePlayerSettings(
+      _playerSettings.copyWith(shortcuts: PlayerShortcutBindings.defaults));
 
   Future<void> _persistPlayer() {
     final snapshot = _playerSettings;

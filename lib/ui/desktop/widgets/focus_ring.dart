@@ -37,12 +37,19 @@ class FocusRing extends StatefulWidget {
   /// 无障碍名称（图标按钮这类没有可见文字的场景应当提供）
   final String? semanticLabel;
 
+  /// 焦点环颜色；缺省取主题 `accentInk`。
+  ///
+  /// 播放器顶栏这类固定深色镀铬层需要显式传浅色：浅色主题的 `accentInk`
+  /// 在黑底上几乎不可见。
+  final Color? color;
+
   const FocusRing({
     super.key,
     required this.child,
     this.onTap,
     this.borderRadius = const BorderRadius.all(Radius.circular(AppRadii.md)),
     this.semanticLabel,
+    this.color,
   });
 
   @override
@@ -86,7 +93,7 @@ class _FocusRingState extends State<FocusRing> {
                   decoration: BoxDecoration(
                     borderRadius: widget.borderRadius,
                     border: Border.all(
-                      color: palette.accentInk,
+                      color: widget.color ?? palette.accentInk,
                       width: AppFocus.ringWidth,
                     ),
                   ),

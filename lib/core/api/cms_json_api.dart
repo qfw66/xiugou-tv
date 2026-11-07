@@ -209,6 +209,7 @@ class CmsJsonApi {
             total: result.total,
             categories: filteredCats,
             list: result.list,
+            filters: result.filters,
           );
         }
       }
@@ -230,11 +231,17 @@ class CmsJsonApi {
   }
 
   /// 2. 分类分页列表查询 (参照 TVBox SiteApi.categoryContent 与 TVBox)
+  ///
+  /// [extend] 为用户选的筛选条件：JSON 采集源（type 1）以 `f=<JSON>` 下发（对齐 FongMi），
+  /// 三级回退都带上；为空时不发 `f`。XML 源没有筛选协议，忽略 [extend]。
+  /// [cancelToken] 取消后中止在途 HTTP、不再发后续回退，并返回空结果。
   Future<VodPageResult> fetchCategory(
     String apiEndpoint,
     String categoryId, {
     int page = 1,
     Site? site,
+    Map<String, String> extend = const {},
+    SearchCancelToken? cancelToken,
   }) async {
     final siteName = site?.name ?? '未知站源';
     final siteType = site?.type ?? 0;
@@ -245,6 +252,10 @@ class CmsJsonApi {
       _log('SiteApi::fetchCategory', '<-- [$siteName] 该站源是爬虫插件 ($apiEndpoint)，没有 HTTP 端点，不能走 CMS 通道拉取分类。');
       return const VodPageResult.empty();
     }
+
+    final dioCancelToken = CancelToken();
+    cancelToken?.onCancel(() => dioCancelToken.cancel('请求已取消'));
+    final filterParam = (siteType == 1 && extend.isNotEmpty) ? jsonEncode(extend) : null;
 
     try {
       // 策略 1: 标准 CMS 分类参数
@@ -259,15 +270,22 @@ class CmsJsonApi {
       if (extendParam != null) {
         queryParams['extend'] = extendParam;
       }
+      if (filterParam != null) {
+        queryParams['f'] = filterParam;
+      }
 
       String raw = await _httpGet(
         effectiveEndpoint,
         queryParams: queryParams,
         headers: _buildHeaders(site),
         logTag: 'SiteApi::fetchCategory',
+        cancelToken: dioCancelToken,
       );
 
       var result = _parseContent(raw, type: siteType, site: site);
+
+      // 用户已取消（改了筛选 / 切了分类）：后续回退纯属浪费
+      if (cancelToken?.isCancelled ?? false) return const VodPageResult.empty();
 
       // 如果返回为空，尝试 fallback 策略 2: ac=videolist
       if (result.list.isEmpty && siteType == 1) {
@@ -278,9 +296,12 @@ class CmsJsonApi {
           queryParams: queryParams,
           headers: _buildHeaders(site),
           logTag: 'SiteApi::fetchCategory',
+          cancelToken: dioCancelToken,
         );
         result = _parseContent(raw, type: siteType, site: site);
       }
+
+      if (cancelToken?.isCancelled ?? false) return const VodPageResult.empty();
 
       // 如果仍为空，尝试 fallback 策略 3: 不带 ac 参数 (部分 CMS 仅支持 t=id&pg=page)
       if (result.list.isEmpty) {
@@ -292,11 +313,15 @@ class CmsJsonApi {
         if (extendParam != null) {
           noAcParams['extend'] = extendParam;
         }
+        if (filterParam != null) {
+          noAcParams['f'] = filterParam;
+        }
         raw = await _httpGet(
           effectiveEndpoint,
           queryParams: noAcParams,
           headers: _buildHeaders(site),
           logTag: 'SiteApi::fetchCategory',
+          cancelToken: dioCancelToken,
         );
         result = _parseContent(raw, type: siteType, site: site);
       }
@@ -308,6 +333,7 @@ class CmsJsonApi {
       }
       return result;
     } catch (e) {
+      if (cancelToken?.isCancelled ?? false) return const VodPageResult.empty();
       _log('SiteApi::fetchCategory', '<-- [$siteName] 分类数据拉取失败: $e');
       rethrow;
     }
@@ -691,6 +717,7 @@ class CmsJsonApi {
       total: _asInt(map['total'], fallback: list.length),
       list: list,
       categories: categories,
+      filters: parseVodFilters(map['filters']),
     );
   }
 

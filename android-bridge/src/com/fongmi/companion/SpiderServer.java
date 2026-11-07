@@ -34,9 +34,11 @@ public class SpiderServer {
     private final DexSpiderLoader loader;
     private final int requestedPort;
     private final ThreadPoolExecutor callPool;
+    private final ConcurrentHashMap<String, Set<Future<?>>> rpcWorkers = new ConcurrentHashMap<>();
     private HttpServer server;
     private java.util.concurrent.ExecutorService httpExecutor;
     private int boundPort;
+    private final ScriptDanmakuRegistry danmaku = new ScriptDanmakuRegistry();
 
     public SpiderServer(int port) {
         this.requestedPort = port;
@@ -67,6 +69,12 @@ public class SpiderServer {
         server.createContext("/spider/call", guarded(new CallHandler()));
         server.createContext("/spider/cancel", guarded(new CancelHandler()));
         server.createContext("/spider/reset", guarded(new ResetHandler()));
+        this.boundPort = server.getAddress().getPort();
+        loader.setScriptProxyBase("http://127.0.0.1:" + boundPort + "/script-proxy");
+        server.createContext("/script-proxy", new ScriptProxyHandler(loader, callPool));
+        String danmakuBase = "http://127.0.0.1:" + boundPort + "/script-danmaku";
+        loader.setScriptDanmakuBase(danmakuBase + "/start");
+        server.createContext("/script-danmaku", new ScriptDanmakuHandler(loader, danmaku, callPool, danmakuBase));
         server.createContext("/shutdown", guarded(new ShutdownHandler()));
         // 载荷弹窗 / Toast 等界面事件（长轮询）与用户操作回放，见 ui.UiBridge
         server.createContext("/ui/events", guarded(new UiEventsHandler()));
@@ -120,6 +128,8 @@ public class SpiderServer {
     }
 
     public void stop() {
+        danmaku.close();
+        cancelAllWorkers();
         if (server != null) {
             loader.clear();
             server.stop(1);
@@ -189,7 +199,10 @@ public class SpiderServer {
                 return;
             }
             readBody(exchange);
-            int released = loader.clear();
+            int released = danmaku.reset(() -> {
+                cancelAllWorkers();
+                return loader.clear();
+            });
             com.fongmi.companion.hardshell.PayloadCryptoService.reset();
             com.fongmi.companion.guard.GuardCryptoService.reset();
             System.out.println("[SpiderServer] 配置已切换，释放 spider " + released + " 个");
@@ -357,7 +370,7 @@ public class SpiderServer {
      * <p>入参优先用 {@code rpcId}（客户端生成的不透明 id）；没带则退回 {@code tag}
      * （形如 {@code search@siteKey}），粒度更粗但同样生效。
      */
-    private static class CancelHandler implements HttpHandler {
+    private class CancelHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
@@ -371,9 +384,9 @@ public class SpiderServer {
                 tag = text(payload.get("tag"));
             }
             // 只给了粗粒度 tag 时，连同服务端为无 rpcId 请求生成的同族标签一起取消
-            int cancelled = payload.get("rpcId") instanceof String && !tag.isEmpty() && tag.equals(text(payload.get("rpcId")))
-                    ? CallRegistry.cancel(tag)
-                    : CallRegistry.cancelFamily(tag, SERVER_RPC_SUFFIX);
+            boolean exact = payload.get("rpcId") instanceof String && !tag.isEmpty() && tag.equals(text(payload.get("rpcId")));
+            int cancelled = exact ? CallRegistry.cancel(tag) : CallRegistry.cancelFamily(tag, SERVER_RPC_SUFFIX);
+            cancelled += cancelWorkers(tag, !exact);
             DebugLog.line("RPC", "cancel tag=" + tag + " cancelled=" + cancelled);
             sendJsonResponse(exchange, 200, "{\"code\":0,\"tag\":\"" + escapeJson(tag)
                     + "\",\"cancelled\":" + cancelled + "}");
@@ -395,6 +408,31 @@ public class SpiderServer {
                 : rpcId.trim();
     }
 
+    private int cancelWorkers(String tag, boolean family) {
+        if (tag == null || tag.isEmpty()) return 0;
+        int count = 0;
+        for (Map.Entry<String, Set<Future<?>>> entry : rpcWorkers.entrySet()) {
+            if (entry.getKey().equals(tag) || family && entry.getKey().startsWith(tag + SERVER_RPC_SUFFIX)) {
+                for (Future<?> future : entry.getValue()) if (future.cancel(true)) count++;
+            }
+        }
+        return count;
+    }
+
+    private void cancelAllWorkers() {
+        rpcWorkers.forEach((tag, workers) -> {
+            CallRegistry.cancel(tag);
+            workers.forEach(future -> future.cancel(true));
+        });
+    }
+
+    private void removeWorker(String tag, Future<?> future) {
+        rpcWorkers.computeIfPresent(tag, (key, workers) -> {
+            workers.remove(future);
+            return workers.isEmpty() ? null : workers;
+        });
+    }
+
     /**
      * 看门狗：spider 调用（jar 下载 / init / 网络请求）可能无超时挂死
      * （实测：夸克网盘 HTTP/2 读挂起 160s+，spider 内部无超时轮询），
@@ -406,22 +444,29 @@ public class SpiderServer {
      * 让日志继续用可读标签（{@code homeContent@xx}），取消则用「同站同方法也不会串味」的唯一标签。
      */
     private String runWithWatchdog(HttpExchange exchange, String tag, String rpcTag, long timeoutMs, Callable<String> task) throws IOException {
-        Future<String> future;
+        FutureTask<String> future = new FutureTask<>(() -> {
+            String previous = CallRegistry.bind(rpcTag);
+            ParseStage.begin(rpcTag);
+            try {
+                return task.call();
+            } catch (Throwable error) {
+                throw new SpiderWorkerFailure(error, ParseStage.current());
+            } finally {
+                ParseStage.clearFailure();
+                ParseStage.clearTag(rpcTag);
+                CallRegistry.unbind(previous);
+            }
+        });
+        // Publish before execute so /spider/cancel can interrupt even a just-starting Python call.
+        rpcWorkers.compute(rpcTag, (key, workers) -> {
+            if (workers == null) workers = ConcurrentHashMap.newKeySet();
+            workers.add(future);
+            return workers;
+        });
         try {
-            future = callPool.submit(() -> {
-                String previous = CallRegistry.bind(rpcTag);
-                ParseStage.begin(rpcTag);
-                try {
-                    return task.call();
-                } catch (Throwable error) {
-                    throw new SpiderWorkerFailure(error, ParseStage.current());
-                } finally {
-                    ParseStage.clearFailure();
-                    ParseStage.clearTag(rpcTag);
-                    CallRegistry.unbind(previous);
-                }
-            });
+            callPool.execute(future);
         } catch (RejectedExecutionException ree) {
+            removeWorker(rpcTag, future);
             System.err.println("[SpiderServer] reject " + tag + ": too many in-flight calls (>=" + MAX_INFLIGHT_CALLS + ")");
             sendJsonResponse(exchange, 503, "{\"code\":-3,\"error\":\"overloaded: too many in-flight spider calls\"}");
             return null;
@@ -453,11 +498,44 @@ public class SpiderServer {
             sendJsonResponse(exchange, 500, "{\"code\":-1,\"error\":\"站点暂不可用\",\"stage\":\""
                     + escapeJson(stage) + "\",\"detail\":\"" + escapeJson(detail) + "\"}");
             return null;
+        } catch (CancellationException cancelled) {
+            sendJsonResponse(exchange, 499, "{\"code\":-1,\"error\":\"cancelled\"}");
+            return null;
         } catch (InterruptedException ie) {
+            CallRegistry.cancel(rpcTag);
+            future.cancel(true);
             Thread.currentThread().interrupt();
             sendJsonResponse(exchange, 500, "{\"code\":-1,\"error\":\"interrupted\"}");
             return null;
+        } finally {
+            removeWorker(rpcTag, future);
         }
+    }
+
+    /**
+     * 把分类筛选条件（JSON 对象字符串）还原成 Spider 约定的 HashMap。
+     * 缺失或非法时返回空表并记一行日志：筛选失效不应让整次分类请求失败。
+     * 值一律转字符串、不做解码，站源下发的路径片段等需原样回传。
+     */
+    static HashMap<String, String> parseExtend(String raw) {
+        HashMap<String, String> extend = new HashMap<>();
+        if (raw == null || raw.isBlank()) return extend;
+        Object parsed;
+        try {
+            parsed = JsonCodec.parse(raw);
+        } catch (RuntimeException e) {
+            parsed = null;
+        }
+        if (!(parsed instanceof Map)) {
+            System.err.println("[SpiderServer] ignore invalid extend: " + raw);
+            return extend;
+        }
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) parsed).entrySet()) {
+            Object value = entry.getValue();
+            if (entry.getKey() == null || value == null) continue;
+            extend.put(String.valueOf(entry.getKey()), value instanceof String ? (String) value : JsonCodec.stringify(value));
+        }
+        return extend;
     }
 
     /** 宽容解析整型参数：缺失或非法时用默认值，避免调用方为可选参数报错。 */
@@ -546,7 +624,7 @@ public class SpiderServer {
                 String tid = map.getOrDefault("tid", "");
                 String pg = map.getOrDefault("pg", "1");
                 boolean filter = Boolean.parseBoolean(map.getOrDefault("filter", "true"));
-                result = spider.categoryContent(tid, pg, filter, new HashMap<>());
+                result = spider.categoryContent(tid, pg, filter, parseExtend(map.get("extend")));
                 break;
             }
             case "detailContent": {
@@ -595,7 +673,10 @@ public class SpiderServer {
         if (result != null && "playerContent".equals(method)) {
             result = NetdiskProxyUnwrap.unwrap(result);
         }
-        return result != null ? GuardProxyServer.rewriteLocalProxyUrls(result) : "";
+        // 配置中心入口（局域网 IP:19988/config）也换成本机代理地址：代理只绑回环（issue #6）。
+        return result != null
+                ? GuardProxyServer.rewriteLocalProxyUrls(result, spider.getClass().getClassLoader())
+                : "";
     }
 
     private static boolean isEmptyListing(String method, String result) {

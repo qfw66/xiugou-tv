@@ -1,3 +1,5 @@
+import '../episode_natural_order.dart';
+
 /// 影视点播摘要项（用于列表卡片展示与跨站聚合搜索）
 class VodItem {
   final String id;
@@ -189,7 +191,13 @@ class VodDetail {
         }
 
         if (episodes.isNotEmpty) {
-          sources.add(PlayFrom(name: sourceName.isNotEmpty ? sourceName : '默认线路', episodes: episodes));
+          final lineName = sourceName.isNotEmpty ? sourceName : '默认线路';
+          // 源顺序确实乱（网盘按文件名 / 体积列出）时按集号整理，见 episode_natural_order.dart
+          sources.add(PlayFrom(
+            name: lineName,
+            episodes: naturalEpisodeList(episodes,
+                nameOf: (e) => e.name, title: item.name, siteKey: item.siteKey, lineName: lineName),
+          ));
         }
       }
     }
@@ -259,7 +267,12 @@ class VodDetail {
         }
       }
       if (episodes.isNotEmpty) {
-        sources.add(PlayFrom(name: flag.isNotEmpty ? flag : '默认线路', episodes: episodes));
+        final lineName = flag.isNotEmpty ? flag : '默认线路';
+        sources.add(PlayFrom(
+          name: lineName,
+          episodes: naturalEpisodeList(episodes,
+              nameOf: (e) => e.name, title: name, siteKey: siteKey, lineName: lineName),
+        ));
       }
     }
 
@@ -310,6 +323,9 @@ class VodPageResult {
   final List<VodCategory> categories;
   final List<VodItem> list;
 
+  /// 站源声明的分类筛选：分类 id → 筛选组。只有首页结果会带，分类页一般为空。
+  final Map<String, List<VodFilter>> filters;
+
   const VodPageResult({
     this.page = 1,
     this.pageCount = 1,
@@ -317,6 +333,7 @@ class VodPageResult {
     this.limit = 20,
     this.categories = const [],
     this.list = const [],
+    this.filters = const {},
   });
 
   const VodPageResult.empty()
@@ -325,5 +342,66 @@ class VodPageResult {
         total = 0,
         limit = 20,
         categories = const [],
-        list = const [];
+        list = const [],
+        filters = const {};
+}
+
+/// 筛选组里的一个选项（TVBox 协议的 `n` / `v`）。
+///
+/// [value] 是回传给站源的原值，可能是路径片段或百分号编码串，必须原样保留。
+class VodFilterOption {
+  final String name;
+  final String value;
+
+  const VodFilterOption({required this.name, required this.value});
+}
+
+/// 一组筛选条件（TVBox 协议的 `key` / `name` / `value`），单选。
+class VodFilter {
+  final String key;
+  final String name;
+  final List<VodFilterOption> options;
+
+  const VodFilter({required this.key, required this.name, required this.options});
+}
+
+/// 解析 `homeContent` / CMS 首页返回的 `filters` 字段，Spider 与 CMS 两条链共用。
+///
+/// 容错口径对齐 FongMi：分类 id 的值可以是数组或单个对象；无 `key` 或无有效选项的
+/// 组被跳过；`v` 一律转字符串且不解码；`n` 缺失时用 `v` 作名称。非 Map 返回空表。
+Map<String, List<VodFilter>> parseVodFilters(Object? raw) {
+  if (raw is! Map) return const {};
+  final result = <String, List<VodFilter>>{};
+  for (final entry in raw.entries) {
+    final tid = entry.key?.toString() ?? '';
+    if (tid.isEmpty) continue;
+    final groups = entry.value is List ? entry.value as List : [entry.value];
+    final filters = <VodFilter>[];
+    for (final group in groups) {
+      final filter = _parseVodFilter(group);
+      if (filter != null) filters.add(filter);
+    }
+    if (filters.isNotEmpty) result[tid] = List.unmodifiable(filters);
+  }
+  return Map.unmodifiable(result);
+}
+
+VodFilter? _parseVodFilter(Object? group) {
+  if (group is! Map) return null;
+  final key = group['key']?.toString().trim() ?? '';
+  if (key.isEmpty) return null;
+  final rawOptions = group['value'];
+  if (rawOptions is! List) return null;
+  final options = <VodFilterOption>[];
+  for (final option in rawOptions) {
+    if (option is! Map) continue;
+    final value = option['v']?.toString() ?? '';
+    final name = option['n']?.toString() ?? '';
+    final label = name.trim().isEmpty ? value : name;
+    if (label.trim().isEmpty) continue;
+    options.add(VodFilterOption(name: label, value: value));
+  }
+  if (options.isEmpty) return null;
+  final name = group['name']?.toString().trim() ?? '';
+  return VodFilter(key: key, name: name.isEmpty ? key : name, options: List.unmodifiable(options));
 }

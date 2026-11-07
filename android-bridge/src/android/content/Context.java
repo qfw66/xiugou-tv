@@ -27,16 +27,47 @@ public class Context {
                 return INPUT_METHOD;
             case "window":
                 return WINDOW_MANAGER;
+            case "uimode":
+                // 载荷 Init.init 直接 checkcast 后 getCurrentModeType()，返回 null 会让整个 jar 初始化失败。
+                return UI_MODE;
+            case "activity":
+                // Picasso 等按内存档位定缓存大小时直接调用，不判空。
+                return ACTIVITY;
+            case "wifi":
+                // 载荷（如配置中心的手动输入页）拿到后直接 getConnectionInfo().getIpAddress()，不判空；
+                // 返回 null 会在静态初始化里 NPE，该类从此不可用，弹窗再也打不开。
+                return WIFI;
             default:
                 return null;
         }
     }
 
+    private static final android.net.wifi.WifiManager WIFI = new android.net.wifi.WifiManager();
     private static final ClipboardManager CLIPBOARD = new ClipboardManager();
     private static final android.view.inputmethod.InputMethodManager INPUT_METHOD =
             new android.view.inputmethod.InputMethodManager();
     private static final android.view.WindowManager WINDOW_MANAGER = new android.view.WindowManager() {
     };
+    private static final android.app.UiModeManager UI_MODE = new android.app.UiModeManager();
+    private static final android.app.ActivityManager ACTIVITY = new android.app.ActivityManager();
+    private static final android.content.res.AssetManager ASSETS = new android.content.res.AssetManager();
+
+    /** 桌面没有 APK assets：返回的 AssetManager 打开任何文件都是 FileNotFoundException。 */
+    public android.content.res.AssetManager getAssets() {
+        return ASSETS;
+    }
+
+    /** 桌面没有系统广播：登记即忽略，返回 null（= 当前没有粘性广播）。 */
+    public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) {
+        return null;
+    }
+
+    public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter, int flags) {
+        return null;
+    }
+
+    public void unregisterReceiver(BroadcastReceiver receiver) {
+    }
 
     /**
      * 桌面端没有 Activity 栈：只处理带数据地址的跳转（打开网页 / 唤起 App），交给宿主呈现，其余忽略。
@@ -98,6 +129,11 @@ public class Context {
                 new java.io.File(System.getProperty("user.home", "."), ".xiugou_tv_companion"), "prefs");
         if (!dir.exists()) dir.mkdirs();
         return dir;
+    }
+
+    /** 载荷只拿它当路径字符串（拼缓存目录名、做校验键），文件本身不需要存在。 */
+    public String getPackageResourcePath() {
+        return new java.io.File(getFilesDir(), "base.apk").getAbsolutePath();
     }
 
     public String getPackageName() {

@@ -9,14 +9,17 @@ import '../../../core/config/models/vod_config.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../widgets/focus_ring.dart';
+import 'live_source_picker.dart';
 
-/// ⑤-3 直播频道抽屉层（Infuse × Netflix 融合质感）：
+/// 直播频道抽屉层（TVBox 式两栏：左分组、右频道）。
 ///
-/// 特性：
-/// 1. 微透磨砂玻璃抽屉（BackdropFilter 24px + 1px 细微高光右边框 + 柔和环境光晕）。
-/// 2. 交互逻辑：左缘热区自动滑出，Esc / 选台收起防回弹，↑/↓ 键盘焦点平滑滚动。
-/// 3. 精致频道行项：三位等宽台号微胶囊、正在播出动态红点、活跃态品牌色流光指示。
-/// 4. 完美避开顶底播放器控制条带（顶 54px，底 96px 留白）。
+/// 1. 点击左缘热区弹出（不再随鼠标划过自动弹出）；点抽屉外任意处、
+///    Esc 或选台后收起。
+/// 2. 左栏是分组（首项固定为「收藏频道」），右栏只列所选分组的频道。
+/// 3. 键盘：↑/↓ 在当前栏移动（频道栏到分组边界会接着走到相邻分组），
+///    ← 进分组栏、→ / Enter 回频道栏，频道栏 Enter 选台。
+/// 4. 本层包住整个播放器（含顶栏 / 时间轴工具栏），抽屉画在工具栏之上；
+///    [canOpen] 控制左缘热区，显式选台请求不受工具栏显隐限制。
 class LiveChannelLayer extends StatefulWidget {
   final List<Live> channels;
   final int currentIndex;
@@ -24,11 +27,29 @@ class LiveChannelLayer extends StatefulWidget {
   final VoidCallback onManage;
   final Widget child;
 
-  /// 已收藏频道的键集合（§34）：抽屉顶部置顶「收藏频道」小节。
+  /// 已收藏频道的键集合（§34）：左栏首项「收藏频道」。
   final Set<String> favoriteKeys;
 
   /// §35：画中画小窗里整层不生效（无热区、无抽屉），还原后恢复。
   final bool enabled;
+
+  /// 能否点左缘弹出抽屉；只管打开，不会收起已打开的抽屉。
+  final bool canOpen;
+
+  /// 热区为顶栏 / 底栏保留的可点击空间。
+  final EdgeInsets hotzoneInsets;
+
+  /// 每次变化表示显式打开请求，重复请求不会把抽屉切换为关闭。
+  final int openRequest;
+
+  final ValueChanged<bool>? onOpenChanged;
+
+  /// 挂载（进入直播页）时抽屉先展开，不受 [canOpen] 限制；之后的开合仍按
+  /// 热区 / 选台 / Esc 走。画中画或无频道时不生效。
+  final bool initiallyOpen;
+
+  /// 抽屉头部的「直播源」下拉；null 时不显示。
+  final LiveSourceNav? sourceNav;
 
   const LiveChannelLayer({
     super.key,
@@ -39,6 +60,12 @@ class LiveChannelLayer extends StatefulWidget {
     required this.child,
     this.favoriteKeys = const {},
     this.enabled = true,
+    this.canOpen = true,
+    this.hotzoneInsets = EdgeInsets.zero,
+    this.openRequest = 0,
+    this.onOpenChanged,
+    this.initiallyOpen = false,
+    this.sourceNav,
   });
 
   @override
@@ -46,24 +73,39 @@ class LiveChannelLayer extends StatefulWidget {
 }
 
 class _LiveChannelLayerState extends State<LiveChannelLayer> {
-  static const double _drawerWidth = 290;
+  static const double _drawerMaxWidth = 380;
+  static const double _drawerMaxRatio = 0.7;
   static const double _hotzoneMax = 220;
   static const double _hotzoneRatio = 0.16;
 
-  bool _open = false;
-
-  /// 选台 / Esc 显式收起后置位：指针仍在热区内时不自动重开，
-  /// 待指针移出热区一次后清零。
-  bool _suppressReopen = false;
+  late bool _open =
+      widget.initiallyOpen && widget.enabled && widget.channels.isNotEmpty;
   double _layoutWidth = 0;
 
   double get _hotzoneWidth => _layoutWidth == 0
       ? _hotzoneMax
       : math.min(_layoutWidth * _hotzoneRatio, _hotzoneMax);
 
+  double get _drawerWidth => _layoutWidth == 0
+      ? _drawerMaxWidth
+      : math.min(_drawerMaxWidth, _layoutWidth * _drawerMaxRatio);
+
+  @override
+  void initState() {
+    super.initState();
+    _notifyOpenAfterBuild();
+  }
+
+  void _notifyOpenAfterBuild() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.onOpenChanged?.call(_open);
+    });
+  }
+
   @override
   void didUpdateWidget(covariant LiveChannelLayer oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final wasOpen = _open;
     if (widget.channels.isEmpty && _open) {
       _open = false;
     }
@@ -71,118 +113,113 @@ class _LiveChannelLayerState extends State<LiveChannelLayer> {
     if (!widget.enabled && _open) {
       _open = false;
     }
+    if (widget.openRequest != oldWidget.openRequest &&
+        widget.enabled && widget.channels.isNotEmpty) {
+      _open = true;
+    }
+    if (wasOpen != _open) _notifyOpenAfterBuild();
   }
 
-  void _onHover(PointerHoverEvent event) {
-    if (widget.channels.isEmpty) return;
-    final dx = event.localPosition.dx;
-    final inZone = dx <= (_open ? _drawerWidth : _hotzoneWidth);
-    if (_open) {
-      if (!inZone) _close();
-      return;
+  void _openDrawer() {
+    if (!_open && widget.canOpen && widget.enabled &&
+        widget.channels.isNotEmpty) {
+      setState(() => _open = true);
+      widget.onOpenChanged?.call(true);
     }
-    if (!inZone) {
-      _suppressReopen = false;
-      return;
-    }
-    if (_suppressReopen) return;
-    setState(() => _open = true);
   }
 
   void _close() {
-    if (_open) setState(() => _open = false);
+    if (!_open) return;
+    setState(() => _open = false);
+    widget.onOpenChanged?.call(false);
   }
 
   void _handleSelect(int index) {
     widget.onSelect(index);
-    _suppressReopen = true;
-    _close();
-  }
-
-  void _dismiss() {
-    _suppressReopen = true;
     _close();
   }
 
   @override
   Widget build(BuildContext context) {
     // §35 方案 A：画中画下整层直通（不留热区，不会误弹）。
-    if (!widget.enabled || widget.channels.isEmpty) return widget.child;
+    final active = widget.enabled && widget.channels.isNotEmpty;
     return LayoutBuilder(
       builder: (context, constraints) {
         _layoutWidth = constraints.maxWidth;
-        return MouseRegion(
-          onHover: _onHover,
-          onExit: (_) => _close(),
-          child: Stack(
+        final width = _drawerWidth;
+        // 停用时也保持同一个 Stack、child 固定在第一位：结构一变整个播放器
+        // （画面、顶栏胶囊的菜单状态）都会被卸载重建。
+        return Stack(
             fit: StackFit.expand,
             children: [
               widget.child,
-              AnimatedPositioned(
-                duration: _open ? AppMotion.enter : AppMotion.exit,
-                curve: AppMotion.ease,
-                left: _open ? 0 : -_drawerWidth,
-                top: 0,
-                bottom: 0,
-                width: _drawerWidth,
-                child: IgnorePointer(
-                  ignoring: !_open,
-                  child: _LiveChannelDrawer(
-                    channels: widget.channels,
-                    currentIndex: widget.currentIndex,
-                    favoriteKeys: widget.favoriteKeys,
-                    open: _open,
-                    onSelect: _handleSelect,
-                    onManage: widget.onManage,
-                    onRequestClose: _dismiss,
-                  ),
-                ),
-              ),
+              if (active) ..._buildOverlays(width),
             ],
-          ),
         );
       },
     );
   }
+
+  List<Widget> _buildOverlays(double width) {
+    return [
+      // 热区与工具栏错开；错误态保持可达，也不会挡住返回 / 播放按钮。
+      if (!_open && widget.canOpen)
+        Positioned(
+          key: const ValueKey('live-channel-hotzone'),
+          left: 0,
+          top: widget.hotzoneInsets.top,
+          bottom: widget.hotzoneInsets.bottom,
+          width: _hotzoneWidth,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _openDrawer,
+          ),
+        ),
+      // 抽屉打开时铺一层透明遮罩：点空白处只收起抽屉，
+      // 不会穿透成播放 / 暂停或唤出工具栏。
+      if (_open)
+        Positioned.fill(
+          child: GestureDetector(
+            key: const ValueKey('live-channel-barrier'),
+            behavior: HitTestBehavior.opaque,
+            onTap: _close,
+          ),
+        ),
+      AnimatedPositioned(
+        duration: _open ? AppMotion.enter : AppMotion.exit,
+        curve: AppMotion.ease,
+        left: _open ? 0 : -width,
+        top: 0,
+        bottom: 0,
+        width: width,
+        child: IgnorePointer(
+          ignoring: !_open,
+          child: _LiveChannelDrawer(
+            channels: widget.channels,
+            currentIndex: widget.currentIndex,
+            favoriteKeys: widget.favoriteKeys,
+            open: _open,
+            onSelect: _handleSelect,
+            onManage: widget.onManage,
+            onRequestClose: _close,
+            sourceNav: widget.sourceNav,
+          ),
+        ),
+      ),
+    ];
+  }
 }
 
-class _DrawerEntry {
-  final String? group;
-  final int? channelIndex;
-  final Live? channel;
+/// 左栏的一项：一个分组及其频道下标（按频道列表原顺序）。
+class _LiveGroup {
+  final String title;
+  final List<int> channels;
+  final bool favorites;
 
-  /// 非 null 时是提示行（例如「收藏频道」为空时的引导文案，§34）。
-  final String? hint;
-
-  /// true = 置顶「收藏频道」小节里的快捷入口行（§34-R）。
-  /// 它不参与悬停/播放高亮，避免与下方主列表同一频道双亮。
-  final bool quickEntry;
-
-  const _DrawerEntry.header(this.group)
-      : channelIndex = null,
-        channel = null,
-        hint = null,
-        quickEntry = false;
-
-  const _DrawerEntry.channel(this.channelIndex, this.channel,
-      {this.quickEntry = false})
-      : group = null,
-        hint = null;
-
-  /// 同一频道可能在置顶小节与主列表各出现一次（§34），
-  /// 用「行身份」而不是「频道下标」区分选中态。
-  String get rowId => quickEntry ? 'q:$channelIndex' : 'm:$channelIndex';
-
-  const _DrawerEntry.hint(this.hint)
-      : group = null,
-        channelIndex = null,
-        channel = null,
-        quickEntry = false;
-
-  bool get isHeader => group != null;
-  bool get isHint => hint != null;
-  bool get isChannel => channelIndex != null;
+  const _LiveGroup(this.title, this.channels, {this.favorites = false});
 }
+
+enum _DrawerColumn { groups, channels }
 
 class _LiveChannelDrawer extends StatefulWidget {
   final List<Live> channels;
@@ -192,6 +229,7 @@ class _LiveChannelDrawer extends StatefulWidget {
   final ValueChanged<int> onSelect;
   final VoidCallback onManage;
   final VoidCallback onRequestClose;
+  final LiveSourceNav? sourceNav;
 
   const _LiveChannelDrawer({
     required this.channels,
@@ -201,6 +239,7 @@ class _LiveChannelDrawer extends StatefulWidget {
     required this.onSelect,
     required this.onManage,
     required this.onRequestClose,
+    this.sourceNav,
   });
 
   @override
@@ -208,64 +247,79 @@ class _LiveChannelDrawer extends StatefulWidget {
 }
 
 class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
-  static const double _headerHeight = 34;
+  static const double _groupItemHeight = 40;
   static const double _itemHeight = 44;
+  static const double _listPadding = 6;
 
-  static const double _topBarInset = 54;
-  static const double _bottomBarInset = 96;
+  /// 抽屉画在顶栏 / 时间轴工具栏之上，不必再给它们让位，只留一点呼吸空间。
+  static const double _topBarInset = 12;
+  static const double _bottomBarInset = 0;
+
+  /// 左栏首项（§34）。与管理弹窗里的分类同名同口径。
+  static const String favoriteSectionTitle = '收藏频道';
 
   final FocusNode _focusNode = FocusNode(debugLabel: 'live-channel-drawer');
-  final ScrollController _scrollController = ScrollController();
+  final ScrollController _groupScroll = ScrollController();
+  final ScrollController _channelScroll = ScrollController();
+
+  /// 左栏分组；下标 0 固定是「收藏频道」（可能为空）。
+  List<_LiveGroup> _groups = const [];
+
+  /// 频道下标 → 所在**真实**分组的下标（不含收藏）。按频道列表身份缓存，
+  /// 频道上千时悬停 / 按键不再每次全量遍历。
+  List<int> _groupOfChannel = const [];
+
+  /// 右栏正在显示的分组。
+  int _groupIndex = 0;
+
+  /// 鼠标悬停中的分组行（只影响样式）。
+  int _groupHover = -1;
+
+  /// 右栏光标所在频道（频道列表下标）。
   int _cursor = 0;
 
-  /// 当前光标的**行身份**（非 null 时优先于 [_cursor]）。
-  ///
-  /// §34-R：置顶「收藏频道」小节与下方主列表可能指向同一频道，但它们是两行。
-  /// 用行身份记录光标，两行各自的悬停/选中互不牵连；播放高亮（正在播出）仍只认主列表。
-  String? _cursorRowId;
-
-  /// 分组行 / 「频道下标 → 行下标」/「行下标 → 顶部偏移」缓存。
-  ///
-  /// 频道上千时 `_buildEntries()` 每次 build 都要全量遍历，而鼠标在列表上悬停
-  /// 会不断 setState（`_cursor` 变化）——相当于每移动一次鼠标 O(n) 扫两遍，
-  /// 表现为「数据多时下滑特别卡」。改为按通道列表身份缓存，滚动与悬停都走 O(1)。
-  List<_DrawerEntry> _entries = const [];
-  List<int> _channelEntryIndex = const [];
-  List<double> _entryTops = const [];
+  /// 键盘当前操作的栏。
+  _DrawerColumn _column = _DrawerColumn.channels;
 
   @override
   void initState() {
     super.initState();
-    _cursor = widget.currentIndex;
-    _rebuildEntryCache();
+    _rebuildGroups();
+    _syncToCurrent();
+    if (widget.open) _afterFrame(_focusAndReveal);
   }
 
-  /// 置顶「收藏频道」小节标题（§34）。与弹窗里的分类同名同口径。
-  static const String favoriteSectionTitle = '收藏频道';
+  void _focusAndReveal() {
+    _focusNode.requestFocus();
+    _scrollGroups(animate: false);
+    _scrollChannels(animate: false);
+  }
 
   @override
   void didUpdateWidget(covariant _LiveChannelDrawer oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.channels, widget.channels) ||
         !setEquals(oldWidget.favoriteKeys, widget.favoriteKeys)) {
-      _rebuildEntryCache();
+      _rebuildGroups();
+      if (_groupIndex >= _groups.length) _groupIndex = 0;
       if (_cursor >= widget.channels.length) {
         _cursor = widget.channels.isEmpty ? 0 : widget.channels.length - 1;
       }
+      if (!identical(oldWidget.channels, widget.channels)) _syncToCurrent();
     }
     if (widget.open && !oldWidget.open) {
-      _cursor = widget.currentIndex;
-      _cursorRowId = null;
-      _afterFrame(() {
-        _focusNode.requestFocus();
-        _scrollToCursor();
-      });
+      _syncToCurrent();
+      _afterFrame(_focusAndReveal);
     } else if (!widget.open && oldWidget.open) {
-      _focusNode.unfocus();
+      // 焦点交还给外层（播放器），收起后 ← / → 切台、Esc 返回照常可用。
+      _focusNode.unfocus(disposition: UnfocusDisposition.previouslyFocusedChild);
+      _groupHover = -1;
     } else if (widget.open && widget.currentIndex != oldWidget.currentIndex) {
-      _cursor = widget.currentIndex;
-      _cursorRowId = null;
-      _afterFrame(_scrollToCursor);
+      _syncToCurrent();
+      _afterFrame(() {
+        _scrollGroups(animate: false);
+        _scrollChannels(animate: false);
+      });
     }
   }
 
@@ -278,8 +332,63 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
   @override
   void dispose() {
     _focusNode.dispose();
-    _scrollController.dispose();
+    _groupScroll.dispose();
+    _channelScroll.dispose();
     super.dispose();
+  }
+
+  void _rebuildGroups() {
+    final channels = widget.channels;
+    final favorites = <int>[];
+    final order = <String, int>{};
+    final titles = <String>[];
+    final buckets = <List<int>>[];
+    final groupOf = List<int>.filled(channels.length, 0);
+    for (var i = 0; i < channels.length; i++) {
+      final channel = channels[i];
+      if (widget.favoriteKeys.any(channel.matchesKey)) favorites.add(i);
+      final name = channel.groupName;
+      final bucket = order.putIfAbsent(name, () {
+        titles.add(name);
+        buckets.add(<int>[]);
+        return buckets.length - 1;
+      });
+      buckets[bucket].add(i);
+      groupOf[i] = bucket + 1;
+    }
+    _groups = [
+      _LiveGroup(favoriteSectionTitle, favorites, favorites: true),
+      for (var k = 0; k < titles.length; k++) _LiveGroup(titles[k], buckets[k]),
+    ];
+    _groupOfChannel = groupOf;
+  }
+
+  bool _validChannel(int index) =>
+      index >= 0 && index < widget.channels.length;
+
+  /// 打开 / 切台时：右栏回到正在播放频道所在的真实分组，光标落在它上面。
+  void _syncToCurrent() {
+    _column = _DrawerColumn.channels;
+    final current = widget.currentIndex;
+    if (_validChannel(current)) {
+      _groupIndex = _groupOfChannel[current];
+      _cursor = current;
+      return;
+    }
+    final first = _groups.indexWhere((g) => g.channels.isNotEmpty);
+    _groupIndex = first < 0 ? 0 : first;
+    _cursor = first < 0 ? 0 : _groups[first].channels.first;
+  }
+
+  List<int> get _shownChannels => _groups[_groupIndex].channels;
+
+  /// 切到某个分组时光标的落点：正在播放的频道在组内就停在它上面，否则第一项。
+  int _cursorFor(_LiveGroup group) {
+    if (group.channels.isEmpty) return _cursor;
+    if (group.channels.contains(widget.currentIndex)) {
+      return widget.currentIndex;
+    }
+    return group.channels.first;
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -287,17 +396,35 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
       return KeyEventResult.ignored;
     }
     final key = event.logicalKey;
-    if (key == LogicalKeyboardKey.arrowDown) {
-      _moveCursor(1);
+    if (key == LogicalKeyboardKey.arrowDown ||
+        key == LogicalKeyboardKey.arrowUp) {
+      final delta = key == LogicalKeyboardKey.arrowDown ? 1 : -1;
+      if (_column == _DrawerColumn.groups) {
+        _moveGroup(delta);
+      } else {
+        _moveChannel(delta);
+      }
       return KeyEventResult.handled;
     }
-    if (key == LogicalKeyboardKey.arrowUp) {
-      _moveCursor(-1);
+    // ←/→ 只在两栏之间切换；一律吞掉，免得播放器同时切台或快进。
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      if (_column != _DrawerColumn.groups) {
+        setState(() => _column = _DrawerColumn.groups);
+        _scrollGroups();
+      }
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      _enterChannels();
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.numpadEnter) {
-      widget.onSelect(_cursor);
+      if (_column == _DrawerColumn.groups) {
+        _enterChannels();
+      } else if (_shownChannels.contains(_cursor)) {
+        widget.onSelect(_cursor);
+      }
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.escape) {
@@ -307,117 +434,100 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
     return KeyEventResult.ignored;
   }
 
-  /// 键盘移动光标：在**行序列**上移动（收藏小节的行也参与），
-  /// 因此键盘可以选中置顶小节里的快捷入口。
-  void _moveCursor(int delta) {
-    if (_entries.isEmpty) return;
-    final currentRow = _cursorRowId;
-    var index = currentRow == null
-        ? -1
-        : _entries.indexWhere((e) => e.rowId == currentRow);
-    if (index < 0) index = _entries.indexWhere((e) => e.rowId == 'm:$_cursor');
-    if (index < 0) index = 0;
-
-    var next = index + delta;
-    // 跳过标题行与提示行，只停在可选的频道行上。
-    while (next >= 0 && next < _entries.length && !_entries[next].isChannel) {
-      next += delta;
-    }
-    if (next < 0 || next >= _entries.length) return;
-
-    final entry = _entries[next];
+  void _enterChannels() {
+    if (_column == _DrawerColumn.channels) return;
+    final group = _groups[_groupIndex];
+    if (group.channels.isEmpty) return;
     setState(() {
-      _cursorRowId = entry.rowId;
-      _cursor = entry.channelIndex!;
+      _column = _DrawerColumn.channels;
+      if (!group.channels.contains(_cursor)) _cursor = _cursorFor(group);
     });
-    _scrollToRow(next);
+    _scrollChannels();
   }
 
-  void _rebuildEntryCache() {
-    final entries = <_DrawerEntry>[];
-    final channelEntryIndex = List<int>.filled(widget.channels.length, 0);
-    final assigned = List<bool>.filled(widget.channels.length, false);
-    final tops = <double>[];
-    var offset = 0.0;
-
-    // 置顶「收藏频道」小节（§34）：一直显示，空时给引导。
-    tops.add(offset);
-    entries.add(const _DrawerEntry.header(favoriteSectionTitle));
-    offset += _headerHeight;
-    var favoriteCount = 0;
-    for (var i = 0; i < widget.channels.length; i++) {
-      final channel = widget.channels[i];
-      if (!widget.favoriteKeys.contains(channel.key)) continue;
-      tops.add(offset);
-      channelEntryIndex[i] = entries.length;
-      assigned[i] = true;
-      entries.add(_DrawerEntry.channel(i, channel, quickEntry: true));
-      offset += _itemHeight;
-      favoriteCount++;
-    }
-    if (favoriteCount == 0) {
-      tops.add(offset);
-      entries.add(const _DrawerEntry.hint('还没有收藏频道，点「管理频道」加星标'));
-      offset += _itemHeight;
-    }
-
-    String? lastGroup;
-    for (var i = 0; i < widget.channels.length; i++) {
-      final channel = widget.channels[i];
-      final group = channel.groupName;
-      if (group != lastGroup) {
-        tops.add(offset);
-        entries.add(_DrawerEntry.header(group));
-        offset += _headerHeight;
-        lastGroup = group;
-      }
-      tops.add(offset);
-      // 收藏过的频道在置顶小节里已经出现过，滚动定位仍指第一次出现的位置。
-      if (!assigned[i]) channelEntryIndex[i] = entries.length;
-      entries.add(_DrawerEntry.channel(i, channel));
-      offset += _itemHeight;
-    }
-    _entries = entries;
-    _channelEntryIndex = channelEntryIndex;
-    _entryTops = tops;
+  /// 分组栏 ↑/↓：右栏随之切换（TVBox 行为）。
+  void _moveGroup(int delta) {
+    final next = _groupIndex + delta;
+    if (next < 0 || next >= _groups.length) return;
+    _showGroup(next, column: _DrawerColumn.groups);
   }
 
-  /// 光标所在行的滚动定位：有行身份时按该行，否则退回「该频道第一次出现」的行。
-  void _scrollToCursor() {
-    if (!_scrollController.hasClients) return;
-    var rowIndex = -1;
-    final rowId = _cursorRowId;
-    if (rowId != null) {
-      rowIndex = _entries.indexWhere((e) => e.rowId == rowId);
+  /// 频道栏 ↑/↓：到分组边界时接着走到相邻的非空分组。
+  void _moveChannel(int delta) {
+    final list = _shownChannels;
+    final pos = list.indexOf(_cursor);
+    final next = pos < 0 ? (delta > 0 ? 0 : list.length - 1) : pos + delta;
+    if (next >= 0 && next < list.length) {
+      setState(() => _cursor = list[next]);
+      _scrollChannels();
+      return;
     }
-    if (rowIndex < 0) {
-      if (_cursor < 0 || _cursor >= _channelEntryIndex.length) return;
-      rowIndex = _channelEntryIndex[_cursor];
+    var g = _groupIndex + delta;
+    while (g >= 0 && g < _groups.length && _groups[g].channels.isEmpty) {
+      g += delta;
     }
-    if (rowIndex < 0 || rowIndex >= _entryTops.length) return;
-    _scrollToRow(rowIndex);
+    if (g < 0 || g >= _groups.length) return;
+    final target = _groups[g].channels;
+    setState(() {
+      _groupIndex = g;
+      _cursor = delta > 0 ? target.first : target.last;
+    });
+    _afterFrame(() {
+      _scrollGroups();
+      _scrollChannels(animate: false);
+    });
   }
 
-  /// 按**行下标**滚动到目标行（键盘在行序列上移动时用）。
-  void _scrollToRow(int rowIndex) {
-    if (!_scrollController.hasClients) return;
-    if (rowIndex < 0 || rowIndex >= _entryTops.length) return;
-    final offset = _entryTops[rowIndex];
-    final position = _scrollController.position;
-    final target = (offset - position.viewportDimension / 2 + _itemHeight)
+  void _showGroup(int index, {required _DrawerColumn column}) {
+    final group = _groups[index];
+    setState(() {
+      _groupIndex = index;
+      _column = column;
+      _cursor = _cursorFor(group);
+    });
+    _afterFrame(() {
+      _scrollGroups();
+      _scrollChannels(animate: false);
+    });
+  }
+
+  void _tapGroup(int index) {
+    _focusNode.requestFocus();
+    _showGroup(index, column: _DrawerColumn.groups);
+  }
+
+  void _scrollGroups({bool animate = true}) {
+    _scrollTo(_groupScroll, _groupIndex * _groupItemHeight, _groupItemHeight,
+        animate);
+  }
+
+  void _scrollChannels({bool animate = true}) {
+    final pos = _shownChannels.indexOf(_cursor);
+    if (pos < 0) {
+      if (_channelScroll.hasClients) _channelScroll.jumpTo(0);
+      return;
+    }
+    _scrollTo(_channelScroll, pos * _itemHeight, _itemHeight, animate);
+  }
+
+  void _scrollTo(
+      ScrollController controller, double top, double extent, bool animate) {
+    if (!controller.hasClients) return;
+    final position = controller.position;
+    final target = (top + _listPadding - position.viewportDimension / 2 + extent)
         .clamp(0.0, position.maxScrollExtent)
         .toDouble();
-    _scrollController.animateTo(
-      target,
-      duration: AppMotion.enter,
-      curve: AppMotion.ease,
-    );
+    if (animate) {
+      controller.animateTo(target,
+          duration: AppMotion.enter, curve: AppMotion.ease);
+    } else {
+      controller.jumpTo(target);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
-    final entries = _entries;
 
     return Focus(
       focusNode: _focusNode,
@@ -426,11 +536,14 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
           child: Container(
+            key: const ValueKey('live-channel-drawer-panel'),
+            // 跟随主题（与选集 / 播放设置抽屉同一套 player 色）：
+            // 浅色主题下原先写死的深底会整块发黑（issue #10-②）。
             decoration: BoxDecoration(
-              color: const Color(0xE0101014),
+              color: palette.playerChrome,
               border: Border(
                 right: BorderSide(
-                  color: Colors.white.withValues(alpha: 0.12),
+                  color: palette.playerText.withValues(alpha: 0.12),
                   width: 1,
                 ),
               ),
@@ -445,95 +558,33 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 顶部控制条带留白（避开播放器顶栏返回与标题）
                 const SizedBox(height: _topBarInset),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 12, 10),
-                  child: Row(
-                    children: [
-                      // 微型图标胶囊底座
-                      Container(
-                        width: 30,
-                        height: 30,
-                        decoration: BoxDecoration(
-                          color: palette.accentWash,
-                          borderRadius: BorderRadius.circular(AppRadii.sm),
-                          border: Border.all(
-                            color: palette.accentInk.withValues(alpha: 0.3),
-                            width: 0.8,
-                          ),
-                        ),
-                        child: Center(
-                          child: Icon(
-                            Icons.live_tv_rounded,
-                            size: 16,
-                            color: palette.accentInk,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: AppSpacing.sm),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '直播频道',
-                              style: TextStyle(
-                                color: palette.playerText,
-                                fontSize: AppType.title,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: -0.2,
-                              ),
-                            ),
-                            Text(
-                              '共 ${widget.channels.length} 个电台',
-                              style: TextStyle(
-                                color: palette.playerText.withValues(alpha: 0.55),
-                                fontSize: AppType.caption,
-                                fontFeatures: const [
-                                  FontFeature.tabularFigures(),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      FocusOutline(
-                        radius: AppRadii.pill,
-                        child: IconButton(
-                          icon: Icon(
-                            Icons.tune_rounded,
-                            size: 18,
-                            color: palette.playerText.withValues(alpha: 0.85),
-                          ),
-                          tooltip: '管理直播频道',
-                          onPressed: widget.onManage,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                _buildHeader(palette),
                 Divider(
                   height: 1,
                   thickness: 1,
-                  color: Colors.white.withValues(alpha: 0.08),
+                  color: palette.playerText.withValues(alpha: 0.08),
                 ),
                 Expanded(
-                  child: ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.only(
-                      top: 8,
-                      bottom: 8 + _bottomBarInset,
-                    ),
-                    itemCount: entries.length,
-                    // 行高只有两档（分组头 34 / 频道行 44）。不给固定 extent 时，
-                    // 拖动滚动条跳到列表深处会让 SliverList 逐个 child 布局去估算
-                    // 偏移，频道上千就是一次长卡顿；给出 extent 后跳转是 O(1)。
-                    itemExtentBuilder: (index, _) => entries[index].isHeader
-                        ? _headerHeight
-                        : _itemHeight,
-                    itemBuilder: (context, index) =>
-                        _buildEntry(palette, entries[index]),
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final groupWidth =
+                          (constraints.maxWidth * 0.34).clamp(92.0, 132.0);
+                      return Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          SizedBox(
+                            width: groupWidth,
+                            child: _buildGroupColumn(palette),
+                          ),
+                          Container(
+                            width: 1,
+                            color: palette.playerText.withValues(alpha: 0.08),
+                          ),
+                          Expanded(child: _buildChannelColumn(palette)),
+                        ],
+                      );
+                    },
                   ),
                 ),
               ],
@@ -544,71 +595,242 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
     );
   }
 
-  Widget _buildEntry(AppPalette palette, _DrawerEntry entry) {
-    if (entry.isHint) {
-      return Container(
-        height: _itemHeight,
-        padding: const EdgeInsets.fromLTRB(18, 6, 14, 6),
-        alignment: Alignment.centerLeft,
-        child: Text(
-          entry.hint!,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: palette.playerText.withValues(alpha: 0.45),
-            fontSize: AppType.caption,
+  Widget _buildHeader(AppPalette palette) {
+    final sourceNav = widget.sourceNav;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildTitleRow(palette),
+          if (sourceNav != null) ...[
+            const SizedBox(height: AppSpacing.sm),
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: LiveSourcePicker(nav: sourceNav),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTitleRow(AppPalette palette) {
+    return Row(
+        children: [
+          Container(
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              color: palette.accentWash,
+              borderRadius: BorderRadius.circular(AppRadii.sm),
+              border: Border.all(
+                color: palette.accentInk.withValues(alpha: 0.3),
+                width: 0.8,
+              ),
+            ),
+            child: Center(
+              child: Icon(
+                Icons.live_tv_rounded,
+                size: 16,
+                color: palette.accentInk,
+              ),
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '直播频道',
+                  style: TextStyle(
+                    color: palette.playerText,
+                    fontSize: AppType.title,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+                Text(
+                  '共 ${widget.channels.length} 个电台 · '
+                  '${_groups.length - 1} 个分组',
+                  style: TextStyle(
+                    color: palette.playerText.withValues(alpha: 0.55),
+                    fontSize: AppType.caption,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          FocusOutline(
+            radius: AppRadii.pill,
+            child: IconButton(
+              icon: Icon(
+                Icons.tune_rounded,
+                size: 18,
+                color: palette.playerText.withValues(alpha: 0.85),
+              ),
+              tooltip: '管理直播频道',
+              onPressed: widget.onManage,
+            ),
+          ),
+        ],
+    );
+  }
+
+  Widget _buildGroupColumn(AppPalette palette) {
+    return ListView.builder(
+      key: const ValueKey('live-group-list'),
+      controller: _groupScroll,
+      padding: const EdgeInsets.only(
+        top: _listPadding,
+        bottom: _listPadding + _bottomBarInset,
+      ),
+      itemCount: _groups.length,
+      itemExtent: _groupItemHeight,
+      itemBuilder: (context, index) => _buildGroupRow(palette, index),
+    );
+  }
+
+  Widget _buildGroupRow(AppPalette palette, int index) {
+    final group = _groups[index];
+    final selected = index == _groupIndex;
+    final focused = selected && _column == _DrawerColumn.groups;
+    final hovered = index == _groupHover;
+    final current = widget.currentIndex;
+    final playingHere = !group.favorites &&
+        _validChannel(current) &&
+        _groupOfChannel[current] == index;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 2, 4, 2),
+      child: Semantics(
+        button: true,
+        selected: selected,
+        label: group.title,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) {
+            if (_groupHover != index) setState(() => _groupHover = index);
+          },
+          onExit: (_) {
+            if (_groupHover == index) setState(() => _groupHover = -1);
+          },
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => _tapGroup(index),
+            child: AnimatedContainer(
+              duration: selected ? AppMotion.enter : AppMotion.exit,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                color: selected
+                    ? palette.accentInk.withValues(alpha: 0.18)
+                    : (hovered
+                        ? palette.playerText.withValues(alpha: 0.06)
+                        : Colors.transparent),
+                borderRadius: BorderRadius.circular(AppRadii.sm),
+                border: Border.all(
+                  color: focused
+                      ? palette.accentInk.withValues(alpha: 0.55)
+                      : Colors.transparent,
+                  width: 1,
+                ),
+              ),
+              child: Row(
+                children: [
+                  if (group.favorites) ...[
+                    Icon(
+                      Icons.star_rounded,
+                      size: 14,
+                      color: palette.accentInk,
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                  Expanded(
+                    child: Text(
+                      group.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: selected
+                            ? palette.playerText
+                            : palette.playerText.withValues(alpha: 0.7),
+                        fontSize: AppType.body,
+                        fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                      ),
+                    ),
+                  ),
+                  if (playingHere) ...[
+                    Container(
+                      width: 5,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: palette.danger,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                  Text(
+                    '${group.channels.length}',
+                    style: TextStyle(
+                      color: palette.playerText.withValues(alpha: 0.4),
+                      fontSize: AppType.caption,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChannelColumn(AppPalette palette) {
+    final group = _groups[_groupIndex];
+    if (group.channels.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(14, 16, 14, 0),
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: Text(
+            group.favorites ? '还没有收藏频道，点「管理频道」加星标' : '这个分组没有频道',
+            style: TextStyle(
+              color: palette.playerText.withValues(alpha: 0.45),
+              fontSize: AppType.caption,
+            ),
           ),
         ),
       );
     }
-    if (entry.isHeader) {
-      return Container(
-        height: _headerHeight,
-        padding: const EdgeInsets.fromLTRB(16, 12, 14, 4),
-        child: Row(
-          children: [
-            Container(
-              width: 3,
-              height: 10,
-              decoration: BoxDecoration(
-                color: palette.accentInk.withValues(alpha: 0.6),
-                borderRadius: BorderRadius.circular(AppRadii.hairline),
-              ),
-            ),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                entry.group!,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: palette.playerText.withValues(alpha: 0.65),
-                  fontSize: AppType.caption,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.2,
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-    final i = entry.channelIndex!;
-    final channel = entry.channel!;
-    // §34-R：置顶「收藏频道」小节只是快捷入口，不参与**播放高亮** ——
-    // 否则同一频道会在置顶小节和下方主列表两处同时挂「正在播出」红点。
-    // §34-R2：但它自己可以被光标选中（悬停态只在这一行显示），两行互不联动。
-    final isQuickEntry = entry.quickEntry;
-    final isCurrent = !isQuickEntry && i == widget.currentIndex;
-    final isCursor = _cursorRowId != null
-        ? entry.rowId == _cursorRowId
-        : (!isQuickEntry && i == _cursor);
+    final list = group.channels;
+    return ListView.builder(
+      key: const ValueKey('live-channel-list'),
+      controller: _channelScroll,
+      padding: const EdgeInsets.only(
+        top: _listPadding,
+        bottom: _listPadding + _bottomBarInset,
+      ),
+      itemCount: list.length,
+      // 所有行同高：拖动滚动条跳到深处是 O(1)，频道上千也不卡。
+      itemExtent: _itemHeight,
+      itemBuilder: (context, pos) => _buildChannelRow(palette, list[pos]),
+    );
+  }
+
+  Widget _buildChannelRow(AppPalette palette, int i) {
+    final channel = widget.channels[i];
+    final isCurrent = i == widget.currentIndex;
+    final isCursor = _column == _DrawerColumn.channels && i == _cursor;
 
     // 台号格式化：三位对齐
     final channelNumber = (i + 1).toString().padLeft(3, '0');
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       child: FocusRing(
         onTap: () => widget.onSelect(i),
         borderRadius: BorderRadius.circular(AppRadii.sm),
@@ -616,10 +838,10 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
         child: MouseRegion(
           cursor: SystemMouseCursors.click,
           onEnter: (_) {
-            if (entry.rowId == _cursorRowId) return;
+            if (i == _cursor && _column == _DrawerColumn.channels) return;
             setState(() {
-              _cursorRowId = entry.rowId;
               _cursor = i;
+              _column = _DrawerColumn.channels;
             });
           },
           child: GestureDetector(
@@ -627,36 +849,32 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
             onTap: () => widget.onSelect(i),
             child: AnimatedContainer(
               duration: isCursor || isCurrent ? AppMotion.enter : AppMotion.exit,
-              height: _itemHeight - 4,
               padding: const EdgeInsets.symmetric(horizontal: 8),
               decoration: BoxDecoration(
                 color: isCurrent
                     ? palette.accentInk.withValues(alpha: 0.22)
                     : (isCursor
-                        ? Colors.white.withValues(alpha: 0.08)
+                        ? palette.playerText.withValues(alpha: 0.08)
                         : Colors.transparent),
                 borderRadius: BorderRadius.circular(AppRadii.sm),
                 border: Border.all(
                   color: isCurrent
                       ? palette.accentInk.withValues(alpha: 0.45)
                       : (isCursor
-                          ? Colors.white.withValues(alpha: 0.12)
+                          ? palette.playerText.withValues(alpha: 0.12)
                           : Colors.transparent),
                   width: 1,
                 ),
               ),
               child: Row(
                 children: [
-                  // 三位台号微胶囊
                   Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 5,
-                      vertical: 2,
-                    ),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
                     decoration: BoxDecoration(
                       color: isCurrent
                           ? palette.accentInk.withValues(alpha: 0.25)
-                          : Colors.white.withValues(alpha: 0.06),
+                          : palette.playerText.withValues(alpha: 0.06),
                       borderRadius: BorderRadius.circular(AppRadii.xs),
                     ),
                     child: Text(
@@ -667,14 +885,11 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
                             : palette.playerText.withValues(alpha: 0.45),
                         fontSize: AppType.caption,
                         fontWeight: FontWeight.w600,
-                        fontFeatures: const [
-                          FontFeature.tabularFigures(),
-                        ],
+                        fontFeatures: const [FontFeature.tabularFigures()],
                       ),
                     ),
                   ),
                   const SizedBox(width: 8),
-                  // 频道名称
                   Expanded(
                     child: Text(
                       channel.name,
@@ -682,14 +897,14 @@ class _LiveChannelDrawerState extends State<_LiveChannelDrawer> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: isCurrent
-                            ? Colors.white
+                            ? palette.playerText
                             : palette.playerText.withValues(alpha: 0.85),
                         fontSize: AppType.body,
-                        fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
+                        fontWeight:
+                            isCurrent ? FontWeight.w600 : FontWeight.w400,
                       ),
                     ),
                   ),
-                  // 当前播放热标
                   if (isCurrent) ...[
                     Container(
                       width: 6,

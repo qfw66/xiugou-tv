@@ -81,6 +81,32 @@ public final class LineProcess implements AutoCloseable {
         return line;
     }
 
+    /**
+     * 与 {@link #readLine(long)} 相同，但调用线程被 interrupt 时不放弃等待，直到拿到行或超时，
+     * 返回前再恢复中断标记。
+     *
+     * <p>一问一答的协议里，请求已写出后半途放弃会让子进程的应答错位，调用方只能杀掉重启；
+     * 而调用方（如载荷读本地登录态时的解密）拿到 null 会把它当成永久结果缓存下来。
+     * 等待本身有超时上限，所以不必响应中断。
+     */
+    public String readLineIgnoringInterrupt(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + Math.max(1, timeoutMs);
+        boolean interrupted = false;
+        try {
+            while (true) {
+                long left = deadline - System.currentTimeMillis();
+                if (left <= 0) return null;
+                try {
+                    return readLine(left);
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
+
     /** 子进程 stdout 是否已结束。 */
     public boolean isEof() {
         return eof;

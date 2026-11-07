@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import '../../../core/danmaku/danmaku_layout.dart';
+import '../../../core/danmaku/danmaku_merge.dart';
 import '../../../core/danmaku/danmaku_models.dart';
 import '../../../core/danmaku/danmaku_settings.dart';
 
@@ -73,7 +74,21 @@ bool danmakuAccepted(DanmakuSettings s, DanmakuItem item) {
       if (s.blockAdvanced) return false;
   }
   if (s.blockColorful && (item.color & 0xFFFFFF) != 0xFFFFFF) return false;
+  if (s.density > 1 && _sampleHash(item) % s.density != 0) return false;
   return true;
+}
+
+/// 按「文本 + 时间」算的稳定哈希：同一条弹幕每次抽样结果相同（拖动 / 重看显示同一批）。
+int _sampleHash(DanmakuItem item) {
+  var h = 0x811C9DC5;
+  for (final unit in item.text.codeUnits) {
+    h = ((h ^ unit) * 0x01000193) & 0xFFFFFFFF;
+  }
+  h = ((h ^ (item.time * 1000).round()) * 0x01000193) & 0xFFFFFFFF;
+  h ^= h >> 16;
+  h = (h * 0x7FEB352D) & 0xFFFFFFFF;
+  h ^= h >> 15;
+  return h;
 }
 
 class _DanmakuLayerState extends State<DanmakuLayer> with SingleTickerProviderStateMixin {
@@ -90,6 +105,11 @@ class _DanmakuLayerState extends State<DanmakuLayer> with SingleTickerProviderSt
 
   /// 文本排版缓存（同一条弹幕只排版一次；离屏即释放）
   final Map<DanmakuItem, TextPainter> _painters = {};
+
+  /// 「合并重复弹幕」打开时排布的是合并后的轨道：每条轨道只算一次（载入 / 首次打开时），不逐帧算
+  DanmakuTrack? _merged;
+  DanmakuTrack get _track =>
+      widget.settings.mergeDuplicates ? (_merged ??= mergeDuplicateDanmaku(widget.track)) : widget.track;
 
   double get _fontSize => widget.fontSize ?? widget.settings.fontSize;
   double get _area => widget.area ?? widget.settings.area;
@@ -124,7 +144,9 @@ class _DanmakuLayerState extends State<DanmakuLayer> with SingleTickerProviderSt
         old.settings != widget.settings ||
         (old.area ?? old.settings.area) != _area ||
         old.maxPerSecond != widget.maxPerSecond;
-    if (old.track != widget.track) {
+    if (old.track != widget.track) _merged = null;
+    // 换轨道或切换合并：排布器换一条轨道重建（重建时按当前时间 seek，拖动 / 重看结果不变）
+    if (old.track != widget.track || old.settings.mergeDuplicates != widget.settings.mergeDuplicates) {
       _disposePainters();
       _layout = null;
     } else if (layoutChanged) {
@@ -213,7 +235,7 @@ class _DanmakuLayerState extends State<DanmakuLayer> with SingleTickerProviderSt
         final size = constraints.biggest;
         if (size.width <= 0 || size.height <= 0) return const SizedBox.shrink();
         if (_layout == null) {
-          _layout = DanmakuLayout(widget.track, _config(size), measure: (i) => _painterFor(i).width);
+          _layout = DanmakuLayout(_track, _config(size), measure: (i) => _painterFor(i).width);
           _layout!.seek(_time.value);
         } else if (size != _size) {
           _layout!.reset(_config(size), _time.value);

@@ -21,11 +21,18 @@ public final class PySpider extends com.github.catvod.crawler.Spider {
     private final String api;
     private final String defaultExt;
     private final File cacheDir;
+    private final String scriptSiteKey;
+    private final String scriptProxyBase;
+    private final String scriptDanmakuBase;
+    private final String proxyToken = java.util.UUID.randomUUID().toString();
+    private volatile boolean destroyed;
+    private final Object startupLifecycle = new Object();
+    private Thread startingThread;
 
     /** 死亡 / 加载失败后的最多重启次数：坏脚本不该被无限拉起（被进程池淘汰不计入）。 */
     static final int MAX_RESTARTS = 3;
 
-    private PyRuntime runtime;
+    private volatile PyRuntime runtime;
     private String unavailable;
     private String ext;
     private int restarts;
@@ -35,11 +42,27 @@ public final class PySpider extends com.github.catvod.crawler.Spider {
     private final java.util.concurrent.atomic.AtomicInteger inFlight = new java.util.concurrent.atomic.AtomicInteger();
 
     public PySpider(String api, String ext, File cacheDir) {
+        this(api, ext, cacheDir, "", "");
+    }
+
+    public PySpider(String api, String ext, File cacheDir, String siteKey, String proxyBase) {
+        this(api, ext, cacheDir, siteKey, proxyBase, "");
+    }
+
+    public PySpider(String api, String ext, File cacheDir, String siteKey, String proxyBase, String danmakuBase) {
         this.api = api == null ? "" : api.trim();
         this.defaultExt = ext == null ? "" : ext;
         this.ext = this.defaultExt;
         this.cacheDir = cacheDir;
+        this.scriptSiteKey = siteKey == null ? "" : siteKey;
+        this.scriptProxyBase = proxyBase == null || proxyBase.isEmpty() ? ""
+                : proxyBase + "?token=" + proxyToken;
+        this.scriptDanmakuBase = danmakuBase == null || danmakuBase.isEmpty() ? ""
+                : danmakuBase + "?token=" + proxyToken;
     }
+
+    public String proxyToken() { return proxyToken; }
+    public String scriptSiteKey() { return scriptSiteKey; }
 
     /** api 是否指向 Python 脚本。 */
     public static boolean isPythonApi(String api) {
@@ -66,26 +89,42 @@ public final class PySpider extends com.github.catvod.crawler.Spider {
 
     /** 拉起子进程；失败只记录原因（见类注释）。调用方须持有 this 锁。 */
     private void startRuntime() {
+        synchronized (startupLifecycle) {
+            if (destroyed || Thread.currentThread().isInterrupted()) return;
+            startingThread = Thread.currentThread();
+        }
         try {
             File script = PyRuntime.ensureScript(api, cacheDir);
+            if (destroyed || Thread.currentThread().isInterrupted()) return;
             File log = new File(cacheDir, "py-" + PyRuntime.md5(api) + ".log");
-            runtime = PyRuntime.start(script, ext, log);
+            runtime = PyRuntime.start(script, ext, log, scriptSiteKey, api, scriptProxyBase, scriptDanmakuBase);
+            if (destroyed) {
+                runtime.close();
+                runtime = null;
+                return;
+            }
             unavailable = null;
             System.out.println("[PySpider] ready: " + api + " -> " + script.getName());
+            // Registration and retirement share this short lock; the pool evicts asynchronously.
+            synchronized (startupLifecycle) {
+                if (!destroyed) PyProcessPool.admitLater(this);
+            }
         } catch (Throwable t) {
             runtime = null;
             unavailable = String.valueOf(t);
             System.err.println("[PySpider] 不可用 " + api + " : " + t);
-            return;
+        } finally {
+            synchronized (startupLifecycle) { startingThread = null; }
         }
-        // 必须在 this 锁外做淘汰：被淘汰者要拿它自己的锁（见 PyProcessPool 类注释）
-        PyProcessPool.admitLater(this);
     }
 
     /**
      * 取可用的运行时：存活直接用；死亡 / 加载失败按次数惰性重启；被进程池淘汰则直接重启。
      */
     private synchronized PyRuntime acquire() {
+        if (destroyed || Thread.currentThread().isInterrupted()) {
+            throw new IllegalStateException("script instance is no longer active");
+        }
         if (runtime != null && runtime.isAlive()) return runtime;
         if (runtime != null) {
             runtime.close();
@@ -124,13 +163,17 @@ public final class PySpider extends com.github.catvod.crawler.Spider {
 
     @Override
     public void destroy() {
-        PyProcessPool.forget(this);
-        synchronized (this) {
-            if (runtime != null) {
-                runtime.close();
-                runtime = null;
-            }
+        synchronized (startupLifecycle) {
+            destroyed = true;
+            // A proxy may be restarting an evicted child outside the RPC watchdog registry.
+            // Interrupt while holding the registration lock so the thread cannot be reused first.
+            if (startingThread != null && startingThread != Thread.currentThread()) startingThread.interrupt();
         }
+        PyProcessPool.forget(this);
+        // Do not wait for init's monitor. A process still starting is closed by its interrupted
+        // startup path; one published concurrently is closed by startRuntime's destroyed check.
+        PyRuntime current = runtime;
+        if (current != null) current.close();
     }
 
     // ------------------------------------------------------------------ 转发
@@ -139,7 +182,10 @@ public final class PySpider extends com.github.catvod.crawler.Spider {
         inFlight.incrementAndGet();
         try {
             PyRuntime rt = acquire();
-            PyProcessPool.touch(this);
+            synchronized (startupLifecycle) {
+                if (destroyed) throw new IllegalStateException("script instance is no longer active");
+                PyProcessPool.touch(this);
+            }
             // 脚本没实现的可选方法（liveContent / action / homeVideoContent 等）按基类默认返回 null
             if (!rt.hasMethod(method)) return null;
             return rt.callJson(method, args == null ? new ArrayList<>() : Arrays.asList(args));
@@ -187,7 +233,7 @@ public final class PySpider extends com.github.catvod.crawler.Spider {
 
     @Override
     public String liveContent(String url) throws Exception {
-        return call("liveContent", url);
+        return PyProxyAddress.normalize(call("liveContent", url), scriptProxyBase, proxyToken, scriptSiteKey);
     }
 
     @Override
@@ -205,9 +251,56 @@ public final class PySpider extends com.github.catvod.crawler.Spider {
         return false;
     }
 
+    /** Pins the exact child until its subscription closes; no event can reacquire a replacement. */
+    public PyRuntime.DanmakuSession openDanmaku(String id, PyRuntime.DanmakuListener listener) {
+        inFlight.incrementAndGet();
+        boolean retained = false;
+        try {
+            PyRuntime rt = acquire();
+            synchronized (startupLifecycle) {
+                if (destroyed) throw new IllegalStateException("script instance is no longer active");
+                PyProcessPool.touch(this);
+            }
+            PyRuntime.DanmakuSession session = rt.openDanmaku(id, listener, inFlight::decrementAndGet);
+            retained = true;
+            return session;
+        } finally {
+            if (!retained) inFlight.decrementAndGet();
+        }
+    }
+
+    public PyProxyResponse callProxy(java.util.Map<String, String> params) throws Exception {
+        inFlight.incrementAndGet();
+        boolean retained = false;
+        try {
+            PyRuntime rt = acquire();
+            synchronized (startupLifecycle) {
+                if (destroyed) throw new IllegalStateException("script instance is no longer active");
+                PyProcessPool.touch(this);
+            }
+            String result = rt.callJson("proxy", java.util.Collections.singletonList(params));
+            PyProxyResponse response;
+            try {
+                response = PyProxyResponse.decode(result, rt, inFlight::decrementAndGet);
+            } catch (RuntimeException malformed) {
+                rt.close();
+                throw malformed;
+            }
+            retained = response.contentLength < 0;
+            return response;
+        } finally {
+            if (!retained) inFlight.decrementAndGet();
+        }
+    }
+
     @Override
     public Object[] proxy(java.util.Map<String, String> params) {
-        return null;
+        try {
+            PyProxyResponse response = callProxy(params);
+            return new Object[] { response.status, response.mime, response.body, response.headers };
+        } catch (Exception error) {
+            throw new IllegalStateException("script proxy failed");
+        }
     }
 
     public String api() {

@@ -389,10 +389,16 @@ public final class GuardCryptoService {
         return command;
     }
 
-    /** 带超时的 readLine；超时或子进程已退出返回 null。 */
-    private static String readLineWithTimeout(long timeoutMs) throws Exception {
+    /**
+     * 带超时的 readLine；超时或子进程已退出返回 null。
+     *
+     * <p>不响应调用线程的 interrupt（看门狗超时会 interrupt worker）：载荷构造单例时只解密一次本地登录态，
+     * 这次返回 null 时宿主会把密文原样交回，载荷 Gson 解析失败后登录态对象一直为 null，
+     * 直到类加载器被重建前每次 homeContent 都 NPE。
+     */
+    private static String readLineWithTimeout(long timeoutMs) {
         LineProcess current = channel;
-        return current == null ? null : current.readLine(timeoutMs);
+        return current == null ? null : current.readLineIgnoringInterrupt(timeoutMs);
     }
 
     /** 先杀进程再收通道（顺序见 {@link LineProcess} 类注释），不会因子进程挂起而卡住。 */

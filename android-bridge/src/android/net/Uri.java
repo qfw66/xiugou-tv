@@ -25,20 +25,100 @@ public class Uri {
 
     public static final Uri EMPTY = new Uri("", null);
 
+    /** RFC 3986 附录 B 的通用拆分正则，任何字符串都能匹配。 */
+    private static final java.util.regex.Pattern RFC3986 = java.util.regex.Pattern.compile(
+            "^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\\?([^#]*))?(#(.*))?");
+
     private final String raw;
     private final java.net.URI parsed;
+    /** {@code java.net.URI} 拒绝的串（如查询里含 {@code |}）按 RFC 3986 宽松拆出的各段。 */
+    private final Lenient lenient;
 
     private Uri(String raw, java.net.URI parsed) {
         this.raw = raw == null ? "" : raw;
         this.parsed = parsed;
+        this.lenient = parsed == null && !this.raw.isEmpty() ? Lenient.of(this.raw) : null;
     }
 
+    /**
+     * 与 Android 一样宽松：{@code java.net.URI} 拒绝的串也能取到 scheme/host/path/query。
+     *
+     * <p>issue #11：夸克扫码地址查询里含 {@code |}，严格解析失败时 host 为 null，载荷的
+     * 「本机地址换局域网 IP」逻辑把它当成本机地址，二维码内容被改成 {@code //192.168.x.x}。
+     */
     public static Uri parse(String uriString) {
         if (uriString == null) return EMPTY;
         try {
             return new Uri(uriString, new java.net.URI(uriString));
         } catch (Exception e) {
             return new Uri(uriString, null);
+        }
+    }
+
+    private static final class Lenient {
+        final String scheme;
+        final String authority;
+        final String userInfo;
+        final String host;
+        final int port;
+        final String path;
+        final String query;
+        final String fragment;
+
+        private Lenient(String scheme, String authority, String path, String query, String fragment) {
+            this.scheme = scheme;
+            this.authority = authority;
+            this.path = path;
+            this.query = query;
+            this.fragment = fragment;
+            String ui = null;
+            String h = null;
+            int p = -1;
+            if (authority != null) {
+                String hostPort = authority;
+                int at = hostPort.lastIndexOf('@');
+                if (at >= 0) {
+                    ui = hostPort.substring(0, at);
+                    hostPort = hostPort.substring(at + 1);
+                }
+                String portText = null;
+                if (hostPort.startsWith("[")) {
+                    int close = hostPort.indexOf(']');
+                    if (close > 0) {
+                        h = hostPort.substring(0, close + 1);
+                        if (close + 1 < hostPort.length() && hostPort.charAt(close + 1) == ':') {
+                            portText = hostPort.substring(close + 2);
+                        }
+                    } else {
+                        h = hostPort;
+                    }
+                } else {
+                    int colon = hostPort.lastIndexOf(':');
+                    if (colon >= 0) {
+                        h = hostPort.substring(0, colon);
+                        portText = hostPort.substring(colon + 1);
+                    } else {
+                        h = hostPort;
+                    }
+                }
+                if (portText != null && !portText.isEmpty()) {
+                    try {
+                        p = Integer.parseInt(portText);
+                    } catch (NumberFormatException ignored) {
+                        p = -1;
+                    }
+                }
+                if (h != null && h.isEmpty()) h = null;
+            }
+            this.userInfo = ui;
+            this.host = h;
+            this.port = p;
+        }
+
+        static Lenient of(String raw) {
+            java.util.regex.Matcher m = RFC3986.matcher(raw);
+            if (!m.find()) return null;
+            return new Lenient(m.group(2), m.group(4), m.group(5), m.group(7), m.group(9));
         }
     }
 
@@ -81,55 +161,78 @@ public class Uri {
     }
 
     public String getScheme() {
-        return parsed != null ? parsed.getScheme() : null;
+        if (parsed != null) return parsed.getScheme();
+        return lenient != null ? lenient.scheme : null;
     }
 
     public String getHost() {
-        return parsed != null ? parsed.getHost() : null;
+        if (parsed != null) return parsed.getHost();
+        return lenient != null ? lenient.host : null;
     }
 
     public int getPort() {
-        return parsed != null ? parsed.getPort() : -1;
+        if (parsed != null) return parsed.getPort();
+        return lenient != null ? lenient.port : -1;
     }
 
     public String getAuthority() {
-        return parsed != null ? parsed.getAuthority() : null;
+        if (parsed != null) return parsed.getAuthority();
+        return lenient != null ? percentDecode(lenient.authority) : null;
     }
 
     public String getEncodedAuthority() {
-        return getAuthority();
+        if (parsed != null) return parsed.getAuthority();
+        return lenient != null ? lenient.authority : null;
     }
 
     public String getUserInfo() {
-        return parsed != null ? parsed.getUserInfo() : null;
+        if (parsed != null) return parsed.getUserInfo();
+        return lenient != null ? percentDecode(lenient.userInfo) : null;
     }
 
     public String getEncodedUserInfo() {
-        return parsed != null ? parsed.getRawUserInfo() : null;
+        if (parsed != null) return parsed.getRawUserInfo();
+        return lenient != null ? lenient.userInfo : null;
     }
 
     public String getPath() {
-        return parsed != null ? parsed.getPath() : null;
+        if (parsed != null) return parsed.getPath();
+        return lenient != null ? percentDecode(lenient.path) : null;
     }
 
     public String getEncodedPath() {
-        return parsed != null ? parsed.getRawPath() : null;
+        if (parsed != null) return parsed.getRawPath();
+        return lenient != null ? lenient.path : null;
     }
 
     public String getQuery() {
-        return parsed != null ? parsed.getQuery() : null;
+        if (parsed != null) return parsed.getQuery();
+        return lenient != null ? percentDecode(lenient.query) : null;
     }
 
     public String getEncodedQuery() {
-        return parsed != null ? parsed.getRawQuery() : null;
+        if (parsed != null) return parsed.getRawQuery();
+        return lenient != null ? lenient.query : null;
     }
 
     public String getFragment() {
-        return parsed != null ? parsed.getFragment() : null;
+        if (parsed != null) return parsed.getFragment();
+        return lenient != null ? percentDecode(lenient.fragment) : null;
     }
 
     public String getEncodedFragment() {
-        return parsed != null ? parsed.getRawFragment() : null;
+        if (parsed != null) return parsed.getRawFragment();
+        return lenient != null ? lenient.fragment : null;
+    }
+
+    /** 只解 {@code %XX}，不把 {@code +} 当空格（URI 语义）；解不了时原样返回。 */
+    private static String percentDecode(String s) {
+        if (s == null || s.indexOf('%') < 0) return s;
+        try {
+            return URLDecoder.decode(s.replace("+", "%2B"), "UTF-8");
+        } catch (Exception e) {
+            return s;
+        }
     }
 
     public List<String> getPathSegments() {

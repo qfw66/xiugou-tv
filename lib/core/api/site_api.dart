@@ -9,6 +9,7 @@ import '../companion/companion_process_manager.dart';
 import '../diagnostics/error_log.dart';
 import '../companion/companion_spider_api.dart';
 import '../config/models/vod_config.dart';
+import '../live/live_script_catalog.dart';
 import 'cms_json_api.dart';
 import 'models/vod_models.dart';
 import 'play_failure_text.dart';
@@ -166,6 +167,54 @@ class SiteApi {
     return false;
   }
 
+  Future<void>? _resettingSpiders;
+  int _scriptGeneration = 0;
+
+  Future<void> resetCompanionSpiders() {
+    _scriptGeneration++;
+    final previous = _resettingSpiders;
+    return _resettingSpiders = () async {
+      await previous;
+      await companionSpiderApi.resetSpiders();
+    }();
+  }
+
+  // 入口和扩展参与隔离；同一个显式 key 的不同脚本不能共享 Local 或代理。
+  Future<String> fetchLiveSource(Live source) async {
+    if (!source.isScripted) {
+      throw ArgumentError('直播源没有脚本 API');
+    }
+    final site = Site(
+      key: LiveScriptCatalog.sourceKey(source),
+      name: source.name,
+      type: 3,
+      api: source.api!.trim(),
+      ext: LiveScriptCatalog.encodeExt(source.ext),
+      header: source.headers,
+    );
+    Future<void>? reset;
+    do {
+      reset = _resettingSpiders;
+      await reset;
+    } while (!identical(reset, _resettingSpiders));
+    final generation = _scriptGeneration;
+    if (!await _ensureCompanionReady(site)) {
+      throw StateError(companionUnavailableText(source.name, companionManager.status));
+    }
+    if (generation != _scriptGeneration) {
+      throw StateError('直播源已更新，请重新加载');
+    }
+    final result = await companionSpiderApi.fetchLiveContent(
+      site,
+      url: source.url,
+      timeout: Duration(seconds: (source.timeout ?? 60).clamp(1, 90)),
+    );
+    if (generation != _scriptGeneration) {
+      throw StateError('直播源已更新，请重新加载');
+    }
+    return result;
+  }
+
   /// 获取首页与分类
   Future<VodPageResult> fetchHome(Site site, {bool filter = true}) async {
     if (site.usesCompanion) {
@@ -190,14 +239,31 @@ class SiteApi {
   }
 
   /// 获取分类视频
-  Future<VodPageResult> fetchCategory(Site site, {required String categoryId, int page = 1, bool filter = true}) async {
+  ///
+  /// [extend] 为筛选条件（为空不下发）；[cancelToken] 取消后在途请求被真正中止，
+  /// 返回空结果——调用方须自行判断结果是否仍有效，不能把它当作「真的没数据」。
+  Future<VodPageResult> fetchCategory(Site site,
+      {required String categoryId,
+      int page = 1,
+      bool filter = true,
+      Map<String, String> extend = const {},
+      SearchCancelToken? cancelToken}) async {
+    if (cancelToken?.isCancelled ?? false) return const VodPageResult.empty();
     if (site.usesCompanion) {
       final ready = await _ensureCompanionReady(site);
       if (ready) {
-        return companionSpiderApi.fetchCategory(site, categoryId: categoryId, page: page, filter: filter);
+        return companionSpiderApi.fetchCategory(site,
+            categoryId: categoryId,
+            page: page,
+            filter: filter,
+            extend: extend,
+            cancelToken: cancelToken);
       }
     }
-    return _cmsFallback(site, () => cmsApi.fetchCategory(site.api, categoryId, page: page, site: site));
+    return _cmsFallback(
+        site,
+        () => cmsApi.fetchCategory(site.api, categoryId,
+            page: page, site: site, extend: extend, cancelToken: cancelToken));
   }
 
   /// 获取视频详情
@@ -251,45 +317,121 @@ class SiteApi {
     return extensions.any(path.endsWith);
   }
 
-  /// 统一点播解析入口：Spider 先解析选集标识，CMS 沿用通用解析策略。
+  /// 统一点播解析入口；记忆的档名不存在时默认第一档，其余档位保持未解析。
   Future<MediaPlaySpec> resolvePlayback(Site? site, {
     required String id,
     required String flag,
     required ParseEngine parseEngine,
     List<Parse> parses = const [],
+    String? preferredQualityName,
   }) async {
-    MediaPlaySpec resolved;
-    Map<String, String> spiderHeaders = const {};
-    if (site != null && site.usesCompanion) {
-      if (!await _ensureCompanionReady(site)) {
-        throw const FormatException('Companion 服务不可用');
-      }
-      final result = await companionSpiderApi.fetchPlayResult(site, flag: flag, id: id);
-      spiderHeaders = result.headers;
-      // parse=1 但地址本身就是媒体文件（如酷狗 .mp3/.mp4）：手机端网页嗅探加载它时，
-      // 拦到的第一个媒体请求就是它自己，等价于直接播放；桌面没有嗅探，直接播。
-      resolved = result.needsParse && !isDirectMediaPath(result.url)
-          ? await parseEngine.parse(result.url, flag: flag, parses: parses, requireResolved: true)
-          : MediaPlaySpec(url: result.url);
-      final uri = Uri.tryParse(resolved.url);
-      if (uri == null || !['http', 'https', 'rtmp', 'rtsp', 'file'].contains(uri.scheme) ||
-          (uri.scheme != 'file' && uri.host.isEmpty)) {
-        throw const FormatException('Spider 未返回有效媒体地址');
-      }
-    } else {
-      resolved = await parseEngine.parse(id, flag: flag, parses: parses);
+    if (site == null || !site.usesCompanion) {
+      final resolved = await parseEngine.parse(id, flag: flag, parses: parses);
       return MediaPlaySpec(url: resolved.url, headers: resolved.headers ?? site?.header);
     }
-    // HTTP 头名称不区分大小写，后一级仅覆盖同名项而非整个集合。
+    if (!await _ensureCompanionReady(site)) {
+      throw const FormatException('Companion 服务不可用');
+    }
+    final result = await companionSpiderApi.fetchPlayResult(site, flag: flag, id: id);
+    final hasQualities = result.qualities.length > 1;
+    final sourceQualities = hasQualities
+        ? result.qualities
+        : [PlaybackQuality(name: '默认', url: result.url, needsParse: result.needsParse)];
+    final qualities = [
+      for (final quality in sourceQualities)
+        PlaybackQuality(
+          name: quality.name,
+          url: quality.url,
+          headers: _mergePlaybackHeaders([site.header, result.headers, quality.headers]),
+          needsParse: quality.needsParse,
+        ),
+    ];
+    final preferredIndex = preferredQualityName == null
+        ? -1
+        : qualities.indexWhere((quality) => quality.name == preferredQualityName);
+    final defaultIndex = result.qualityIndex >= 0 && result.qualityIndex < qualities.length
+        ? result.qualityIndex : 0;
+    final index = preferredIndex < 0 ? defaultIndex : preferredIndex;
+    final selected = await _resolveSpiderQuality(
+      qualities[index],
+      flag: flag,
+      parseEngine: parseEngine,
+      parses: parses,
+      siteKey: site.key,
+    );
+    qualities[index] = selected;
+    return MediaPlaySpec(
+      url: selected.url,
+      headers: selected.headers.isEmpty ? null : selected.headers,
+      qualities: hasQualities ? List<PlaybackQuality>.unmodifiable(qualities) : const [],
+      qualityIndex: index,
+      liveDanmakuSources: result.liveDanmakuSources,
+      mode: result.liveDanmakuSources.isEmpty ? PlaybackMode.vod : PlaybackMode.live,
+      modeSource: result.liveDanmakuSources.isEmpty
+          ? PlaybackModeSource.defaultMode : PlaybackModeSource.defaultLive,
+      startPosition: result.liveDanmakuSources.isEmpty ? null : Duration.zero,
+    );
+  }
+
+  /// 仅解析所选档，不重新请求 playerContent；失败时原 [spec] 保持不变。
+  /// 返回值保留会话元数据，并缓存成功档位的解析地址与请求头。
+  Future<MediaPlaySpec> resolveQuality(MediaPlaySpec spec, {
+    required int index,
+    required String flag,
+    required ParseEngine parseEngine,
+    List<Parse> parses = const [],
+  }) async {
+    RangeError.checkValidIndex(index, spec.qualities, 'index');
+    final selected = await _resolveSpiderQuality(
+      spec.qualities[index],
+      flag: flag,
+      parseEngine: parseEngine,
+      parses: parses,
+    );
+    final qualities = List<PlaybackQuality>.of(spec.qualities);
+    qualities[index] = selected;
+    return spec.copyWith(
+      url: selected.url,
+      headers: selected.headers,
+      qualities: List<PlaybackQuality>.unmodifiable(qualities),
+      qualityIndex: index,
+    );
+  }
+
+  Future<PlaybackQuality> _resolveSpiderQuality(PlaybackQuality quality, {
+    required String flag,
+    required ParseEngine parseEngine,
+    required List<Parse> parses,
+    String? siteKey,
+  }) async {
+    final resolved = quality.needsParse && !isDirectMediaPath(quality.url)
+        ? await parseEngine.parse(quality.url, flag: flag, parses: parses, requireResolved: true)
+        : MediaPlaySpec(url: quality.url);
+    final uri = Uri.tryParse(resolved.url);
+    if (uri == null || !['http', 'https', 'rtmp', 'rtsp', 'file'].contains(uri.scheme) ||
+        (uri.scheme != 'file' && uri.host.isEmpty)) {
+      debugPrint('--> [播放地址无效] site=${siteKey ?? '(清晰度切换)'} flag=$flag needsParse=${quality.needsParse} '
+          'scheme=${uri?.scheme} host=${uri?.host} len=${resolved.url.length}');
+      throw const FormatException('Spider 未返回有效媒体地址');
+    }
+    return PlaybackQuality(
+      name: quality.name,
+      url: resolved.url,
+      headers: _mergePlaybackHeaders([quality.headers, resolved.headers]),
+    );
+  }
+
+  static Map<String, String> _mergePlaybackHeaders(
+      Iterable<Map<String, String>?> layers) {
     final headers = <String, String>{};
-    for (final layer in [site.header, spiderHeaders, resolved.headers]) {
+    for (final layer in layers) {
       if (layer == null) continue;
       for (final entry in layer.entries) {
         headers.removeWhere((key, _) => key.toLowerCase() == entry.key.toLowerCase());
         headers[entry.key] = entry.value;
       }
     }
-    return MediaPlaySpec(url: resolved.url, headers: headers.isEmpty ? null : headers);
+    return Map<String, String>.unmodifiable(headers);
   }
 
   /// 触发站源动作（见 [CompanionSpiderApi.performAction]）；非 Spider 站源没有动作，返回空串。

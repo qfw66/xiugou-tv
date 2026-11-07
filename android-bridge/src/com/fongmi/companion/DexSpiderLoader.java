@@ -58,6 +58,23 @@ public class DexSpiderLoader {
     /** 工作目录超过这个时长没有任何写入，视为进程异常退出的残留。 */
     private static final long STALE_WORK_MS = 10 * 60_000L;
     private final ConcurrentHashMap<String, Spider> spiders = new ConcurrentHashMap<>();
+    private final Object scriptLifecycle = new Object();
+    private final Map<String, PySpider> scriptProxies = new HashMap<>();
+    private final Set<PySpider> initializingScripts = new HashSet<>();
+    private long scriptGeneration;
+    private volatile String scriptProxyBase = "";
+    private volatile String scriptDanmakuBase = "";
+
+    public void setScriptProxyBase(String base) { scriptProxyBase = base; }
+    public void setScriptDanmakuBase(String base) { scriptDanmakuBase = base; }
+
+    /** Lookup only; an HTTP parameter can never create or select a script descriptor. */
+    public PySpider registeredScript(String token, String siteKey) {
+        synchronized (scriptLifecycle) {
+            PySpider spider = scriptProxies.get(token);
+            return spider != null && Objects.equals(spider.scriptSiteKey(), siteKey) ? spider : null;
+        }
+    }
     /**
      * 按 spider 缓存键的创建锁：同一站点并发加载（如 /spider/load 与 /spider/call 同时到达）只创建一个实例。
      * 不同站点互不阻塞（加固载荷首次解密约 10 s，不能让其它站点排队）。
@@ -95,15 +112,15 @@ public class DexSpiderLoader {
         registerBuiltinFactories();
     }
 
-    /** 作废的旧转换产物：-jvm.jar ~ -jvm6.jar（转换器已升级到 -jvm7）。 */
+    /** 作废的旧转换产物：-jvm.jar ~ -jvm8（含带修补戳的 -jvm7-r* / -jvm8-r*.jar；转换器已升级到 -jvm9）。 */
     private static final java.util.regex.Pattern OBSOLETE_JVM =
-            java.util.regex.Pattern.compile(".*-jvm[0-6]?\\.jar");
+            java.util.regex.Pattern.compile(".*-jvm([0-6]?|[78](-r[A-Za-z0-9-]*)?)\\.jar");
     /** 临时产物只清理足够旧的，避免误删另一实例正在写的文件。 */
     private static final long STALE_TMP_MS = 10 * 60_000L;
 
     /**
      * 启动时清理 jars 缓存里的作废产物，只删三类：旧版本转换产物、残留的 *.tmp.jar、
-     * 已有带修补戳版本时的无戳 -jvm7.jar。此时本进程尚未加载任何 jar；
+     * 已有带修补戳版本时的无戳 -jvm9.jar。此时本进程尚未加载任何 jar；
      * 被其它进程占用的文件在 Windows 上删除会失败，直接跳过。其余缓存（原始 jar 等）不动。
      */
     static int purgeObsoleteArtifacts(File dir) {
@@ -122,7 +139,7 @@ public class DexSpiderLoader {
                 obsolete = now - f.lastModified() > STALE_TMP_MS;
             } else if (OBSOLETE_JVM.matcher(name).matches()) {
                 obsolete = true;
-            } else if (name.endsWith("-jvm7.jar")) {
+            } else if (name.endsWith("-jvm9.jar")) {
                 String prefix = name.substring(0, name.length() - ".jar".length()) + "-";
                 obsolete = false;
                 for (String other : names) {
@@ -171,7 +188,8 @@ public class DexSpiderLoader {
      */
     private void registerBuiltinFactories() {
         factories.register("py", 100,
-                r -> PySpider.isPythonApi(r.api()) ? new PySpider(r.api(), r.ext(), cacheDir) : null);
+                r -> PySpider.isPythonApi(r.api())
+                        ? new PySpider(r.api(), r.ext(), cacheDir, r.siteKey(), scriptProxyBase, scriptDanmakuBase) : null);
         factories.register("js", 200,
                 r -> r.ext() != null && r.ext().contains("\"js\"") ? new JavaScriptSpider(r.api(), r.ext()) : null);
         // py/js may inherit a global jar without using it; prepare only after those factories.
@@ -208,11 +226,18 @@ public class DexSpiderLoader {
      * @return 释放的 spider 个数
      */
     public int clear() {
-        List<Spider> oldSpiders = new ArrayList<>(spiders.values());
+        List<Spider> oldSpiders;
+        synchronized (scriptLifecycle) {
+            scriptGeneration++;
+            oldSpiders = new ArrayList<>(spiders.values());
+            oldSpiders.addAll(initializingScripts);
+            initializingScripts.clear();
+            scriptProxies.clear();
+            spiders.clear();
+            spiderLocks.clear();
+        }
         List<ClassLoader> oldLoaders = new ArrayList<>(loaders.values());
-        spiders.clear();
         loaders.clear();
-        spiderLocks.clear();
         for (Spider spider : oldSpiders) {
             try {
                 spider.destroy();
@@ -239,6 +264,9 @@ public class DexSpiderLoader {
     }
 
     public Spider getSpider(String siteKey, String api, String ext, String jar) {
+        final long generation;
+        synchronized (scriptLifecycle) { generation = scriptGeneration; }
+        boolean python = PySpider.isPythonApi(api);
         String cleanApi = normalizeApiName(api);
         // 崩溃站必须在 Level 0（载荷加载）之前短路，否则进程直接消失。
         if (rules.isBlocked(cleanApi)) {
@@ -253,7 +281,8 @@ public class DexSpiderLoader {
             }
         }
         String jarKey = md5(jar != null ? jar : "default");
-        String spKey = jarKey + "_" + siteKey + "_" + cleanApi;
+        String spKey = python ? "py:" + JsonCodec.stringify(Arrays.asList(siteKey, api, ext, jar))
+                : jarKey + "_" + siteKey + "_" + cleanApi;
 
         Spider cached = spiders.get(spKey);
         if (cached != null) return cached;
@@ -268,11 +297,28 @@ public class DexSpiderLoader {
             try {
                 spider = factories.create(new SpiderRequest(siteKey, api, cleanApi, ext, jar));
                 if (spider != null) {
+                    if (spider instanceof PySpider) {
+                        synchronized (scriptLifecycle) {
+                            if (generation != scriptGeneration || Thread.currentThread().isInterrupted()) {
+                                throw new IllegalStateException("script load cancelled");
+                            }
+                            initializingScripts.add((PySpider) spider);
+                        }
+                    }
                     spider.siteKey = siteKey;
                     spider.init(Context.get(), ext != null ? ext : "");
+                    synchronized (scriptLifecycle) {
+                        if (spider instanceof PySpider) {
+                            if (generation != scriptGeneration || Thread.currentThread().isInterrupted()) {
+                                throw new IllegalStateException("script load cancelled");
+                            }
+                            PySpider script = (PySpider) spider;
+                            scriptProxies.put(script.proxyToken(), script);
+                        }
+                        spiders.put(spKey, spider);
+                    }
                     ParseStage.clearFailure();
                     System.out.println("[DexSpiderLoader] Successfully initialized spider: " + cleanApi + " for site: " + siteKey);
-                    spiders.put(spKey, spider);
                     return spider;
                 }
             } catch (Throwable t) {
@@ -289,6 +335,9 @@ public class DexSpiderLoader {
                     }
                 }
             } finally {
+                if (spider instanceof PySpider) {
+                    synchronized (scriptLifecycle) { initializingScripts.remove((PySpider) spider); }
+                }
                 SpiderAttempt attempt = spiderAttempt.get();
                 if (attempt != null && attempt.failure != null) {
                     ParseStage.fail(attempt.failure.stage, attempt.failure.detail);
@@ -1013,7 +1062,8 @@ public class DexSpiderLoader {
                 }
                 return getClass().getClassLoader();
             }
-            created = new URLClassLoader(new URL[]{usableJar.toURI().toURL()}, getClass().getClassLoader());
+            // 父优先；载荷里有类依赖自带的 Push / Douban 等时，这几个类改用载荷版本（见 PayloadClassLoader）
+            created = PayloadClassLoader.create(usableJar, getClass().getClassLoader());
             String payloadInit = HardshellPipeline.payloadInit(localJar);
             if (payloadInit != null) PAYLOAD_INIT.put(created, payloadInit);
         } catch (Throwable t) {
@@ -1038,15 +1088,17 @@ public class DexSpiderLoader {
         }
     }
 
-    /** 转换产物路径：{@code <源名去 .jar>-jvm7<修补链戳>.jar}，放在 cacheDir。 */
+    /** 转换产物路径：{@code <源名去 .jar>-jvm9<修补链戳>.jar}，放在 cacheDir。 */
     private File jvmJarOf(File jarFile) {
         String base = jarFile.getName();
         if (base.endsWith(".jar")) base = base.substring(0, base.length() - 4);
         // -jvm7：转换器改为 PreciseDex2jar（保留 new-instance 的真实分配类型，不再塌缩成父类）。
-        // 旧缓存（-jvm 至 -jvm6）是塌缩产物或基于启发式补点位的产物，直接换名作废。
+        // -jvm8：超长字符串常量不再走 DexFix 改写（旧产物里这类方法是 VerifyError 桩）。
+        // -jvm9：含超长跳转、COMPUTE_MAXS 生成失败的类改用 COMPUTE_FRAMES 重转（旧产物里这类类缺失）。
+        // 旧缓存（-jvm 至 -jvm8）换名作废。
         // 加固载荷再带上修补链版本戳：修补器升级后旧产物自动作废（普通 jar 戳为空，缓存名不变）。
         String stamp = HardshellPipeline.repairStamp(jarFile);
-        return new File(cacheDir, base + "-jvm7" + stamp + ".jar");
+        return new File(cacheDir, base + "-jvm9" + stamp + ".jar");
     }
 
     /**
@@ -1108,7 +1160,8 @@ public class DexSpiderLoader {
                 reportDegradedMethods(jvmJar);
                 System.out.println("[DexSpiderLoader] Dex2jar done in " + (System.currentTimeMillis() - t0)
                         + "ms -> " + jvmJar.getName() + " (" + jvmJar.length() + " bytes, "
-                        + result.classes + " classes, 保留真实分配类型 " + result.keptMismatchedNew + " 处)");
+                        + result.classes + " classes, 保留真实分配类型 " + result.keptMismatchedNew + " 处"
+                        + ", 超长字符串常量 " + result.longStrings + " 处)");
                 return jvmJar;
             }
             ParseStage.fail(ParseStage.DEX2JAR, "dex2jar 输出为空: " + jarFile.getName());
@@ -1338,7 +1391,7 @@ public class DexSpiderLoader {
         for (File entry : entries) {
             String name = entry.getName();
             boolean ours = name.startsWith(WORK_PREFIX);
-            boolean legacy = name.contains("-jvm7")
+            boolean legacy = (name.contains("-jvm7") || name.contains("-jvm8") || name.contains("-jvm9"))
                     && (name.endsWith(".tmp.jar") || name.endsWith(".tmp"));
             if (!ours && !legacy) continue;
             try {

@@ -63,17 +63,88 @@ class _VodListRowState extends State<_VodListRow> {
     final year = item.year?.trim() ?? '';
     final hasMetas = hasScore || remarks.isNotEmpty || year.isNotEmpty;
 
+    final metadata = <Widget>[
+      Tooltip(
+        message: source,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: palette.card,
+            borderRadius: BorderRadius.circular(AppRadii.sm),
+            border: Border.all(color: palette.borderStrong, width: 1),
+          ),
+          child: Text(
+            source,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+                fontSize: AppType.caption, color: palette.textSub),
+          ),
+        ),
+      ),
+      if (hasMetas)
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          alignment: WrapAlignment.end,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            if (hasScore)
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.star_rounded, size: 12, color: palette.warning),
+                  const SizedBox(width: 3),
+                  Flexible(
+                    child: Text(
+                      score,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: AppType.body,
+                        color: palette.textBody,
+                        fontWeight: FontWeight.w600,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            if (remarks.isNotEmpty)
+              Tooltip(
+                message: remarks,
+                child: Text(
+                  remarks,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: AppType.body, color: palette.textDim),
+                ),
+              ),
+            if (year.isNotEmpty)
+              Text(
+                '$year年',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: AppType.body, color: palette.textDim),
+              ),
+          ],
+        ),
+    ];
+
     return FocusRing(
+      onTap: widget.onTap,
+      semanticLabel: item.name,
+      borderRadius: const BorderRadius.all(Radius.circular(AppRadii.md)),
+      child: InkWell(
         onTap: widget.onTap,
-        semanticLabel: item.name,
-        borderRadius: const BorderRadius.all(Radius.circular(AppRadii.md)),
-        child: InkWell(
-          onTap: widget.onTap,
-          hoverColor: palette.hover,
-          onHover: (hovering) => setState(() => _isHovered = hovering),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-            child: Row(
+        hoverColor: palette.hover,
+        onHover: (hovering) => setState(() => _isHovered = hovering),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          child: LayoutBuilder(
+            builder: (context, constraints) => Row(
               children: [
                 Expanded(
                   child: AnimatedDefaultTextStyle(
@@ -84,66 +155,35 @@ class _VodListRowState extends State<_VodListRow> {
                       color: _isHovered ? palette.textTitle : palette.textMain,
                       fontWeight: FontWeight.w500,
                     ),
-                    child: Text(
-                      item.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                    child: Tooltip(
+                      message: item.name,
+                      excludeFromSemantics: true,
+                      child: Text(
+                        item.name,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   ),
                 ),
                 const SizedBox(width: 12),
-                // 来源：小圆角标签（B3——层次清楚，与 D2 卡片存在感一致）
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: palette.card,
-                    borderRadius: BorderRadius.circular(AppRadii.sm),
-                    border: Border.all(color: palette.borderStrong, width: 1),
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: constraints.maxWidth / 2,
                   ),
-                  child: Text(
-                    source,
-                    style: TextStyle(
-                        fontSize: AppType.caption, color: palette.textSub),
+                  child: Wrap(
+                    spacing: 10,
+                    runSpacing: 4,
+                    alignment: WrapAlignment.end,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: metadata,
                   ),
                 ),
-                if (hasMetas) ...[
-                  const SizedBox(width: 10),
-                  // 评分：星形图标 + tabular 数字（B3——emoji 退役，与网格角标同一语义）
-                  if (hasScore) ...[
-                    Icon(Icons.star_rounded, size: 12, color: palette.warning),
-                    const SizedBox(width: 3),
-                    Text(
-                      score,
-                      style: TextStyle(
-                        fontSize: AppType.body,
-                        color: palette.textBody,
-                        fontWeight: FontWeight.w600,
-                        // 数字等宽，多行对齐不抖动（skill: number-tabular）
-                        fontFeatures: const [FontFeature.tabularFigures()],
-                      ),
-                    ),
-                  ],
-                  if (hasScore && (remarks.isNotEmpty || year.isNotEmpty))
-                    const SizedBox(width: 8),
-                  if (remarks.isNotEmpty)
-                    Text(
-                      remarks,
-                      style: TextStyle(
-                          fontSize: AppType.body, color: palette.textDim),
-                    ),
-                  if (remarks.isNotEmpty && year.isNotEmpty)
-                    const SizedBox(width: 8),
-                  if (year.isNotEmpty)
-                    Text(
-                      '$year年',
-                      style: TextStyle(
-                          fontSize: AppType.body, color: palette.textDim),
-                    ),
-                ],
               ],
             ),
           ),
-        ));
+        ),
+      ),
+    );
   }
 }

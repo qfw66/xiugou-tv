@@ -465,6 +465,40 @@ public final class GuardProxyServer {
         return out.toString();
     }
 
+    /** 载荷配置中心入口：`http://<局域网 IP>:19988~19997/config`（载荷自带的 NanoHTTPD）。 */
+    private static final java.util.regex.Pattern CONFIG_CENTER_URL = java.util.regex.Pattern.compile(
+            "http://(?:\\d{1,3}(?:\\.\\d{1,3}){3}|localhost|\\[[0-9A-Fa-f:]+\\]):(?:1998[89]|1999[0-7])/config(?![\\w/])");
+
+    /**
+     * 先做 {@link #rewriteLocalProxyUrls(String)}，再把载荷文字里的配置中心入口
+     * 换成本机可打开的 `http://127.0.0.1:<代理端口>/proxy?do=pan&action=config`。
+     *
+     * <p>原因（issue #6）：载荷的 `/config` 会 302 到「局域网 IP:代理端口」，而代理只绑回环，
+     * 桌面浏览器打开会被拒绝连接；改绑通配地址会把网盘凭证暴露给局域网，所以桌面端直接给本机地址。
+     * [loader] 为 null 或该加载器没有代理时原样返回。
+     */
+    public static String rewriteLocalProxyUrls(String text, ClassLoader loader) {
+        String out = rewriteLocalProxyUrls(text);
+        if (out == null || out.indexOf("/config") < 0) return out;
+        return rewriteConfigCenterUrls(out, proxyPortFor(loader));
+    }
+
+    /** 把配置中心入口换成本机代理端口 [port] 上的配置页；[port] 无效时原样返回。 */
+    static String rewriteConfigCenterUrls(String text, int port) {
+        if (text == null || port <= 0 || text.indexOf("/config") < 0) return text;
+        return CONFIG_CENTER_URL.matcher(text).replaceAll(java.util.regex.Matcher.quoteReplacement(
+                "http://127.0.0.1:" + port + "/proxy?do=pan&action=config"));
+    }
+
+    /** [loader] 或其祖先加载器上起的代理端口；没有返回 -1。 */
+    static int proxyPortFor(ClassLoader loader) {
+        for (int depth = 0; loader != null && depth < 8; depth++, loader = loader.getParent()) {
+            Integer p = PORTS.get(loader);
+            if (p != null) return p;
+        }
+        return -1;
+    }
+
     private static String decodeToken(String token) {
         try {
             byte[] raw = java.util.Base64.getUrlDecoder().decode(token);
@@ -612,15 +646,16 @@ public final class GuardProxyServer {
             // 兜底也要说人话：500 + 原始异常只会让用户看到一团栈。
             // VerifyError 说明载荷里这个方法被 dex2jar 降级成了「抛异常的桩」，属转换产物问题，
             // 不是用户的网络/CK 问题 —— 明确标出来，避免误导排查方向。
-            boolean degraded = cause instanceof VerifyError;
-            System.err.println("[GuardProxy] proxy error: " + cause
-                    + (degraded ? "（载荷方法未转换成功，d2j 降级桩）" : ""));
+            String note = degradedNote(cause);
+            System.err.println("[GuardProxy] proxy error: " + cause + note);
             cause.printStackTrace();
-            sendText(exchange, 502, "proxy error: " + cause
-                    + (degraded ? "（载荷方法未转换成功，d2j 降级桩）" : ""));
+            sendText(exchange, 502, "proxy error: " + cause + note);
         } catch (Throwable t) {
-            System.err.println("[GuardProxy] handle error: " + t);
-            sendText(exchange, 502, "error: " + t);
+            // 载荷常把 VerifyError 再包一层 RuntimeException 抛出，同样要标出降级桩
+            String note = degradedNote(t);
+            System.err.println("[GuardProxy] handle error: " + t + note);
+            if (!note.isEmpty()) t.printStackTrace();
+            sendText(exchange, 502, "error: " + t + note);
         } finally {
             // 缓冲分支与异常分支同样要关闭上游流（流式分支的 try-with-resources 已关过，重复关闭无害）。
             if (in != null) {
@@ -630,6 +665,14 @@ public final class GuardProxyServer {
                 }
             }
         }
+    }
+
+    /** 异常链里有 VerifyError 时返回降级桩说明，否则空串。 */
+    private static String degradedNote(Throwable t) {
+        for (int depth = 0; t != null && depth < 8; depth++, t = t.getCause()) {
+            if (t instanceof VerifyError) return "（载荷方法未转换成功，d2j 降级桩）";
+        }
+        return "";
     }
 
     private static void sendText(HttpExchange exchange, int code, String body) {

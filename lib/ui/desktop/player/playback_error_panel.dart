@@ -7,6 +7,8 @@ import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../widgets/app_message.dart';
 import '../widgets/focus_ring.dart';
+import 'playback_source_nav.dart';
+import 'player_source_switch_actions.dart';
 
 /// 播放失败面板（④ 直播播放报错诊断闭环）。
 ///
@@ -24,12 +26,18 @@ class PlaybackErrorPanel extends StatefulWidget {
   final String? rawError;
   final MediaPlaySpec? spec;
   final List<String> engineLogs;
+  final PlayerSourceSwitchNav? sourceSwitchNav;
+  final PlayerExternalNav? externalNav;
+  final VoidCallback? onOpenChannelList;
 
   const PlaybackErrorPanel({
     super.key,
     required this.rawError,
     required this.spec,
     required this.engineLogs,
+    this.sourceSwitchNav,
+    this.externalNav,
+    this.onOpenChannelList,
   });
 
   @override
@@ -40,6 +48,15 @@ class _PlaybackErrorPanelState extends State<PlaybackErrorPanel> {
   bool _expanded = false;
 
   void _toggleExpanded() => setState(() => _expanded = !_expanded);
+
+  bool get _hasExternalPlayer =>
+      widget.externalNav != null && widget.spec?.url.trim().isNotEmpty == true;
+
+  void _launchExternalPlayer() {
+    final nav = widget.externalNav;
+    if (!_hasExternalPlayer || nav == null || !nav.enabled || nav.busy) return;
+    nav.onLaunch();
+  }
 
   Future<void> _copyDiagnostics() async {
     final text = buildPlaybackDiagnosticText(
@@ -55,10 +72,13 @@ class _PlaybackErrorPanelState extends State<PlaybackErrorPanel> {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    final externalNav = _hasExternalPlayer ? widget.externalNav : null;
+    final externalStatus = externalNav?.statusText?.trim();
     return Semantics(
       container: true,
       liveRegion: true,
-      child: Container(
+      child: SingleChildScrollView(
+        child: Container(
         width: 480,
         padding: const EdgeInsets.symmetric(
             horizontal: AppSpacing.lg, vertical: AppSpacing.md),
@@ -87,8 +107,27 @@ class _PlaybackErrorPanelState extends State<PlaybackErrorPanel> {
               ],
             ),
             const SizedBox(height: AppSpacing.sm),
-            Row(
+            Wrap(
+              spacing: AppSpacing.sm,
+              runSpacing: AppSpacing.xs,
               children: [
+                if (externalNav != null)
+                  _PanelTextButton(
+                    key: const ValueKey('playback-error-external'),
+                    icon: Icons.open_in_new_rounded,
+                    label: externalNav.busy ? '正在打开外部播放器…' : '外部播放器',
+                    busy: externalNav.busy,
+                    onPressed: externalNav.enabled && !externalNav.busy
+                        ? _launchExternalPlayer
+                        : null,
+                  ),
+                if (widget.onOpenChannelList != null)
+                  _PanelTextButton(
+                    key: const ValueKey('playback-error-channels'),
+                    icon: Icons.playlist_play_rounded,
+                    label: '选台',
+                    onPressed: widget.onOpenChannelList!,
+                  ),
                 _PanelTextButton(
                   icon: _expanded
                       ? Icons.expand_less_rounded
@@ -96,7 +135,6 @@ class _PlaybackErrorPanelState extends State<PlaybackErrorPanel> {
                   label: '详情',
                   onPressed: _toggleExpanded,
                 ),
-                const SizedBox(width: AppSpacing.sm),
                 _PanelTextButton(
                   icon: Icons.copy_rounded,
                   label: '复制诊断',
@@ -104,6 +142,19 @@ class _PlaybackErrorPanelState extends State<PlaybackErrorPanel> {
                 ),
               ],
             ),
+            if (externalStatus != null && externalStatus.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: AppSpacing.xs),
+                child: Text(
+                  externalStatus,
+                  style: TextStyle(
+                    color: palette.playerText.withValues(alpha: 0.7),
+                    fontSize: AppType.caption,
+                  ),
+                ),
+              ),
+            if (widget.sourceSwitchNav != null)
+              PlayerSourceSwitchActions(nav: widget.sourceSwitchNav!, onPlayerChrome: true),
             AnimatedSize(
               duration: AppMotion.enter,
               curve: AppMotion.ease,
@@ -112,6 +163,7 @@ class _PlaybackErrorPanelState extends State<PlaybackErrorPanel> {
                   _expanded ? _buildDetails(context) : const SizedBox.shrink(),
             ),
           ],
+        ),
         ),
       ),
     );
@@ -225,10 +277,16 @@ class _DetailRow extends StatelessWidget {
 class _PanelTextButton extends StatelessWidget {
   final IconData icon;
   final String label;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
+  final bool busy;
 
-  const _PanelTextButton(
-      {required this.icon, required this.label, required this.onPressed});
+  const _PanelTextButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    this.busy = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -239,6 +297,7 @@ class _PanelTextButton extends StatelessWidget {
         onPressed: onPressed,
         style: TextButton.styleFrom(
           foregroundColor: palette.playerText.withValues(alpha: 0.85),
+          disabledForegroundColor: palette.playerText.withValues(alpha: 0.45),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           minimumSize: Size.zero,
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -248,7 +307,16 @@ class _PanelTextButton extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 16),
+            if (busy)
+              SizedBox.square(
+                dimension: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: palette.playerText.withValues(alpha: 0.7),
+                ),
+              )
+            else
+              Icon(icon, size: 16),
             const SizedBox(width: AppSpacing.xs),
             Text(label, style: const TextStyle(fontSize: AppType.body)),
           ],

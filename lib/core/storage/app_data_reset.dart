@@ -76,7 +76,10 @@ abstract final class AppDataReset {
   /// 站源服务里保存网盘登录态（Cookie、token、扫码结果、载荷偏好）的目录，
   /// 与 android-bridge 的 `Context` / `Environment` / `SharedPreferencesImpl` 落盘位置一一对应。
   /// `jars/`、`native/` 等是下载缓存，不含登录态，保留以免下次冷启动重新下载。
-  static const List<String> companionLoginStateDirs = ['prefs', 'files', 'cache', 'no_backup', 'sdcard', 'data'];
+  static const List<String> companionLoginStateDirs = [
+    'prefs', 'files', 'cache', 'no_backup', 'sdcard', 'data', 'py-cache',
+    'py-local', 'py-net-cache',
+  ];
 
   /// 旧版本放在系统临时目录的同名目录：`Context.persistentDir` 在新目录缺失时会整体复制回来，
   /// 不删就会把刚清掉的登录态又迁回去；`xiugou_tv_data` / `xiugou_tv_download_cache` 是 `Environment` 的临时映射。

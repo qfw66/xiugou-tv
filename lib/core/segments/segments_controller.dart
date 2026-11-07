@@ -65,9 +65,34 @@ class SegmentsController extends ValueNotifier<SegmentsState> {
           message: title.trim().isEmpty ? '片名为空，无法共享片段' : '识别不出集数（「${episodeName.trim()}」），无法共享片段'));
       return;
     }
-    if (value.episode?.key == episode.key && value.phase != SegmentsPhase.failed) return;
+    // 显示快照只做「列表位置 + 原始集名」的复制（§3.4）：位置来自正在播放的线路，
+    // 身份仍以 key 为准；不参与请求、不落盘。
+    final hasOrdinal = episodeIndex != null &&
+        episodeIndex >= 0 &&
+        episodeIndex < episodeCount;
+    final episodeRef = hasOrdinal
+        ? EpisodeRef.fromKey(episode,
+            ordinal: episodeIndex + 1, name: episodeName)
+        : null;
+    if (value.episode?.key == episode.key && value.phase != SegmentsPhase.failed) {
+      // 同 key 早退也要刷新位置 / 集名：换线路、源站重排后抽屉序号会变，
+      // 不刷新会一直显示上一次的位置（2026-11-03 方案 §3.4 / §8.1 #12）。
+      // 新线路没给位置时必须把旧快照清掉：否则会继续显示上一条线路的序号。
+      final sameRef = value.episodeRef?.ordinal == episodeRef?.ordinal &&
+          value.episodeRef?.name == episodeRef?.name;
+      if (!sameRef) {
+        _set(value.copyWith(
+          episodeRef: episodeRef,
+          clearEpisodeRef: episodeRef == null,
+        ));
+      }
+      return;
+    }
     final epoch = ++_epoch;
-    _set(SegmentsState(phase: SegmentsPhase.loading, episode: episode));
+    _set(SegmentsState(
+        phase: SegmentsPhase.loading,
+        episode: episode,
+        episodeRef: episodeRef));
 
     // 先用缓存把时间轴画出来（不等网络），随后总是向服务端要最新结果覆盖：
     // 共享片段会被别人撤下 / 新提交，只信缓存会让已撤下的片段一直执行（2026-10-27 实机反馈）。

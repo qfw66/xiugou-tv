@@ -76,7 +76,7 @@ class TempCleanupResult {
 /// 只处理「已核实的应用缓存」：
 /// - 图片 / EPG 内存缓存由调用方通过回调清理（本服务不依赖 Flutter）；
 /// - 孤儿临时文件必须同时满足：基名在 [appDataFiles] 中、严格匹配
-///   `<name>.tmp-<pid>-<seq>` 或 `live_sources.json.tmp-<seq>`、普通文件、
+///   `<name>.tmp-<pid>-<seq>` 或直播仓库文件的 `<name>.tmp-<seq>`、普通文件、
 ///   修改时间超过 24 小时、非当前进程。
 ///
 /// 本服务**不读取、不修改、不移动**任何用户数据文件。
@@ -84,6 +84,14 @@ class CacheMaintenance {
   static const Duration orphanAge = Duration(hours: 24);
   static final RegExp _tempPattern =
       RegExp(r'^(.+)\.tmp-(\d+)(?:-(\d+))?$');
+
+  /// `LiveRepository` 写的文件：临时文件只有单段序号（见 live_repository.dart）。
+  static const Set<String> _liveRepositoryFiles = {
+    'live_sources.json',
+    'live_last.json',
+    'live_direct_modes.json',
+    'live_source_history.json',
+  };
 
   final Future<Directory> Function() _directory;
   final DateTime Function() _clock;
@@ -201,8 +209,8 @@ class CacheMaintenance {
     final firstNumber = int.tryParse(match.group(2) ?? '');
     final secondNumber = match.group(3);
     if (firstNumber == null) return null;
-    if (base == 'live_sources.json') {
-      // 直播源写入使用 `live_sources.json.tmp-<sequence>`，没有 pid 段。
+    if (_liveRepositoryFiles.contains(base)) {
+      // 直播仓库（直播源 / 上次频道 / 直链记忆）写入使用 `<name>.tmp-<sequence>`，没有 pid 段。
       if (secondNumber != null) return null;
     } else {
       // 设置 / 配置写入使用 `<name>.tmp-<pid>-<sequence>`；单段格式语义不明，保留。
