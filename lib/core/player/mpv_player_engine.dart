@@ -361,6 +361,16 @@ class MpvPlayerEngine
     );
 
     _subscriptions.add(
+      _player.stream.track.listen((track) {
+        if (!_acceptMediaEvents) return;
+        _audioTracks = markTrackSelection(_audioTracks, track.audio.id);
+        _subtitleTracks = markTrackSelection(_subtitleTracks, track.subtitle.id);
+        _audioTracksController.add(_audioTracks);
+        _subtitleTracksController.add(_subtitleTracks);
+      }),
+    );
+
+    _subscriptions.add(
       _player.stream.log.listen((log) {
         _recentLogs.add('[${log.level}] ${log.text}');
       }),

@@ -202,20 +202,22 @@ class PlayerVideoTracksNav {
 
 /// 播放器内音轨视图模型（由宿主装配；为空时不显示「音轨」）。
 class PlayerAudioTracksNav {
-  final List<TrackInfo> tracks;
+  final List<TrackInfo> Function() _readTracks;
+  List<TrackInfo> get tracks => _readTracks();
   final Stream<List<TrackInfo>> tracksStream;
   final Future<void> Function(TrackInfo track) onSelect;
 
   const PlayerAudioTracksNav({
-    required this.tracks,
+    required List<TrackInfo> Function() readTracks,
     required this.tracksStream,
     required this.onSelect,
-  });
+  }) : _readTracks = readTracks;
 }
 
 /// 播放器内字幕视图模型（由宿主装配；为空时不显示「字幕」）。
 class PlayerSubtitleTracksNav {
-  final List<TrackInfo> tracks;
+  final List<TrackInfo> Function() _readTracks;
+  List<TrackInfo> get tracks => _readTracks();
   final Stream<List<TrackInfo>> tracksStream;
   final Future<void> Function(TrackInfo track) onSelect;
 
@@ -223,11 +225,11 @@ class PlayerSubtitleTracksNav {
   final Future<void> Function()? onDisable;
 
   const PlayerSubtitleTracksNav({
-    required this.tracks,
+    required List<TrackInfo> Function() readTracks,
     required this.tracksStream,
     required this.onSelect,
     this.onDisable,
-  });
+  }) : _readTracks = readTracks;
 }
 
 /// 播放器内重置视图模型（由宿主装配；为空时不显示「重置」）。
@@ -286,12 +288,12 @@ class PlayerLineNav {
   PlayerVideoTracksNav video,
 }) buildPlayerTrackNavs(MpvPlayerEngine engine) => (
       audio: PlayerAudioTracksNav(
-        tracks: engine.audioTracks,
+        readTracks: () => engine.audioTracks,
         tracksStream: engine.audioTracksStream,
         onSelect: engine.selectAudioTrack,
       ),
       subtitle: PlayerSubtitleTracksNav(
-        tracks: engine.subtitleTracks,
+        readTracks: () => engine.subtitleTracks,
         tracksStream: engine.subtitleTracksStream,
         onSelect: engine.selectSubtitleTrack,
         onDisable: engine.disableSubtitle,
