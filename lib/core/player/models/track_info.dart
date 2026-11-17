@@ -5,6 +5,18 @@ enum TrackType {
   subtitle,
 }
 
+/// Returns a track list with selection flags synchronized to the player's selected ID.
+List<TrackInfo> markTrackSelection(List<TrackInfo> tracks, String selectedId) =>
+    tracks
+        .map((track) => TrackInfo(
+              id: track.id,
+              type: track.type,
+              title: track.title,
+              language: track.language,
+              isSelected: track.id == selectedId,
+            ))
+        .toList();
+
 /// 媒体轨道描述模型（音轨 / 字幕轨）
 class TrackInfo {
   final String id;
