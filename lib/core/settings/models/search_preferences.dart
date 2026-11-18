@@ -19,17 +19,30 @@ class SearchPreferences {
   /// 页面上的展开 / 收起只在本次运行内有效，不改这里。
   final bool filterBarExpanded;
 
+  /// null 表示首次使用、默认全选；空集合表示用户明确取消全部站点。
+  final Set<String>? aggregateSiteKeys;
+
   const SearchPreferences({
     this.display = SearchDisplay.poster,
     this.aggregate = true,
     this.filterBarExpanded = false,
+    this.aggregateSiteKeys,
   });
 
-  SearchPreferences copyWith({SearchDisplay? display, bool? aggregate, bool? filterBarExpanded}) =>
+  SearchPreferences copyWith({
+    SearchDisplay? display,
+    bool? aggregate,
+    bool? filterBarExpanded,
+    Set<String>? aggregateSiteKeys,
+    bool clearAggregateSiteKeys = false,
+  }) =>
       SearchPreferences(
         display: display ?? this.display,
         aggregate: aggregate ?? this.aggregate,
         filterBarExpanded: filterBarExpanded ?? this.filterBarExpanded,
+        aggregateSiteKeys: clearAggregateSiteKeys
+            ? null
+            : aggregateSiteKeys ?? this.aggregateSiteKeys,
       );
 
   /// 严格解析：结构 / 版本 / 字段类型非法时抛出 [FormatException]；未知显示值归一化为默认。
@@ -49,10 +62,17 @@ class SearchPreferences {
     if (rawFilterBar != null && rawFilterBar is! bool) {
       throw const FormatException('搜索偏好格式无效');
     }
+    final rawSiteKeys = json['aggregateSiteKeys'];
+    if (rawSiteKeys != null &&
+        (rawSiteKeys is! List || rawSiteKeys.any((key) => key is! String))) {
+      throw const FormatException('搜索偏好格式无效');
+    }
     return SearchPreferences(
       display: SearchDisplay.tryParse(rawDisplay) ?? SearchDisplay.poster,
       aggregate: rawAggregate as bool? ?? true,
       filterBarExpanded: rawFilterBar as bool? ?? false,
+      aggregateSiteKeys:
+          rawSiteKeys == null ? null : Set<String>.from(rawSiteKeys as List),
     );
   }
 
@@ -61,6 +81,8 @@ class SearchPreferences {
         'display': display.value,
         'aggregate': aggregate,
         'filterBarExpanded': filterBarExpanded,
+        if (aggregateSiteKeys != null)
+          'aggregateSiteKeys': aggregateSiteKeys!.toList()..sort(),
       };
 
   @override
@@ -68,13 +90,28 @@ class SearchPreferences {
       other is SearchPreferences &&
       other.display == display &&
       other.aggregate == aggregate &&
-      other.filterBarExpanded == filterBarExpanded;
+      other.filterBarExpanded == filterBarExpanded &&
+      _sameKeys(other.aggregateSiteKeys, aggregateSiteKeys);
+
+  static bool _sameKeys(Set<String>? a, Set<String>? b) {
+    if (identical(a, b)) return true;
+    if (a == null || b == null) return false;
+    return a.length == b.length && a.containsAll(b);
+  }
 
   @override
-  int get hashCode => Object.hash(display, aggregate, filterBarExpanded);
+  int get hashCode => Object.hash(
+        display,
+        aggregate,
+        filterBarExpanded,
+        aggregateSiteKeys == null
+            ? null
+            : Object.hashAll(aggregateSiteKeys!.toList()..sort()),
+      );
 
   @override
-  String toString() => 'SearchPreferences(display: ${display.value}, aggregate: $aggregate, '
+  String toString() =>
+      'SearchPreferences(display: ${display.value}, aggregate: $aggregate, '
       'filterBarExpanded: $filterBarExpanded)';
 }
 

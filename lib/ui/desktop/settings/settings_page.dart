@@ -40,6 +40,7 @@ import '../../../core/settings/models/self_check_preferences.dart';
 import '../../../core/settings/models/startup_preferences.dart';
 import '../../../core/settings/settings_repository.dart';
 import '../dialogs/depot_selection_dialog.dart';
+import '../dialogs/search_site_selection_dialog.dart';
 import '../wallpaper/wallpaper_size_probe.dart';
 import 'about_update_section.dart';
 import 'error_log_dialog.dart';
@@ -2699,6 +2700,27 @@ class GeneralSettingsPanel extends StatelessWidget {
     ));
   }
 
+  Future<void> _chooseAggregateSites(BuildContext context) async {
+    final repository = settingsRepository;
+    final sites = configRepository.currentVodConfig.sites
+        .where((site) => site.searchable != 0 && site.api.trim().isNotEmpty)
+        .toList(growable: false);
+    final current = repository.searchPreferences.aggregateSiteKeys;
+    final selected = await showDialog<Set<String>>(
+      context: context,
+      builder: (_) => SearchSiteSelectionDialog(
+        sites: sites,
+        selectedKeys: current == null
+            ? sites.map((site) => site.key).toSet()
+            : current.intersection(sites.map((site) => site.key).toSet()),
+      ),
+    );
+    if (selected == null) return;
+    await _saveWithStatus(repository.updateSearchPreferences(
+      repository.searchPreferences.copyWith(aggregateSiteKeys: selected),
+    ));
+  }
+
   /// 切换「站点自检」开关：先落盘，成功后再同步给本地站点服务。
   ///
   /// 顺序很重要：先持久化再下发，避免"磁盘没记住、进程却已开启"的错位状态；
@@ -2898,7 +2920,7 @@ class GeneralSettingsPanel extends StatelessWidget {
                 title: '聚合搜索',
                 description: readFailed
                     ? '聚合搜索暂不可用（搜索偏好读取失败），修复文件后可重新读取。'
-                    : '开启时并发检索所有可搜索的站源；关闭后仅检索当前站源。',
+                    : '开启时并发检索所选站点；关闭后仅检索当前站源。',
                 descriptionColor: readFailed ? context.palette.warning : null,
                 trailing: Switch(
                   key: const ValueKey('search-aggregate'),
@@ -2906,6 +2928,40 @@ class GeneralSettingsPanel extends StatelessWidget {
                   onChanged: readFailed
                       ? null
                       : (value) => unawaited(_setSearchAggregate(value)),
+                ),
+              ),
+            );
+          },
+        ),
+        const SizedBox(height: 8),
+        StreamBuilder<SearchPreferences>(
+          stream: settingsRepository.searchPreferencesStream,
+          builder: (context, _) {
+            final repository = settingsRepository;
+            final preferences = repository.searchPreferences;
+            final sites = configRepository.currentVodConfig.sites
+                .where((site) => site.searchable != 0 && site.api.trim().isNotEmpty)
+                .toList(growable: false);
+            final keys = preferences.aggregateSiteKeys;
+            final selectedCount = keys == null
+                ? sites.length
+                : sites.where((site) => keys.contains(site.key)).length;
+            final enabled = preferences.aggregate && !repository.searchReadFailed;
+            return _card(
+              context,
+              child: _SettingRow(
+                title: '聚合搜索站点',
+                description: keys == null
+                    ? '默认搜索全部可搜索站点（$selectedCount 个）'
+                    : '已选择 $selectedCount/${sites.length} 个可搜索站点',
+                descriptionColor: enabled ? null : context.palette.textDim,
+                trailing: OutlinedButton.icon(
+                  key: const ValueKey('aggregate-search-sites'),
+                  onPressed: enabled && sites.isNotEmpty
+                      ? () => unawaited(_chooseAggregateSites(context))
+                      : null,
+                  icon: const Icon(Icons.tune_rounded, size: 18),
+                  label: const Text('选择站点'),
                 ),
               ),
             );
