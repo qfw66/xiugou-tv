@@ -21,6 +21,11 @@ class VodItem {
   /// （配置中心的扫码登录 / 填写 cookie 等设置项就是这种条目）。
   final String? action;
 
+  /// 站源返回的 `cate` 对象标记该条目为可进入的目录。
+  final Object? cate;
+
+  bool get isFolder => tag == 'folder' || cate != null;
+
   const VodItem({
     required this.id,
     required this.name,
@@ -37,6 +42,7 @@ class VodItem {
     this.siteKey,
     this.siteName,
     this.action,
+    this.cate,
   });
 
   VodItem copyWith({
@@ -55,6 +61,7 @@ class VodItem {
     String? siteKey,
     String? siteName,
     String? action,
+    Object? cate,
   }) {
     return VodItem(
       id: id ?? this.id,
@@ -72,6 +79,7 @@ class VodItem {
       siteKey: siteKey ?? this.siteKey,
       siteName: siteName ?? this.siteName,
       action: action ?? this.action,
+      cate: cate ?? this.cate,
     );
   }
 
@@ -103,6 +111,7 @@ class VodItem {
       siteKey: json['site_key']?.toString(),
       siteName: json['site_name']?.toString(),
       action: (rawAction != null && rawAction.isNotEmpty) ? rawAction : null,
+      cate: json['cate'],
     );
   }
 
@@ -122,6 +131,7 @@ class VodItem {
     if (siteKey != null) 'site_key': siteKey,
     if (siteName != null) 'site_name': siteName,
     if (action != null) 'action': action,
+    if (cate != null) 'cate': cate,
   };
 }
 

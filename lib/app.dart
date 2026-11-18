@@ -73,6 +73,7 @@ import 'ui/desktop/catalog/category_filter_bar.dart';
 import 'ui/desktop/catalog/douban_poster_image.dart';
 import 'ui/desktop/catalog/poster_image.dart';
 import 'ui/desktop/catalog/vod_detail_dialog.dart';
+import 'ui/desktop/catalog/vod_folder_dialog.dart';
 import 'ui/desktop/catalog/vod_grid_view.dart';
 import 'ui/desktop/catalog/vod_grid_skeleton.dart';
 import 'ui/desktop/catalog/vod_list_view.dart';
@@ -5040,6 +5041,24 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     final action = item.action;
     if (action != null) {
       await _runSiteAction(targetSite, action);
+      return;
+    }
+    if (item.isFolder) {
+      final folderSite = targetSite;
+      await showDialog<void>(
+        context: context,
+        builder: (_) => VodFolderBrowserDialog(
+          site: folderSite,
+          folder: item,
+          loadCategory: (categoryId, page) => ref
+              .read(siteApiProvider)
+              .fetchCategory(folderSite, categoryId: categoryId, page: page),
+          onItemTap: (child) => unawaited(_onItemClicked(child.copyWith(
+            siteKey: folderSite.key,
+            siteName: folderSite.name,
+          ))),
+        ),
+      );
       return;
     }
 
