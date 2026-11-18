@@ -4915,7 +4915,10 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
         _searchCancelToken = cancelToken;
         _listenToSearch(
           searchEngine.searchAllIncremental(
-              config.currentVodConfig.sites, query,
+              config.currentVodConfig.sites.where((site) =>
+                  settings.searchPreferences.aggregateSiteKeys == null ||
+                  settings.searchPreferences.aggregateSiteKeys!.contains(site.key)).toList(),
+              query,
               cancelToken: cancelToken),
           generation: generation,
           identity: identity,
@@ -5578,7 +5581,22 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   Widget build(BuildContext context) {
     final palette = context.palette;
     ref.listen<Site?>(currentSiteProvider, (_, __) => _synchronizeSite());
-    ref.listen<VodConfig>(vodConfigProvider, (_, __) => _synchronizeSite());
+    ref.listen<VodConfig>(vodConfigProvider, (_, next) {
+      _synchronizeSite();
+      final repository = ref.read(settingsRepositoryProvider);
+      final selected = repository.searchPreferences.aggregateSiteKeys;
+      if (selected == null) return;
+      final searchableKeys = next.sites
+          .where((site) => site.searchable != 0 && site.api.trim().isNotEmpty)
+          .map((site) => site.key)
+          .toSet();
+      final reconciled = selected.intersection(searchableKeys);
+      if (reconciled.length != selected.length) {
+        unawaited(repository.updateSearchPreferences(
+          repository.searchPreferences.copyWith(aggregateSiteKeys: reconciled),
+        ));
+      }
+    });
     // §15：保留最近一次播放会话，供关播后 / 重新打开详情时判定当前集。
     ref.listen<PlaybackSession?>(activePlaybackSessionProvider, (_, next) {
       if (next != null) _lastPlayedSession = next;
