@@ -99,6 +99,7 @@ class UpdateService {
     required UpdatePreferences preferences,
     CancelToken? cancelToken,
     Set<String> coolingDownMirrors = const {},
+    List<UpdateMirror> mirrors = kBuiltinMirrors,
     void Function(String mirrorId, bool success)? onMirrorResult,
   }) async {
     final local = AppVersion.tryParse(localVersion);
@@ -112,6 +113,7 @@ class UpdateService {
     final candidates = _candidates(
       preferences,
       coolingDownMirrors: coolingDownMirrors,
+      mirrors: mirrors,
     );
     UpdateFetchFailure? lastFailure;
     int? lastStatus;
@@ -234,6 +236,7 @@ class UpdateService {
   static List<UpdateSourceCandidate> _candidates(
     UpdatePreferences preferences, {
     required Set<String> coolingDownMirrors,
+    required List<UpdateMirror> mirrors,
   }) {
     final candidates = <UpdateSourceCandidate>[];
     final custom = preferences.source.trim();
@@ -250,7 +253,7 @@ class UpdateService {
       ));
     }
     if (preferences.useMirror) {
-      for (final mirror in kBuiltinMirrors) {
+      for (final mirror in mirrors) {
         if (coolingDownMirrors.contains(mirror.id)) continue;
         final resolved = mirror.resolveApi(officialUpdateSourceUrl);
         if (resolved == null) continue;

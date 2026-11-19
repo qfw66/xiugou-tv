@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app.dart';
 import 'core/app_info.dart';
+import 'core/companion/companion_playback_lease.dart';
 import 'core/companion/companion_process_manager.dart';
 import 'core/config/config_repository.dart';
 import 'core/config/models/builtin_sites.dart';
@@ -28,6 +29,14 @@ Future<void> main() async {
     // §43：可选服务是否启用（只打印是否配置，不打印地址 / 令牌）
     debugPrint('[xiugou-tv] 弹幕服务：${danmakuServiceConfigured ? '已配置' : '未配置（config/app.env）'}');
 
+    // 先解析数据目录并执行待定迁移，再创建任何存储（避免运行中双目录写入）。
+    // 便携版默认目录是 exe 旁的 user_data，重置标记也放在默认目录，所以必须先解析。
+    try {
+      await DataDirectoryManager.initialize();
+    } catch (error) {
+      debugPrint('[xiugou-tv] data directory init failed: $error');
+    }
+
     // 关于页「重置所有设置」：上次会话安排的全部清空，在创建任何存储之前执行
     try {
       if (await AppDataReset.applyPendingAtStartup()) {
@@ -35,13 +44,6 @@ Future<void> main() async {
       }
     } catch (error) {
       debugPrint('[xiugou-tv] reset failed: $error');
-    }
-
-    // N-2：先解析数据目录并执行待定迁移，再创建任何存储（避免运行中双目录写入）
-    try {
-      await DataDirectoryManager.initialize();
-    } catch (error) {
-      debugPrint('[xiugou-tv] data directory init failed: $error');
     }
 
     // 关于页「错误日志」：本次运行期间的未捕获异常、框架错误、播放器报错，只放内存（关闭即清空）
@@ -82,6 +84,12 @@ Future<void> main() async {
     companionManager.fallbackProxy = DanmakuApi.systemProxy;
     // 播放器先于窗口管理器创建：退出钩子要先停播放（窗口已隐藏，声音不能再继续）
     final playerEngine = MpvPlayerEngine();
+    // 播放期间持有 companion 租约：网盘直链由本地代理持续传流，没有 RPC 可计时，
+    // 旧实现约 30 分钟后把代理进程当空闲停掉，播放中段即断流。
+    final playbackLease = CompanionPlaybackLease(
+      statusStream: playerEngine.statusStream,
+      manager: companionManager,
+    );
     final windowManager = DesktopWindowManager(
       configRepository: configRepository,
       beforeClose: () async {
@@ -90,6 +98,7 @@ Future<void> main() async {
         } catch (_) {
           // 停播失败 / 超时不阻断关闭：进程退出时 mpv 随之结束
         }
+        await playbackLease.dispose();
         await companionManager.shutdown();
       },
     );

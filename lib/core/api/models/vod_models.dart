@@ -21,6 +21,10 @@ class VodItem {
   /// （配置中心的扫码登录 / 填写 cookie 等设置项就是这种条目）。
   final String? action;
 
+  final Map<String, dynamic>? cate;
+
+  bool get isFolder => tag == 'folder' || cate != null;
+
   const VodItem({
     required this.id,
     required this.name,
@@ -37,6 +41,7 @@ class VodItem {
     this.siteKey,
     this.siteName,
     this.action,
+    this.cate,
   });
 
   VodItem copyWith({
@@ -55,6 +60,7 @@ class VodItem {
     String? siteKey,
     String? siteName,
     String? action,
+    Map<String, dynamic>? cate,
   }) {
     return VodItem(
       id: id ?? this.id,
@@ -72,6 +78,7 @@ class VodItem {
       siteKey: siteKey ?? this.siteKey,
       siteName: siteName ?? this.siteName,
       action: action ?? this.action,
+      cate: cate ?? this.cate,
     );
   }
 
@@ -103,6 +110,9 @@ class VodItem {
       siteKey: json['site_key']?.toString(),
       siteName: json['site_name']?.toString(),
       action: (rawAction != null && rawAction.isNotEmpty) ? rawAction : null,
+      cate: json['cate'] is Map
+          ? Map<String, dynamic>.unmodifiable(json['cate'] as Map)
+          : null,
     );
   }
 
@@ -122,6 +132,7 @@ class VodItem {
     if (siteKey != null) 'site_key': siteKey,
     if (siteName != null) 'site_name': siteName,
     if (action != null) 'action': action,
+    if (cate != null) 'cate': cate,
   };
 }
 
@@ -326,6 +337,9 @@ class VodPageResult {
   /// 站源声明的分类筛选：分类 id → 筛选组。只有首页结果会带，分类页一般为空。
   final Map<String, List<VodFilter>> filters;
 
+  /// 首页明确返回的 siteicon，已按响应基址还原；不从影片海报推断。
+  final String? siteIcon;
+
   const VodPageResult({
     this.page = 1,
     this.pageCount = 1,
@@ -334,6 +348,7 @@ class VodPageResult {
     this.categories = const [],
     this.list = const [],
     this.filters = const {},
+    this.siteIcon,
   });
 
   const VodPageResult.empty()
@@ -343,7 +358,22 @@ class VodPageResult {
         limit = 20,
         categories = const [],
         list = const [],
-        filters = const {};
+        filters = const {},
+        siteIcon = null;
+
+  VodPageResult copyWith({
+    String? siteIcon,
+  }) =>
+      VodPageResult(
+        page: page,
+        pageCount: pageCount,
+        total: total,
+        limit: limit,
+        categories: categories,
+        list: list,
+        filters: filters,
+        siteIcon: siteIcon ?? this.siteIcon,
+      );
 }
 
 /// 筛选组里的一个选项（TVBox 协议的 `n` / `v`）。

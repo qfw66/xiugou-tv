@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../config/windows_config_storage.dart';
+import '../storage/data_restore_guard.dart';
 import 'update_preferences.dart';
 
 /// `update_preferences.json` 的读写。
@@ -43,18 +44,30 @@ class UpdatePreferencesStore {
     }
   }
 
-  Future<void> write(UpdatePreferences preferences) async {
+  void _checkWriteAllowed() {
+    if (dataRestorePendingRestart) {
+      throw const DataRestorePendingRestartException();
+    }
+  }
+
+  Future<void> write(UpdatePreferences preferences,
+      {bool throwOnFailure = false}) async {
+    _checkWriteAllowed();
     final target = await _file();
+    _checkWriteAllowed();
     await target.parent.create(recursive: true);
+    _checkWriteAllowed();
     final temp = File('${target.path}.tmp-$pid-${++_temporarySequence}');
     try {
       await temp.writeAsString(jsonEncode(preferences.toJson()), flush: true);
+      _checkWriteAllowed();
       await temp.rename(target.path);
-    } catch (_) {
-      // 写入失败不抛出：内存状态已更新，下一次启动按旧文件处理即可
+    } catch (error) {
+      // 普通开关保留既有尽力保存行为；配置表单要求确认落盘后才关闭。
       try {
         if (await temp.exists()) await temp.delete();
       } catch (_) {}
+      if (throwOnFailure || error is DataRestorePendingRestartException) rethrow;
     }
   }
 

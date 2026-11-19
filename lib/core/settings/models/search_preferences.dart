@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart' show setEquals;
+
 /// 搜索显示与聚合开关偏好。
 ///
 /// 持久化于应用数据目录的 `search_preferences.json`（version 1）。
@@ -19,31 +21,45 @@ class SearchPreferences {
   /// 页面上的展开 / 收起只在本次运行内有效，不改这里。
   final bool filterBarExpanded;
 
-  /// null 表示首次使用、默认全选；空集合表示用户明确取消全部站点。
-  final Set<String>? aggregateSiteKeys;
+  final Map<String, Set<String>> _sitesByConfig;
 
   const SearchPreferences({
     this.display = SearchDisplay.poster,
     this.aggregate = true,
     this.filterBarExpanded = false,
-    this.aggregateSiteKeys,
-  });
+  }) : _sitesByConfig = const {};
+
+  const SearchPreferences._(
+    this.display,
+    this.aggregate,
+    this.filterBarExpanded,
+    this._sitesByConfig,
+  );
 
   SearchPreferences copyWith({
     SearchDisplay? display,
     bool? aggregate,
     bool? filterBarExpanded,
-    Set<String>? aggregateSiteKeys,
-    bool clearAggregateSiteKeys = false,
-  }) =>
-      SearchPreferences(
-        display: display ?? this.display,
-        aggregate: aggregate ?? this.aggregate,
-        filterBarExpanded: filterBarExpanded ?? this.filterBarExpanded,
-        aggregateSiteKeys: clearAggregateSiteKeys
-            ? null
-            : aggregateSiteKeys ?? this.aggregateSiteKeys,
-      );
+  }) => SearchPreferences._(
+    display ?? this.display,
+    aggregate ?? this.aggregate,
+    filterBarExpanded ?? this.filterBarExpanded,
+    _sitesByConfig,
+  );
+
+  /// 按配置身份区分站点 key。未选择过表示全选，空集合表示不请求任何站点。
+  Set<String>? aggregateSitesFor(String? configId) => _sitesByConfig[configId];
+
+  SearchPreferences withAggregateSites(String configId, Set<String>? keys) {
+    if (setEquals(_sitesByConfig[configId], keys)) return this;
+    final next = Map.of(_sitesByConfig);
+    if (keys == null) {
+      next.remove(configId);
+    } else {
+      next[configId] = Set.unmodifiable(keys);
+    }
+    return SearchPreferences._(display, aggregate, filterBarExpanded, next);
+  }
 
   /// 严格解析：结构 / 版本 / 字段类型非法时抛出 [FormatException]；未知显示值归一化为默认。
   static SearchPreferences fromJson(Map<String, dynamic> json) {
@@ -62,28 +78,41 @@ class SearchPreferences {
     if (rawFilterBar != null && rawFilterBar is! bool) {
       throw const FormatException('搜索偏好格式无效');
     }
-    final rawSiteKeys = json['aggregateSiteKeys'];
-    if (rawSiteKeys != null &&
-        (rawSiteKeys is! List || rawSiteKeys.any((key) => key is! String))) {
-      throw const FormatException('搜索偏好格式无效');
+    final rawScopes = json['aggregateSitesByConfig'];
+    final scopes = <String, Set<String>>{};
+    if (rawScopes != null) {
+      if (rawScopes is! Map<String, dynamic>) {
+        throw const FormatException('搜索站点范围格式无效');
+      }
+      for (final entry in rawScopes.entries) {
+        final keys = entry.value;
+        if (entry.key.isEmpty ||
+            keys is! List ||
+            keys.any((key) => key is! String)) {
+          throw const FormatException('搜索站点范围格式无效');
+        }
+        scopes[entry.key] = Set.unmodifiable(keys.cast<String>());
+      }
     }
-    return SearchPreferences(
-      display: SearchDisplay.tryParse(rawDisplay) ?? SearchDisplay.poster,
-      aggregate: rawAggregate as bool? ?? true,
-      filterBarExpanded: rawFilterBar as bool? ?? false,
-      aggregateSiteKeys:
-          rawSiteKeys == null ? null : Set<String>.from(rawSiteKeys as List),
+    return SearchPreferences._(
+      SearchDisplay.tryParse(rawDisplay) ?? SearchDisplay.poster,
+      rawAggregate as bool? ?? true,
+      rawFilterBar as bool? ?? false,
+      scopes,
     );
   }
 
   Map<String, dynamic> toJson() => {
-        'version': formatVersion,
-        'display': display.value,
-        'aggregate': aggregate,
-        'filterBarExpanded': filterBarExpanded,
-        if (aggregateSiteKeys != null)
-          'aggregateSiteKeys': aggregateSiteKeys!.toList()..sort(),
-      };
+    'version': formatVersion,
+    'display': display.value,
+    'aggregate': aggregate,
+    'filterBarExpanded': filterBarExpanded,
+    if (_sitesByConfig.isNotEmpty)
+      'aggregateSitesByConfig': {
+        for (final id in _sitesByConfig.keys.toList()..sort())
+          id: _sitesByConfig[id]!.toList()..sort(),
+      },
+  };
 
   @override
   bool operator ==(Object other) =>
@@ -91,23 +120,22 @@ class SearchPreferences {
       other.display == display &&
       other.aggregate == aggregate &&
       other.filterBarExpanded == filterBarExpanded &&
-      _sameKeys(other.aggregateSiteKeys, aggregateSiteKeys);
-
-  static bool _sameKeys(Set<String>? a, Set<String>? b) {
-    if (identical(a, b)) return true;
-    if (a == null || b == null) return false;
-    return a.length == b.length && a.containsAll(b);
-  }
+      _sitesByConfig.length == other._sitesByConfig.length &&
+      _sitesByConfig.entries.every(
+        (entry) => setEquals(entry.value, other._sitesByConfig[entry.key]),
+      );
 
   @override
   int get hashCode => Object.hash(
-        display,
-        aggregate,
-        filterBarExpanded,
-        aggregateSiteKeys == null
-            ? null
-            : Object.hashAll(aggregateSiteKeys!.toList()..sort()),
-      );
+    display,
+    aggregate,
+    filterBarExpanded,
+    Object.hashAllUnordered(
+      _sitesByConfig.entries.map(
+        (entry) => Object.hash(entry.key, Object.hashAllUnordered(entry.value)),
+      ),
+    ),
+  );
 
   @override
   String toString() =>

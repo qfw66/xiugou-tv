@@ -3,11 +3,16 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import '../api/models/vod_models.dart';
+import '../companion/companion_spider_api.dart';
 import '../history/history_match.dart';
+import '../danmaku/danmaku_api.dart';
 import '../net/ascii_url.dart';
 import '../net/http_client_factory.dart';
 import '../net/relative_url.dart';
+import '../net/site_icon_url.dart';
+import 'config_credentials.dart';
 import 'config_decoder.dart';
+import 'config_network_error.dart';
 import 'models/desktop_window_config.dart';
 import 'models/builtin_sites.dart';
 import 'models/config_snapshot.dart';
@@ -91,13 +96,38 @@ class ConfigProbeResult {
     required this.message,
   });
 
-  bool get ok => kind != ConfigProbeKind.invalid && kind != ConfigProbeKind.unreachable;
+  bool get ok =>
+      kind != ConfigProbeKind.invalid && kind != ConfigProbeKind.unreachable;
 }
 
 /// 全局配置仓库：负责远程与本地配置加载、持久化及状态发布
 class ConfigRepository {
   final WindowsConfigStorage _storage;
+  final Future<String> Function(String url, String md5) _catSourceLoader;
   final Dio _dio;
+
+  /// 配置源凭据（按主机）：订阅、子仓与同机接口共用，加载时自动注入。
+  final ConfigCredentialStore _credentials;
+
+  /// 直连遇到传输层故障（握手中断 / 连不上 / 超时）时改走的系统代理（`host:port`），
+  /// 每次现读；null 或返回 null 表示不兜底。
+  final String? Function()? _systemProxy;
+
+  /// 按代理地址创建配置请求客户端。
+  final Dio Function(String proxy) _proxyDioFactory;
+  final Map<String, Dio> _proxyDios = <String, Dio>{};
+
+  static BaseOptions _defaultOptions() => BaseOptions(
+        connectTimeout: const Duration(seconds: 15),
+        receiveTimeout: const Duration(seconds: 20),
+        headers: {
+          'User-Agent': 'okhttp/5.5.0',
+          'Accept': 'application/json, text/plain, */*',
+        },
+      );
+
+  static Dio _defaultProxyDio(String proxy) =>
+      HttpClientFactory.createDio(_defaultOptions(), proxy: () => proxy);
 
   /// 多仓最大追踪层数（防御循环引用导致的无限递归）
   static const int _maxDepotDepth = 8;
@@ -121,7 +151,8 @@ class ConfigRepository {
   int _homeSiteRevision = 0;
   int _homeSitePendingSaves = 0;
   Future<void> _homeSiteSaveChain = Future<void>.value();
-  final StreamController<void> _homeSiteController = StreamController<void>.broadcast();
+  final StreamController<void> _homeSiteController =
+      StreamController<void>.broadcast();
   int _loadGeneration = 0;
   bool _disposed = false;
   Future<void> _snapshotSaveChain = Future<void>.value();
@@ -147,7 +178,8 @@ class ConfigRepository {
       StreamController<ConfigLoadEvent>.broadcast();
 
   /// 每次通过 URL / 本地文件成功加载配置后发布（粘贴内容不发布）
-  Stream<ConfigLoadEvent> get configLoadedStream => _configLoadedController.stream;
+  Stream<ConfigLoadEvent> get configLoadedStream =>
+      _configLoadedController.stream;
 
   /// 没有「首页默认站源」偏好时的兜底站源。
   ///
@@ -155,22 +187,87 @@ class ConfigRepository {
   /// 场景不传，则沿用原来的「按可播性自动挑选」规则。
   final Site? fallbackHomeSite;
 
+  /// [systemProxy] 省略时：生产（未注入 [dio]）读 Windows 系统代理，测试（注入 [dio]）不兜底。
   ConfigRepository({
     WindowsConfigStorage? storage,
     Dio? dio,
+    ConfigCredentialStore? credentials,
     this.fallbackHomeSite,
+    String? Function()? systemProxy,
+    Dio Function(String proxy)? proxyDio,
+    Future<String> Function(String url, String md5)? catSourceLoader,
   })  : _storage = storage ?? WindowsConfigStorage(),
-        _dio = dio ??
-            HttpClientFactory.createDio(
-              BaseOptions(
-                connectTimeout: const Duration(seconds: 15),
-                receiveTimeout: const Duration(seconds: 20),
-                headers: {
-                  'User-Agent': 'okhttp/5.5.0',
-                  'Accept': 'application/json, text/plain, */*',
-                },
-              ),
-            );
+        _credentials = credentials ?? ConfigCredentialStore(),
+        _dio = dio ?? HttpClientFactory.createDio(_defaultOptions()),
+        _systemProxy =
+            systemProxy ?? (dio == null ? DanmakuApi.systemProxy : null),
+        _proxyDioFactory = proxyDio ?? _defaultProxyDio,
+        _catSourceLoader =
+            catSourceLoader ?? CompanionSpiderApi().importCatSource;
+
+  /// 先直连；仅在传输失败且存在系统代理时重试一次，保留原始失败原因。
+  ///
+  /// 凭据按请求主机自动注入：主订阅、多仓子仓与同机接口都经过这里，
+  /// 上层不必逐层传账号。401/407 转成 [ConfigAuthRequired] 交给界面提示输入。
+  Future<Response<String>> _fetchText(String url, Options options) async {
+    final authorized = _authenticated(url, options);
+    try {
+      return await _dio.get<String>(url, options: authorized);
+    } on DioException catch (error) {
+      final proxy = !_disposed && _isTransportFailure(error)
+          ? _systemProxy?.call()
+          : null;
+      if (proxy == null || proxy.isEmpty) throw _authError(url, error);
+      final viaProxy =
+          _proxyDios.putIfAbsent(proxy, () => _proxyDioFactory(proxy));
+      try {
+        return await viaProxy.get<String>(url, options: authorized);
+      } on DioException {
+        throw _authError(url, error);
+      }
+    }
+  }
+
+  Options _authenticated(String url, Options options) {
+    final uri = Uri.tryParse(url);
+    final credentials = uri == null ? null : _credentials.forUri(uri);
+    if (credentials == null) return options;
+    return options.copyWith(headers: <String, Object?>{
+      ...?options.headers,
+      'Authorization': credentials.authorization,
+    });
+  }
+
+  /// 认证失败要从网络错误里分出来：界面据此弹账号密码框而不是报「HTTP 401」。
+  Object _authError(String url, DioException error) {
+    final status = error.response?.statusCode;
+    if (status != 401 && status != 407) return error;
+    final uri = Uri.tryParse(url);
+    return ConfigAuthRequired(
+      host: uri?.host ?? '',
+      location: url,
+      rejected: uri != null && _credentials.forUri(uri) != null,
+    );
+  }
+
+  static bool _isTransportFailure(DioException error) {
+    if (isConfigCertificateFailure(error)) return false;
+    switch (error.type) {
+      case DioExceptionType.badResponse:
+      case DioExceptionType.cancel:
+      case DioExceptionType.badCertificate:
+        return false;
+      case DioExceptionType.connectionError:
+        return true;
+      default:
+        if (error.type.name.toLowerCase().contains('timeout')) return true;
+        final cause = error.error;
+        return cause is SocketException ||
+            cause is HandshakeException ||
+            cause is TlsException ||
+            cause is HttpException;
+    }
+  }
 
   /// 当前生效的点播配置
   VodConfig get currentVodConfig => _currentVodConfig;
@@ -184,7 +281,8 @@ class ConfigRepository {
   String? get homeSiteSaveError => _homeSiteSaveError;
   bool get isSavingHomeSite => _homeSitePendingSaves > 0;
 
-  HomeSitePreference? get homeSitePreference => _homeSitePreferences[_configIdentity];
+  HomeSitePreference? get homeSitePreference =>
+      _homeSitePreferences[_configIdentity];
 
   /// 可选站源 = 内置虚拟站（豆瓣热播，§17） + 配置里的站源。
   ///
@@ -193,10 +291,19 @@ class ConfigRepository {
   List<Site> get _selectableSites =>
       <Site>[builtinDoubanSite, ..._currentVodConfig.sites];
 
+  /// 按站源 key 匹配默认站源（配置内 key 唯一时）。
+  ///
+  /// 不再要求 type/api/ext/jar 摘要一致：配置作者更新 jar 的 md5、ext 参数或接口
+  /// 地址时 key 不变，按摘要匹配会把仍可用的默认站误判为失效、每次回落到兜底站
+  /// （soul god 反馈）。站点真的失效由用户手动切换；key 消失或重复才算失效。
   Site? _matchingSite(HomeSitePreference preference) {
-    final candidates = _selectableSites.where((site) => site.key == preference.siteKey).toList();
-    return candidates.length == 1 && preference.matches(candidates.single) &&
-        HomeSitePreference.canSelect(candidates.single) ? candidates.single : null;
+    final candidates = _selectableSites
+        .where((site) => site.key == preference.siteKey)
+        .toList();
+    return candidates.length == 1 &&
+            HomeSitePreference.canSelect(candidates.single)
+        ? candidates.single
+        : null;
   }
 
   Site? get defaultHomeSite {
@@ -204,10 +311,15 @@ class ConfigRepository {
     return preference == null ? null : _matchingSite(preference);
   }
 
-  List<Site> get availableHomeSites => List.unmodifiable(_currentVodConfig.sites.where(
-    (site) => HomeSitePreference.canSelect(site) &&
-        _currentVodConfig.sites.where((candidate) => candidate.key == site.key).length == 1,
-  ));
+  List<Site> get availableHomeSites =>
+      List.unmodifiable(_currentVodConfig.sites.where(
+        (site) =>
+            HomeSitePreference.canSelect(site) &&
+            _currentVodConfig.sites
+                    .where((candidate) => candidate.key == site.key)
+                    .length ==
+                1,
+      ));
 
   /// 首页站源下拉的候选项：内置虚拟站排首位（§17），其后是配置里的可用站源。
   ///
@@ -216,17 +328,21 @@ class ConfigRepository {
   List<Site> get homeSiteChoices =>
       List.unmodifiable(<Site>[builtinDoubanSite, ...availableHomeSites]);
 
-  String? get homeSiteFallbackMessage => homeSitePreference != null && defaultHomeSite == null
-      ? '默认站源「${homeSitePreference!.name}」已失效或不受支持，当前使用临时站源或自动选择；原偏好已保留。'
-      : null;
+  String? get homeSiteFallbackMessage =>
+      homeSitePreference != null && defaultHomeSite == null
+          ? '默认站源「${homeSitePreference!.name}」已失效或不受支持，当前使用临时站源或自动选择；原偏好已保留。'
+          : null;
 
-  Future<void> setDefaultHomeSite(Site? site, {required String configIdentity}) async {
+  Future<void> setDefaultHomeSite(Site? site,
+      {required String configIdentity}) async {
     if (_disposed) throw StateError('配置仓库已关闭');
     if (configIdentity != _configIdentity) throw StateError('配置已切换，请重新选择首页站源');
     if (_homeSiteReadError != null) throw StateError('首页站源偏好读取失败，请先修复文件并重新读取');
     if (site != null) {
       final preference = HomeSitePreference.fromSite(site);
-      if (_matchingSite(preference) == null) throw StateError('该站源已失效、标识重复或不受支持');
+      if (_matchingSite(preference) == null) {
+        throw StateError('该站源已失效、标识重复或不受支持');
+      }
       _homeSitePreferences[configIdentity] = preference;
     } else {
       _homeSitePreferences.remove(configIdentity);
@@ -255,12 +371,15 @@ class ConfigRepository {
   }
 
   void _publishHomeSites() {
-    if (!_disposed && !_homeSiteController.isClosed) _homeSiteController.add(null);
+    if (!_disposed && !_homeSiteController.isClosed) {
+      _homeSiteController.add(null);
+    }
   }
 
   Future<void> _persistHomeSites() {
     final revision = ++_homeSiteRevision;
-    final snapshot = Map<String, HomeSitePreference>.unmodifiable(_homeSitePreferences);
+    final snapshot =
+        Map<String, HomeSitePreference>.unmodifiable(_homeSitePreferences);
     _homeSitePendingSaves++;
     _publishHomeSites();
     final saving = _homeSiteSaveChain.then((_) async {
@@ -279,7 +398,8 @@ class ConfigRepository {
         _publishHomeSites();
       }
     });
-    _homeSiteSaveChain = saving.then<void>((_) {}, onError: (Object error, StackTrace stack) {});
+    _homeSiteSaveChain =
+        saving.then<void>((_) {}, onError: (Object error, StackTrace stack) {});
     return saving;
   }
 
@@ -329,6 +449,7 @@ class ConfigRepository {
 
   /// 初始化：从 Windows 本地持久化中恢复窗口配置与缓存的影视配置
   Future<void> initialize() async {
+    _credentials.replaceAll(await _storage.readConfigCredentials());
     await reloadHomeSitePreferences();
     _currentWindowConfig = await _storage.readWindowConfig();
     _windowConfigController.add(_currentWindowConfig);
@@ -347,7 +468,8 @@ class ConfigRepository {
       }
     } catch (_) {
       _sourceRecoveryError = '当前配置快照读取失败，原文件已保留。请重新导入配置；不会自动恢复旧订阅。';
-      _currentWindowConfig = _currentWindowConfig.copyWith(clearLastConfigUrl: true, depotPath: const []);
+      _currentWindowConfig = _currentWindowConfig
+          .copyWith(clearLastConfigUrl: true, depotPath: const []);
       _windowConfigController.add(_currentWindowConfig);
     }
 
@@ -363,7 +485,8 @@ class ConfigRepository {
     // 如果此前保存了配置 URL，尝试后台异步更新最新配置
     final lastUrl = _currentWindowConfig.lastConfigUrl;
     if (lastUrl != null && lastUrl.isNotEmpty) {
-      unawaited(loadFromUrl(lastUrl).catchError((_) => const VodConfig(sites: [])));
+      unawaited(
+          loadFromUrl(lastUrl).catchError((_) => const VodConfig(sites: [])));
     }
   }
 
@@ -388,8 +511,8 @@ class ConfigRepository {
     if (pending != null) return pending;
     final next = _historySaveChain.catchError((_) {}).then((_) {
       _pendingHistorySave = null;
-      return _storage.saveHistory(
-          List<HistoryRecord>.unmodifiable(_historyRecords));
+      return _storage
+          .saveHistory(List<HistoryRecord>.unmodifiable(_historyRecords));
     });
     _pendingHistorySave = next;
     _historySaveChain = next;
@@ -430,6 +553,7 @@ class ConfigRepository {
       if (key.isNotEmpty) return key;
       return (r.siteName ?? '').trim();
     }
+
     final site = siteOf(record);
     // 旧记录可能没有站点字段：此时按「同站」处理，保持原有的去重置顶行为。
     bool sameSite(String other) =>
@@ -490,7 +614,8 @@ class ConfigRepository {
     final safePosition = positionMs < 0 ? 0 : positionMs;
     // 时长偶发上报为 0（如切换流瞬间）时保留已知时长，避免进度条闪烁
     final safeDuration = durationMs > 0 ? durationMs : current.durationMs;
-    if (current.positionMs == safePosition && current.durationMs == safeDuration) {
+    if (current.positionMs == safePosition &&
+        current.durationMs == safeDuration) {
       return true;
     }
 
@@ -604,8 +729,11 @@ class ConfigRepository {
 
   /// 切换直播频道收藏；落盘失败时撤回内存变更，避免 UI 显示「已保存」。
   Future<bool> toggleLiveFavorite(Live channel) async {
-    final removed = _liveFavorites.asMap().entries
-        .where((entry) => channel.matchesKey(entry.value.key)).toList();
+    final removed = _liveFavorites
+        .asMap()
+        .entries
+        .where((entry) => channel.matchesKey(entry.value.key))
+        .toList();
     final favorited = removed.isEmpty;
     if (favorited) {
       _liveFavorites.insert(0, channel);
@@ -650,23 +778,28 @@ class ConfigRepository {
   /// 当检测到「多仓（Depot）」清单（如 `{"urls":[...]}`）时：
   /// - 提供 [selectDepot] 则回调请用户选择（返回 null 视为取消并抛出 [DepotSelectionCancelled]）；
   /// - 未提供时仅对同一来源重放 [DesktopWindowConfig.depotPath]，否则选择第一项。
-  Future<VodConfig> loadFromInput(String input, {DepotSelector? selectDepot}) async {
+  Future<VodConfig> loadFromInput(String input,
+      {DepotSelector? selectDepot}) async {
     final generation = _beginLoad();
     final value = input.trim();
-    final resolved = await _readInput(value,
+    final resolved = await _readInput(
+      value,
       selectDepot: selectDepot,
       savedPath: _savedDepotPath(ConfigSourceKind.url, value),
     );
     final remembered = _isHttpUrl(value);
-    return _commitSnapshot(ConfigSnapshot(
-      rawContent: resolved.rawContent,
-      sourceKind: remembered ? ConfigSourceKind.url : null,
-      sourceLocation: remembered ? value : null,
-      depotPath: resolved.depotPath,
-    ), generation);
+    return _commitSnapshot(
+        ConfigSnapshot(
+          rawContent: resolved.rawContent,
+          sourceKind: remembered ? ConfigSourceKind.url : null,
+          sourceLocation: remembered ? value : null,
+          depotPath: resolved.depotPath,
+        ),
+        generation);
   }
 
-  Future<_ResolvedConfig> _readInput(String value, {DepotSelector? selectDepot, List<String> savedPath = const []}) async {
+  Future<_ResolvedConfig> _readInput(String value,
+      {DepotSelector? selectDepot, List<String> savedPath = const []}) async {
     if (value.isEmpty) {
       throw const FormatException('配置地址或配置内容不能为空');
     }
@@ -678,11 +811,33 @@ class ConfigRepository {
         savedPath: savedPath,
       );
     }
-    if (_looksLikeHtml(value) && !RegExp(r'<pre[^>]*>[\s\S]*?<\/pre>', caseSensitive: false).hasMatch(value)) {
-      throw const FormatException('输入的内容为 HTML 网页，而非有效的 TVBox 影视配置 JSON 或 Base64 编码');
+    if (_looksLikeHtml(value) &&
+        !RegExp(r'<pre[^>]*>[\s\S]*?<\/pre>', caseSensitive: false)
+            .hasMatch(value)) {
+      throw const FormatException(
+          '输入的内容为 HTML 网页，而非有效的 TVBox 影视配置 JSON 或 Base64 编码');
     }
-    return _resolveContent(value, visitedUrls: <String>{}, selectDepot: selectDepot);
+    return _resolveContent(value,
+        visitedUrls: <String>{}, selectDepot: selectDepot);
   }
+
+  /// 记住某个主机的账号密码：写入内存表并落盘。
+  ///
+  /// 只在加载真的拿到 401 之后由界面调用，随后重试同一个加载动作。凭据按主机
+  /// 复用，同一台服务器上的多仓子仓不会重复询问。
+  Future<void> rememberCredentials(ConfigCredentials credentials) async {
+    if (!credentials.isUsable) return;
+    _credentials.put(credentials);
+    try {
+      await _storage.saveConfigCredentials(_credentials.entries);
+    } catch (_) {
+      // 落盘失败只影响下次启动是否需要重新输入，不阻断本次加载。
+    }
+  }
+
+  /// 已记住的凭据（界面用来预填账号）。
+  ConfigCredentials? credentialsForHost(String host) =>
+      _credentials.forHost(host);
 
   void _emitLoaded(ConfigSourceKind kind, String location, VodConfig config) {
     if (_configLoadedController.isClosed) return;
@@ -702,13 +857,17 @@ class ConfigRepository {
     if (kind == null || location == null || location.trim().isEmpty) {
       throw StateError('当前配置来自粘贴内容，无法重新加载');
     }
-    return kind == ConfigSourceKind.file ? loadFromFile(location) : loadFromInput(location);
+    return kind == ConfigSourceKind.file
+        ? loadFromFile(location)
+        : loadFromInput(location);
   }
 
   /// 导出当前配置到 [filePath]：优先写出缓存原文，缺失时写出规范化 JSON。
   Future<void> exportCurrentConfig(String filePath) async {
-    final raw = _currentSnapshot?.rawContent ?? await _storage.readCachedVodConfigRaw();
-    final content = raw ?? const JsonEncoder.withIndent('  ').convert(_currentVodConfig.toJson());
+    final raw =
+        _currentSnapshot?.rawContent ?? await _storage.readCachedVodConfigRaw();
+    final content = raw ??
+        const JsonEncoder.withIndent('  ').convert(_currentVodConfig.toJson());
     await File(filePath).writeAsString(content, flush: true);
   }
 
@@ -719,9 +878,9 @@ class ConfigRepository {
     String raw;
     try {
       if (_isHttpUrl(value)) {
-        final response = await _dio.get<String>(
+        final response = await _fetchText(
           _normalizeConfigUrl(value),
-          options: Options(
+          Options(
             responseType: ResponseType.plain,
             followRedirects: true,
             maxRedirects: 5,
@@ -738,13 +897,25 @@ class ConfigRepository {
             message: '文件不存在',
           );
         }
-        raw = await file.readAsString();
+        raw = await _readLocalConfig(file);
       }
+    } on ConfigAuthRequired catch (error) {
+      return ConfigProbeResult(
+        kind: ConfigProbeKind.unreachable,
+        latency: stopwatch.elapsed,
+        message: error.message,
+      );
+    } on FormatException catch (error) {
+      return ConfigProbeResult(
+        kind: ConfigProbeKind.invalid,
+        latency: stopwatch.elapsed,
+        message: error.message,
+      );
     } on DioException catch (error) {
       return ConfigProbeResult(
         kind: ConfigProbeKind.unreachable,
         latency: stopwatch.elapsed,
-        message: _describeDioError(error),
+        message: configNetworkErrorText(error),
       );
     } catch (_) {
       return ConfigProbeResult(
@@ -754,11 +925,20 @@ class ConfigRepository {
       );
     }
     final latency = stopwatch.elapsed;
+    if (_isCatSourceUrl(value)) {
+      final valid = _catDigest(raw) != null;
+      return ConfigProbeResult(
+        kind: valid ? ConfigProbeKind.vodConfig : ConfigProbeKind.invalid,
+        latency: latency,
+        message: valid ? '猫源校验入口（导入时加载站点）' : '猫源 MD5 校验文件无效',
+      );
+    }
     return classifyConfigContent(raw, latency: latency);
   }
 
   /// 按内容识别配置格式（多仓 / CMS 清单 / 标准配置 / 无效）
-  ConfigProbeResult classifyConfigContent(String raw, {Duration latency = Duration.zero}) {
+  ConfigProbeResult classifyConfigContent(String raw,
+      {Duration latency = Duration.zero}) {
     try {
       final depot = _parseDepotEntries(raw);
       if (depot != null) {
@@ -778,12 +958,19 @@ class ConfigRepository {
           message: 'CMS 资源站清单 · ${cms.length} 个接口',
         );
       }
-      if (_looksLikeHtml(raw) && !RegExp(r'<pre[^>]*>', caseSensitive: false).hasMatch(raw)) {
-        return ConfigProbeResult(kind: ConfigProbeKind.invalid, latency: latency, message: '返回的是网页而非配置');
+      if (_looksLikeHtml(raw) &&
+          !RegExp(r'<pre[^>]*>', caseSensitive: false).hasMatch(raw)) {
+        return ConfigProbeResult(
+            kind: ConfigProbeKind.invalid,
+            latency: latency,
+            message: '返回的是网页而非配置');
       }
       final config = VodConfig.parseRawString(raw);
       if (config.sites.isEmpty && config.lives.isEmpty) {
-        return ConfigProbeResult(kind: ConfigProbeKind.invalid, latency: latency, message: '未包含站点或直播');
+        return ConfigProbeResult(
+            kind: ConfigProbeKind.invalid,
+            latency: latency,
+            message: '未包含站点或直播');
       }
       return ConfigProbeResult(
         kind: ConfigProbeKind.vodConfig,
@@ -793,48 +980,52 @@ class ConfigRepository {
         message: '${config.sites.length} 个站点 · ${config.lives.length} 个直播',
       );
     } catch (_) {
-      return ConfigProbeResult(kind: ConfigProbeKind.invalid, latency: latency, message: '无法识别的配置格式');
+      return ConfigProbeResult(
+          kind: ConfigProbeKind.invalid,
+          latency: latency,
+          message: '无法识别的配置格式');
     }
-  }
-
-  /// 连通性测试的错误摘要。
-  ///
-  /// 不对 [DioExceptionType] 做穷举 switch：dio 小版本会新增枚举值（如 transformTimeout），
-  /// 穷举写法在依赖升级后会直接编译失败；各类超时统一按名称归类。
-  String _describeDioError(DioException error) {
-    final type = error.type;
-    if (type == DioExceptionType.badResponse) {
-      return 'HTTP ${error.response?.statusCode ?? '错误'}';
-    }
-    if (type == DioExceptionType.connectionError) return '无法连接';
-    if (type == DioExceptionType.badCertificate) return '证书无效';
-    if (type == DioExceptionType.cancel) return '已取消';
-    if (type.name.toLowerCase().contains('timeout')) return '连接超时';
-    return '网络错误';
   }
 
   /// 从远程 URL 加载配置。
   Future<VodConfig> loadFromUrl(String url) => loadFromInput(url);
 
   /// 从本地 JSON 文件加载配置
-  Future<VodConfig> loadFromFile(String filePath, {DepotSelector? selectDepot}) async {
+  Future<VodConfig> loadFromFile(String filePath,
+      {DepotSelector? selectDepot}) async {
     final generation = _beginLoad();
     final file = File(filePath).absolute;
     if (!await file.exists()) {
       throw FileSystemException('指定的配置文件不存在', filePath);
     }
     final resolved = await _resolveContent(
-      await file.readAsString(),
+      await _readLocalConfig(file),
       visitedUrls: <String>{},
       selectDepot: selectDepot,
       savedPath: _savedDepotPath(ConfigSourceKind.file, file.path),
     );
-    return _commitSnapshot(ConfigSnapshot(
-      rawContent: resolved.rawContent,
-      sourceKind: ConfigSourceKind.file,
-      sourceLocation: file.path,
-      depotPath: resolved.depotPath,
-    ), generation);
+    return _commitSnapshot(
+        ConfigSnapshot(
+          rawContent: resolved.rawContent,
+          sourceKind: ConfigSourceKind.file,
+          sourceLocation: file.path,
+          depotPath: resolved.depotPath,
+        ),
+        generation);
+  }
+
+  Future<String> _readLocalConfig(File file) async {
+    final name = file.path.toLowerCase();
+    if (name.endsWith('.jar')) {
+      throw const FormatException(
+          '这是爬虫包，不包含完整站点配置。请选择配套的 config.json，并将 JAR 放在配置引用的位置。');
+    }
+    final raw = await file.readAsString();
+    if (name.endsWith('.jar.md5') && _catDigest(raw) != null) {
+      throw const FormatException(
+          '这是 JAR 校验文件，不包含站点配置。请选择同目录的 config.json，并保留配套 JAR。');
+    }
+    return raw;
   }
 
   Future<_ResolvedConfig> _loadRemoteConfig(
@@ -849,9 +1040,9 @@ class ConfigRepository {
       throw FormatException('配置仓库地址发生循环引用: $requestUrl');
     }
 
-    final response = await _dio.get<String>(
+    final response = await _fetchText(
       requestUrl,
-      options: Options(
+      Options(
         responseType: ResponseType.plain,
         followRedirects: true,
         maxRedirects: 5,
@@ -859,6 +1050,14 @@ class ConfigRepository {
     );
 
     final rawContent = response.data ?? '';
+    if (_isCatSourceUrl(requestUrl)) {
+      final digest = _catDigest(rawContent);
+      if (digest == null) throw const FormatException('猫源 MD5 校验文件无效');
+      final converted = await _catSourceLoader(requestUrl, digest);
+      final config = _parseConfig(converted);
+      if (config.sites.isEmpty) throw const FormatException('猫源未返回可用的视频站点');
+      return _ResolvedConfig(converted, chain);
+    }
     try {
       return await _resolveContent(
         rawContent,
@@ -870,12 +1069,26 @@ class ConfigRepository {
         chain: chain,
       );
     } on FormatException catch (error) {
-      final contentType = response.headers['content-type']?.join(',').toLowerCase();
-      if (_looksLikeHtml(rawContent) || contentType?.contains('text/html') == true) {
+      final contentType =
+          response.headers['content-type']?.join(',').toLowerCase();
+      if (_looksLikeHtml(rawContent) ||
+          contentType?.contains('text/html') == true) {
         throw FormatException('${error.message}\n请求地址: $requestUrl');
       }
       rethrow;
     }
+  }
+
+  static bool _isCatSourceUrl(String value) {
+    final uri = Uri.tryParse(value);
+    return uri != null &&
+        (uri.scheme == 'https' || uri.scheme == 'http') &&
+        uri.path.toLowerCase().endsWith('.js.md5');
+  }
+
+  static String? _catDigest(String value) {
+    final digest = value.trim().toLowerCase();
+    return RegExp(r'^[a-f0-9]{32}$').hasMatch(digest) ? digest : null;
   }
 
   Future<_ResolvedConfig> _resolveContent(
@@ -901,7 +1114,8 @@ class ConfigRepository {
     }
     final cmsSites = _parseCmsInterfaceSites(rawContent);
     if (cmsSites != null) {
-      return _ResolvedConfig(jsonEncode(VodConfig(sites: cmsSites).toJson()), chain);
+      return _ResolvedConfig(
+          jsonEncode(VodConfig(sites: cmsSites).toJson()), chain);
     }
     _parseConfig(rawContent, baseUrl: baseUrl);
     return _ResolvedConfig(rawContent, chain);
@@ -946,7 +1160,8 @@ class ConfigRepository {
       }
       return parsed;
     });
-    _snapshotSaveChain = next.then<void>((_) {}, onError: (Object error, StackTrace stack) {});
+    _snapshotSaveChain =
+        next.then<void>((_) {}, onError: (Object error, StackTrace stack) {});
     return next;
   }
 
@@ -954,7 +1169,9 @@ class ConfigRepository {
     final snapshot = _currentSnapshot;
     if (snapshot == null) return window;
     return window.copyWith(
-      lastConfigUrl: snapshot.sourceKind == ConfigSourceKind.url ? snapshot.sourceLocation : null,
+      lastConfigUrl: snapshot.sourceKind == ConfigSourceKind.url
+          ? snapshot.sourceLocation
+          : null,
       clearLastConfigUrl: snapshot.sourceKind != ConfigSourceKind.url,
       depotPath: snapshot.depotPath,
     );
@@ -1097,7 +1314,8 @@ class ConfigRepository {
       throw const FormatException('多仓清单中没有可用的 http(s) 订阅地址');
     }
 
-    final chosenIndex = await _chooseDepotIndex(resolved, selectDepot, depth, savedPath);
+    final chosenIndex =
+        await _chooseDepotIndex(resolved, selectDepot, depth, savedPath);
     if (chosenIndex == null) {
       throw const DepotSelectionCancelled();
     }
@@ -1114,7 +1332,8 @@ class ConfigRepository {
   }
 
   /// 决定本层选择：交互模式弹出选择器；非交互模式重放已保存链或回落第一项
-  Future<int?> _chooseDepotIndex(List<DepotEntry> entries, DepotSelector? selectDepot, int depth, List<String> savedPath) async {
+  Future<int?> _chooseDepotIndex(List<DepotEntry> entries,
+      DepotSelector? selectDepot, int depth, List<String> savedPath) async {
     if (selectDepot != null) {
       if (entries.length == 1) return 0;
       final choice = await selectDepot(entries);
@@ -1133,9 +1352,11 @@ class ConfigRepository {
   bool _isHttpUrl(String value) {
     final uri = Uri.tryParse(value);
     return uri != null &&
-        (uri.scheme.toLowerCase() == 'http' || uri.scheme.toLowerCase() == 'https') &&
+        (uri.scheme.toLowerCase() == 'http' ||
+            uri.scheme.toLowerCase() == 'https') &&
         uri.host.isNotEmpty;
   }
+
   bool _looksLikeHtml(String content) {
     final prefix = content.trimLeft().toLowerCase();
     return prefix.startsWith('<!doctype html') ||
@@ -1154,7 +1375,8 @@ class ConfigRepository {
         scheme: 'https',
         host: 'raw.githubusercontent.com',
         pathSegments: [segments[0], segments[1], ...segments.skip(3)],
-        queryParameters: uri.queryParameters.isEmpty ? null : uri.queryParameters,
+        queryParameters:
+            uri.queryParameters.isEmpty ? null : uri.queryParameters,
       ).toString();
     }
 
@@ -1163,7 +1385,8 @@ class ConfigRepository {
         scheme: 'https',
         host: 'raw.githubusercontent.com',
         pathSegments: [segments[0], segments[1], ...segments.skip(3)],
-        queryParameters: uri.queryParameters.isEmpty ? null : uri.queryParameters,
+        queryParameters:
+            uri.queryParameters.isEmpty ? null : uri.queryParameters,
       ).toString();
     }
 
@@ -1172,7 +1395,8 @@ class ConfigRepository {
         scheme: uri.scheme,
         host: uri.host,
         pathSegments: [segments[0], segments[1], 'raw', ...segments.skip(3)],
-        queryParameters: uri.queryParameters.isEmpty ? null : uri.queryParameters,
+        queryParameters:
+            uri.queryParameters.isEmpty ? null : uri.queryParameters,
       ).toString();
     }
 
@@ -1180,8 +1404,15 @@ class ConfigRepository {
       return Uri(
         scheme: uri.scheme,
         host: uri.host,
-        pathSegments: [segments[0], segments[1], '-', 'raw', ...segments.skip(4)],
-        queryParameters: uri.queryParameters.isEmpty ? null : uri.queryParameters,
+        pathSegments: [
+          segments[0],
+          segments[1],
+          '-',
+          'raw',
+          ...segments.skip(4)
+        ],
+        queryParameters:
+            uri.queryParameters.isEmpty ? null : uri.queryParameters,
       ).toString();
     }
 
@@ -1207,9 +1438,14 @@ class ConfigRepository {
       warning: config.warning,
       sites: config.sites
           .map((site) => site.copyWith(
-                api: RelativeUrl.resolve(base, site.api, allowBareRelative: true) ?? site.api,
-                ext: RelativeUrl.resolve(base, site.ext),
-                jar: RelativeUrl.resolve(base, site.jar, allowBareRelative: true),
+                api: RelativeUrl.resolve(base, site.api,
+                        allowBareRelative: true) ??
+                    site.api,
+                ext: _absolutizeSiteExt(site.ext, base),
+                jar: RelativeUrl.resolve(base, site.jar,
+                    allowBareRelative: true),
+                icon: resolveSiteIconUrl(site.icon, baseUrl: base.toString()),
+                logo: resolveSiteIconUrl(site.logo, baseUrl: base.toString()),
               ))
           .toList(),
       parses: config.parses,
@@ -1220,12 +1456,64 @@ class ConfigRepository {
     );
   }
 
+  /// 将标准站点扩展对象中的脚本路径按配置来源还原。
+  ///
+  /// CatVodSpider-GM 的 `ext` 是 JSON 对象，`userScript` 使用 `./userScripts/...`。
+  /// 只还原明确表示脚本地址的键，避免把扩展里的正文、选择器或自由文本误当成 URL。
+  String? _absolutizeSiteExt(String? ext, Uri base) {
+    if (ext == null || ext.trim().isEmpty) return ext;
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(ext);
+    } catch (_) {
+      return RelativeUrl.resolve(base, ext);
+    }
+    final normalized = _absolutizeExtValue(decoded, base);
+    return jsonEncode(normalized);
+  }
+
+  static const _relativeExtPathKeys = <String>{
+    'userScript',
+    'userScriptUrl',
+    'script',
+    'scriptUrl',
+  };
+
+  dynamic _absolutizeExtValue(dynamic value, Uri base, {String? key}) {
+    if (value is String && key != null && _relativeExtPathKeys.contains(key)) {
+      return RelativeUrl.resolve(base, value, allowBareRelative: true) ?? value;
+    }
+    if (value is Map) {
+      return <String, dynamic>{
+        for (final entry in value.entries)
+          entry.key.toString(): _absolutizeExtValue(
+            entry.value,
+            base,
+            key: entry.key.toString(),
+          ),
+      };
+    }
+    if (value is List) {
+      return [for (final item in value) _absolutizeExtValue(item, base)];
+    }
+    return value;
+  }
+
   /// 快照对应的配置来源地址；粘贴内容没有基址。
-  String? _snapshotBaseUrl(ConfigSnapshot snapshot) =>
-      snapshot.sourceKind == null ? null : snapshot.sourceLocation;
+  ///
+  /// 经多仓选择得到的最终配置，其相对地址（如 `./spider.jar`）要按最后一跳
+  /// 子配置的地址还原，而不是按顶层多仓清单地址（手机端同样以子配置 URL 修正）。
+  String? _snapshotBaseUrl(ConfigSnapshot snapshot) {
+    final path = snapshot.depotPath;
+    if (path.isNotEmpty && _isHttpUrl(path.last)) {
+      return _normalizeConfigUrl(path.last);
+    }
+    return snapshot.sourceKind == null ? null : snapshot.sourceLocation;
+  }
 
   /// 配置来源的基址：远程用请求地址，本地文件用文件 URI。
-  Uri? _configBaseUri(String? location) {    final value = location?.trim();
+  Uri? _configBaseUri(String? location) {
+    final value = location?.trim();
     if (value == null || value.isEmpty) return null;
     if (_isHttpUrl(value)) {
       final uri = Uri.tryParse(_asciiUrl(value));
@@ -1246,8 +1534,10 @@ class ConfigRepository {
     _currentWindowConfig = _withCurrentSource(newConfig);
     _windowConfigController.add(_currentWindowConfig);
     final snapshot = _currentWindowConfig;
-    final next = _windowSaveChain.then((_) => _storage.saveWindowConfig(snapshot));
-    _windowSaveChain = next.then<void>((_) {}, onError: (Object error, StackTrace stack) {});
+    final next =
+        _windowSaveChain.then((_) => _storage.saveWindowConfig(snapshot));
+    _windowSaveChain =
+        next.then<void>((_) {}, onError: (Object error, StackTrace stack) {});
     await next;
   }
 
@@ -1257,14 +1547,17 @@ class ConfigRepository {
     final previousIdentity = _configIdentity;
     final previousSite = _selectedSite;
     _currentVodConfig = config;
-    _configIdentity = HomeSitePreference.sourceIdentity(_currentSnapshot ?? ConfigSnapshot(
-      rawContent: jsonEncode(config.toJson()),
-      sourceKind: _currentSourceKind,
-      sourceLocation: _currentSourceLocation,
-      depotPath: _currentWindowConfig.depotPath,
-    ));
-    final preserved = previousIdentity == _configIdentity && previousSite != null
-        ? _matchingSite(HomeSitePreference.fromSite(previousSite)) : null;
+    _configIdentity = HomeSitePreference.sourceIdentity(_currentSnapshot ??
+        ConfigSnapshot(
+          rawContent: jsonEncode(config.toJson()),
+          sourceKind: _currentSourceKind,
+          sourceLocation: _currentSourceLocation,
+          depotPath: _currentWindowConfig.depotPath,
+        ));
+    final preserved =
+        previousIdentity == _configIdentity && previousSite != null
+            ? _matchingSite(HomeSitePreference.fromSite(previousSite))
+            : null;
     final fallback = fallbackHomeSite;
     final preferred = preserved ??
         defaultHomeSite ??
@@ -1335,6 +1628,10 @@ class ConfigRepository {
   Future<void> dispose() async {
     _disposed = true;
     _loadGeneration++;
+    for (final client in _proxyDios.values) {
+      client.close(force: true);
+    }
+    _proxyDios.clear();
     await _snapshotSaveChain;
     await _windowSaveChain;
     await _homeSiteSaveChain;

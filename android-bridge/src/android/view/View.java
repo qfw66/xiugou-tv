@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 点击监听等）必须如实保存，并在变化时通过 {@link #notifyChanged()} 通知宿主；
  * 与呈现无关的几何 / 样式方法保持空实现，只为让载荷不因缺方法而崩溃。
  */
-public class View {
+public class View implements KeyEvent.Callback {
 
     public static final int VISIBLE = 0;
     public static final int INVISIBLE = 4;
@@ -847,6 +847,17 @@ public class View {
         void onViewDetachedFromWindow(View v);
     }
 
+    public interface OnLayoutChangeListener {
+        void onLayoutChange(View view, int left, int top, int right, int bottom,
+                            int oldLeft, int oldTop, int oldRight, int oldBottom);
+    }
+
+    public void addOnLayoutChangeListener(OnLayoutChangeListener listener) {
+    }
+
+    public void removeOnLayoutChangeListener(OnLayoutChangeListener listener) {
+    }
+
     public static class MeasureSpec {
         public static final int UNSPECIFIED = 0;
         public static final int EXACTLY = 1 << 30;
@@ -865,4 +876,16 @@ public class View {
             return measureSpec & ~MODE_MASK;
         }
     }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) { return false; }
+
+    @Override
+    public boolean onKeyLongPress(int keyCode, KeyEvent event) { return false; }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) { return false; }
+
+    @Override
+    public boolean onKeyMultiple(int keyCode, int count, KeyEvent event) { return false; }
 }

@@ -8,8 +8,11 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/平台-Windows%2010%2F11%20x64-0078D4" alt="平台">
-  <img src="https://img.shields.io/badge/版本-1.0.5-2ea44f" alt="版本">
+  <img src="https://img.shields.io/badge/版本-1.1.0-2ea44f" alt="版本">
   <img src="https://img.shields.io/badge/许可证-GPL--3.0-blue" alt="许可证">
+  <a href="https://linux.do" target="_blank">
+    <img src="https://img.shields.io/badge/社区-LINUXDO-blue" alt="社区">
+  </a>
   <a href="https://t.me/+Z-8NGECyhdkzMDVl" target="_blank">
     <img src="https://img.shields.io/badge/TG群组-点击加入-blue" alt="TG">
   </a>
@@ -38,29 +41,34 @@
 - 支持Tvbox影视配置 JSON、多仓清单与 CMS 资源站清单导入，多仓可指定具体仓库。
 - 站点中的相对地址（api / ext / jar）自动还原，支持远程与本地文件。
 - 站点自检：逐个体检站点，给出分类数量与可用性结论。
+- 「添加配置源 → 导入本地文件…」可选择配置文件或猫源 ZIP。包内至少各有一个 JSON 和 JAR 即满足文件要求，支持自定义文件名和子目录。
+- 支持猫源 Node、Python、道长 T3 PHP 脚本与 T4 HTTP 接口，以及 XPTV、NowShowTime、drpy2 等订阅格式。Windows 包自带对应运行时。
+- 影视源和直播源分别支持分类、备注与批量移动。支持网页验证的站点可用独立浏览器资料完成验证后重试。
 
 ### 点播
 
 - 首页分类浏览、海报瀑布流，站点与分类可快速切换。
 - 分类页滚动到底自动加载下一页并增量追加，直到该分类取完；页码按站点声明推进，遇到不响应翻页的站点会自行收住而不是空转。
-- 全局搜索：输入即出增量结果，结果可按站点分组筛选。
-- 详情页展示剧集信息、播放线路与选集列表，支持收藏。
+- 全局搜索逐站显示结果，结果可按站点筛选。在「设置 → 通用 → 聚合搜索站点」可为每份配置单独勾选参与搜索的站点。默认全选，取消所有勾选会暂停该配置的聚合搜索。
+- 首页可从热门海报点缩略图选片，也可点「评分盲开」挑片。详情显示更新状态、线路和选集，以及同站同片上次看到的集数和进度。
 - 播放历史与断点续播，保留条数可配置（30–500，默认 150）。
 
 ### 直播
 
-- 支持 M3U / TXT 直播源导入，直播源独立于点播配置保存。
+- 在「设置 → 直播源」导入 TXT、M3U、M3U8 或 JSON 频道表，同一路径再次导入可刷新频道。
 - 频道按来源分组，支持分组浏览与频道搜索。
 - EPG 节目单：查看频道当前与后续节目。
 
 ### 播放器
 
 - libmpv 内核，支持 D3D11VA、D3D11VA（拷回模式）、DXVA2 硬件解码，并显示硬解状态。
-- 倍速 0.5–3.0，可调音量与画面缩放。
-- 视频轨、音轨、字幕轨切换，支持关闭字幕。
+- 倍速菜单提供 0.5–3.0 倍速，同片切集、换线和刷新可保留手选倍率。可调音量与画面缩放，还可在画面左上角显示实际分辨率。
+- 点播弹幕可按片名、集数手动搜索匹配。
+- 视频轨、音轨、字幕轨切换，支持关闭字幕；音轨/字幕菜单按真实引擎选择更新。
 - 片头 / 片尾跳过，按毫秒精确配置。
 - 自动换线与手动换线，失败提示统一呈现。
 - 键盘快捷键与鼠标操作并行。
+- 播放/暂停/缓冲期间维持伴随服务租约，代理异常时有界恢复，保留播放位置。
 
 ### 界面与交互
 
@@ -68,10 +76,12 @@
 - 详情、选集、收藏、历史、直播频道与 EPG 以浮层呈现，不打断当前播放。
 - 支持深色 / 浅色 / 跟随系统三档主题，可自定义壁纸。
 - 记忆窗口大小与位置，并限制最小窗口尺寸。
+- 主侧栏可收起并在重启后保持状态。系统开启减少动画时，首页停止自动轮播。
 
 ### 媒体与数据
 
 - 媒体直链、本地文件与 WebDAV 目录均可直接浏览播放（不支持磁力链）。
+- WebDAV 支持保存最多 20 个连接；凭据由当前 Windows 用户加密保护，不进入普通备份。
 - 数据目录可自行指定并迁移，启动前校验写入权限。
 - 备份与恢复覆盖历史、收藏与偏好设置，恢复后自动重启生效。
 
@@ -101,19 +111,13 @@
 
 <p align="center">主题与壁纸、播放器、数据目录、站点自检与备份恢复集中在这里。</p>
 
-## 特别鸣谢
-
-<p align="center">
-  <img src="assets/icons/linuxdo.png" width="256" alt="LINUXDO社区">
-</p>
-<p align="center">
-  <strong>感谢 LinuxDo 社区的支持！祝社区越来越好！</strong>
-</p>
 
 ## 从源码构建
 
 弹幕与共享跳过片段依赖维护者自部署的在线服务，直接用源码构建时这两项功能不会出现（其余功能不受影响）。
 需要的话请看 [开发者指北](DEVELOPER_GUIDE.md)，按说明部署服务并配置 `config/app.env`。普通用户直接下载 Releases 安装包即可，无需任何配置。
+
+从源码制作 Windows 完整包时，`companion/noderuntime/node.exe` 使用 Node.js 24.19.0 的 Windows x64 官方二进制，SHA-256 见 `companion/noderuntime/provenance.json`。PHP 可用 `scripts/setup_php_runtime.ps1` 准备。已有同版本便携包的开发者也可在校验 ZIP 后，将包内 `companion/dist/` 的 `noderuntime`、`phpruntime`、`pyruntime` 分别复制到源码的 `companion/`，将 `runtime/jre` 复制到源码的同名位置。
 
 ## 上游来源
 
@@ -121,7 +125,7 @@
 
 播放基于 [media_kit](https://github.com/media-kit/media-kit)（libmpv）；部分兼容能力借助 [unidbg](https://github.com/zhkl0228/unidbg) 与 [dex2jar](https://github.com/pxb1988/dex2jar) 实现。
 
-第三方组件的许可声明见各自 jar 包内附带的许可文件（`companion/lib`、`companion/lib-unidbg`、`companion/libs`）。
+安装目录的 `licenses/THIRD_PARTY_LICENSES.md` 列出第三方组件的来源与许可。项目从 v1.1.0 起对新贡献采用 DCO 签名。感谢 @digiprospector 修复音轨和字幕的选中状态，并贡献聚合搜索站点选择。[PR #21](https://github.com/qfw66/xiugou-tv/pull/21) · [PR #25](https://github.com/qfw66/xiugou-tv/pull/25)
 
 ## 许可证
 

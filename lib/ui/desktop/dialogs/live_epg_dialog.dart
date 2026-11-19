@@ -180,7 +180,7 @@ class _LiveEpgDialogState extends State<LiveEpgDialog> {
                 child: IconButton(
                     tooltip: '关闭节目单',
                     onPressed: () => Navigator.of(context).pop(),
-                    icon: Icon(Icons.close, color: palette.textSub)),
+                    icon: Icon(Icons.close_rounded, color: palette.textSub)),
               ),
             ]),
             const SizedBox(height: 6),
@@ -203,7 +203,7 @@ class _LiveEpgDialogState extends State<LiveEpgDialog> {
                 child: IconButton(
                   tooltip: '刷新节目单',
                   onPressed: _busy ? null : () => _load(forceRefresh: true),
-                  icon: Icon(Icons.refresh, color: palette.textSub),
+                  icon: Icon(Icons.refresh_rounded, color: palette.textSub),
                 ),
               ),
             ]),
@@ -303,7 +303,7 @@ class _LiveEpgDialogState extends State<LiveEpgDialog> {
                 child: FocusOutline(
                   radius: AppRadii.pill,
                   child: FilledButton.icon(
-                    icon: const Icon(Icons.play_arrow),
+                    icon: const Icon(Icons.play_arrow_rounded),
                     label: const Text('播放频道'),
                     onPressed: () {
                       Navigator.of(context).pop();

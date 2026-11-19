@@ -16,6 +16,7 @@ import 'live_channel_columns.dart';
 import 'live_channel_logo.dart';
 import 'live_epg_dialog.dart';
 import 'live_import_dialog.dart';
+import 'app_dialog.dart';
 
 /// 「直播」管理弹窗的频道区布局。
 enum LiveChannelsLayout {
@@ -257,7 +258,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
   Future<void> _import() async {
     final repository = widget.repository;
     if (repository == null) return;
-    final imported = await showDialog<LiveSource>(
+    final imported = await showAppDialog<LiveSource>(
       context: context,
       barrierDismissible: false,
       builder: (_) => LiveImportDialog(
@@ -273,7 +274,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
   }
 
   Future<void> _direct() async {
-    final channel = await showDialog<Live>(
+    final channel = await showAppDialog<Live>(
         context: context,
         builder: (_) => LiveDirectDialog(
               repository: widget.repository,
@@ -285,7 +286,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
   }
 
   Future<void> _removeSource(LiveSource source) async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text('移除「${source.name}」？'),
@@ -315,7 +316,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
   void _showEpg(Live channel) {
     final repository = widget.epgRepository;
     if (repository == null) return;
-    showDialog<void>(
+    showAppDialog<void>(
       context: context,
       builder: (_) => LiveEpgDialog(
         channel: channel,
@@ -358,7 +359,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                 key: const ValueKey('live-empty-import'),
                 onPressed: _busy ? null : _import,
                 style: FilledButton.styleFrom(backgroundColor: palette.accent),
-                icon: const Icon(Icons.playlist_add, size: 18),
+                icon: const Icon(Icons.playlist_add_rounded, size: 18),
                 label: const Text('导入直播源'),
               ),
             ),
@@ -425,7 +426,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                 child: IconButton(
                   tooltip: '关闭直播',
                   onPressed: () => Navigator.of(context).pop(),
-                  icon: Icon(Icons.close, color: palette.textBody),
+                  icon: Icon(Icons.close_rounded, color: palette.textBody),
                 ),
               ),
             ]),
@@ -442,7 +443,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                           _busy || widget.repository == null ? null : _import,
                       style: FilledButton.styleFrom(
                           backgroundColor: palette.accent),
-                      icon: const Icon(Icons.playlist_add, size: 18),
+                      icon: const Icon(Icons.playlist_add_rounded, size: 18),
                       label: const Text('导入直播源'),
                     ),
                   ),
@@ -450,7 +451,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                     radius: AppRadii.pill,
                     child: OutlinedButton.icon(
                       onPressed: _direct,
-                      icon: const Icon(Icons.link, size: 18),
+                      icon: const Icon(Icons.link_rounded, size: 18),
                       label: const Text('播放直链'),
                     ),
                   ),
@@ -459,7 +460,7 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                     onPressed: _busy || widget.repository == null
                         ? null
                         : () => _reload(refresh: true),
-                    icon: Icon(Icons.refresh, color: palette.textBody),
+                    icon: Icon(Icons.refresh_rounded, color: palette.textBody),
                   ),
                   if (sources.isNotEmpty)
                     FocusOutline(
@@ -504,12 +505,12 @@ class _LiveChannelsDialogState extends State<LiveChannelsDialog> {
                 hintText: '搜索频道或分组...',
                 hintStyle: TextStyle(color: palette.textSub),
                 prefixIcon:
-                    Icon(Icons.search, color: palette.textSub, size: 20),
+                    Icon(Icons.search_rounded, color: palette.textSub, size: 20),
                 suffixIcon: _keyword.isEmpty
                     ? null
                     : IconButton(
                         tooltip: '清除搜索',
-                        icon: Icon(Icons.clear, color: palette.textDim),
+                        icon: Icon(Icons.clear_rounded, color: palette.textDim),
                         onPressed: () {
                           _search.clear();
                           setState(() => _keyword = '');
@@ -773,7 +774,7 @@ class _LiveChannelCardState extends State<_LiveChannelCard> {
                             if (widget.onEpg != null)
                               TextButton.icon(
                                 onPressed: widget.onEpg,
-                                icon: const Icon(Icons.event_note, size: 16),
+                                icon: const Icon(Icons.event_note_rounded, size: 16),
                                 label: const Text('节目单',
                                     style: TextStyle(fontSize: AppType.body)),
                                 style: TextButton.styleFrom(
@@ -788,7 +789,7 @@ class _LiveChannelCardState extends State<_LiveChannelCard> {
                                       fontSize: AppType.caption,
                                       color: palette.textSub)),
                             const SizedBox(width: 8),
-                            Icon(Icons.play_circle_outline,
+                            Icon(Icons.play_circle_outline_rounded,
                                 size: 20, color: palette.accentInk),
                           ]),
                         ]),
@@ -855,7 +856,7 @@ class _LayoutToggle extends StatelessWidget {
         borderRadius: BorderRadius.circular(AppRadii.md),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        segment(LiveChannelsLayout.columns, Icons.view_sidebar_outlined, '两栏',
+        segment(LiveChannelsLayout.columns, Icons.view_sidebar_rounded, '两栏',
             '两栏：左分组、右频道（TVBox 样式）'),
         segment(LiveChannelsLayout.tabs, Icons.grid_view_rounded, '标签',
             '标签：顶部分组 + 频道卡片'),

@@ -1,12 +1,12 @@
 package android.app;
 
-import android.content.Context;
+import android.content.ContextWrapper;
 
 /**
- * Minimal android.app.Application stub。
+ * Android Application 的桌面垫片，保留 ContextWrapper 类型契约。
  * 维护进程级单例，供 Init.context() 之类的宿主桥取值。
  */
-public class Application extends Context {
+public class Application extends ContextWrapper {
 
     private static final Application INSTANCE = new Application();
 

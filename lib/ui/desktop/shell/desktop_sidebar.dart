@@ -18,6 +18,7 @@ class DesktopSidebar extends StatelessWidget {
   final VoidCallback onPushTap;
   final VoidCallback onFavoritesTap;
   final VoidCallback onSettingsTap;
+  final bool collapsed;
 
   const DesktopSidebar({
     super.key,
@@ -26,22 +27,20 @@ class DesktopSidebar extends StatelessWidget {
     required this.onPushTap,
     required this.onFavoritesTap,
     required this.onSettingsTap,
+    this.collapsed = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    if (collapsed) return const SizedBox.shrink();
     final palette = context.palette;
-    final glassBorder = context.glassBorder;
-
     return Container(
       width: 112,
       decoration: BoxDecoration(
         color: context.sidebarBackground,
-        borderRadius: BorderRadius.circular(AppRadii.lg),
-        border: Border.all(color: glassBorder, width: 1.0),
-        boxShadow: AppShadows.subtleDepth(),
+        border: Border(right: BorderSide(color: palette.divider)),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
+      padding: const EdgeInsets.all(10),
       child: Column(
         children: [
           // 顶部：品牌微标与应用名称
@@ -132,7 +131,9 @@ class DesktopSidebar extends StatelessWidget {
             onTap: onSettingsTap,
             semanticLabel: '设置中心',
             borderRadius: const BorderRadius.all(Radius.circular(AppRadii.sm)),
-            child: _SidebarSettingsButton(onTap: onSettingsTap),
+            child: Tooltip(
+                message: '设置中心',
+                child: _SidebarSettingsButton(onTap: onSettingsTap)),
           ),
         ],
       ),
@@ -260,7 +261,7 @@ class _SidebarSettingsButtonState extends State<_SidebarSettingsButton> {
           duration: Duration.zero,
           curve: AppMotion.ease,
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
           decoration: BoxDecoration(
             color: _isHovered ? palette.hover : palette.raised,
             borderRadius: BorderRadius.circular(AppRadii.sm),
@@ -273,7 +274,7 @@ class _SidebarSettingsButtonState extends State<_SidebarSettingsButton> {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(
-                Icons.settings_outlined,
+                Icons.settings_rounded,
                 size: 15,
                 color: _isHovered ? palette.accentInk : palette.textSub,
               ),

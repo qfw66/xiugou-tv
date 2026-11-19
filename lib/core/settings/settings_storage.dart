@@ -5,6 +5,7 @@ import '../config/windows_config_storage.dart';
 import '../player/models/player_settings.dart';
 import '../storage/data_restore_guard.dart';
 import 'models/config_source_entry.dart';
+import 'models/config_source_catalog.dart';
 import 'models/appearance_preferences.dart';
 import 'models/history_preferences.dart';
 import 'models/network_preferences.dart';
@@ -58,12 +59,13 @@ abstract class SettingsStorage {
   Future<NetworkPreferences?> readNetworkPreferences();
   Future<void> saveNetworkPreferences(NetworkPreferences preferences);
 
-  /// 缺省实现：写入 %APPDATA%/XiugouTV
+  /// 缺省实现：写入用户数据目录（便携版 `<exe>/user_data`，安装目录不可写时回退
+  /// `%APPDATA%/XiugouTV`，路径解析见 `DataDirectoryManager`）
   factory SettingsStorage.windows({Future<Directory> Function()? directory}) = FileSettingsStorage;
 }
 
 /// 基于 JSON 文件的设置存储（与其他配置同目录，各自独立文件）
-class FileSettingsStorage implements SettingsStorage {
+class FileSettingsStorage implements SettingsStorage, ConfigSourceCatalogStorage {
   static const String playerSettingsFileName = 'player_settings.json';
   static const String configSourcesFileName = 'config_sources.json';
   static const String startupPreferencesFileName = 'startup_preferences.json';
@@ -109,21 +111,24 @@ class FileSettingsStorage implements SettingsStorage {
   }
 
   @override
-  Future<List<ConfigSourceEntry>?> readConfigSources() async {
-    try {
-      final decoded = await _readJson(configSourcesFileName);
-      if (decoded == null) return null;
-      if (decoded is! List) return const [];
-      return decoded.map(ConfigSourceEntry.tryFromJson).whereType<ConfigSourceEntry>().toList();
-    } catch (_) {
-      return const [];
-    }
+  Future<ConfigSourceCatalog?> readConfigSourceCatalog() async {
+    final decoded = await _readJson(configSourcesFileName);
+    return decoded == null ? null : ConfigSourceCatalog.fromJson(decoded);
   }
 
   @override
+  Future<void> saveConfigSourceCatalog(ConfigSourceCatalog catalog) async {
+    await _atomicWrite(await _file(configSourcesFileName), jsonEncode(catalog.toJson()));
+  }
+
+  @override
+  Future<List<ConfigSourceEntry>?> readConfigSources() async =>
+      (await readConfigSourceCatalog())?.entries;
+
+  @override
   Future<void> saveConfigSources(List<ConfigSourceEntry> entries) async {
-    final json = jsonEncode(entries.map((e) => e.toJson()).toList());
-    await _atomicWrite(await _file(configSourcesFileName), json);
+    final previous = await readConfigSourceCatalog();
+    await saveConfigSourceCatalog(ConfigSourceCatalog(entries, previous?.categories));
   }
 
   @override

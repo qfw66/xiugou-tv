@@ -1,9 +1,12 @@
 import 'dart:convert';
 import 'dart:developer' as developer;
 import 'package:dio/dio.dart';
+import '../companion/companion_spider_api.dart' show SpiderPlayResult, playResultHint;
 import '../config/models/vod_config.dart';
 import '../net/ascii_url.dart';
 import '../net/http_client_factory.dart';
+import '../net/site_icon_url.dart';
+import '../player/playback_diagnostics.dart';
 import 'models/vod_models.dart';
 import 'search_cancel_token.dart';
 
@@ -45,8 +48,12 @@ class CmsJsonApi {
     return headers;
   }
 
-  /// 提取用于 API 请求的 extend 字符串参数（若 ext 本身是 HTTP 地址则不作为 extend 参数传回）
+  /// type:4 的 ext 是不透明扩展（包括 URL）；传统 CMS 保留 URL 作为端点的约定。
   String? _getExtendParam(Site? site) {
+    if (site?.type == 4) {
+      final ext = site?.ext;
+      return ext == null || ext.isEmpty ? null : ext;
+    }
     final ext = site?.ext?.trim();
     if (ext != null && ext.isNotEmpty && !ext.startsWith('http://') && !ext.startsWith('https://')) {
       return ext;
@@ -60,6 +67,7 @@ class CmsJsonApi {
     if (rawApi.startsWith('http://') || rawApi.startsWith('https://')) {
       return rawApi;
     }
+    if (site?.type == 4) return null;
     // 如果 api 是 csp_ 等非 HTTP 协议，但 ext 是以 http 开头的有效地址 (如 csp_AppYsV2, csp_XBPQ, 直连)
     final rawExt = site?.ext?.trim() ?? '';
     if (rawExt.startsWith('http://') || rawExt.startsWith('https://')) {
@@ -90,15 +98,19 @@ class CmsJsonApi {
     Map<String, dynamic>? headers,
     String? logTag,
     CancelToken? cancelToken,
+    void Function(Uri)? onResponseUrl,
   }) async {
     final tag = logTag ?? 'SiteApi::Http';
     final qStr = queryParams != null && queryParams.isNotEmpty
-        ? '?${queryParams.entries.map((e) => "${e.key}=${Uri.encodeComponent(e.value.toString())}").join("&")}'
+        ? '?${queryParams.entries.map((e) => "${e.key}=${e.key == 'extend' ? '***' : Uri.encodeComponent(e.value.toString())}").join("&")}'
         : '';
     final fullUrl = '$url$qStr';
-    _log(tag, '--> 发起 GET 请求: $fullUrl');
+    // 这两行会同时进 developer.log 与 stdout：地址 / 请求头里的凭据只留键名，
+    // 真实请求仍用原值。
+    _log(tag, '--> 发起 GET 请求: ${maskSensitiveUrl(fullUrl)}');
     if (headers != null && headers.isNotEmpty) {
-      _log(tag, '    请求头: $headers');
+      final loggable = headers.map((k, v) => MapEntry(k, '$v'));
+      _log(tag, '    请求头: ${maskSensitiveHeaders(loggable)}');
     }
 
     final stopwatch = Stopwatch()..start();
@@ -113,6 +125,7 @@ class CmsJsonApi {
         ),
       );
       stopwatch.stop();
+      onResponseUrl?.call(response.realUri);
 
       final rawData = response.data?.toString() ?? '';
       final snippet = rawData.length > 300 ? '${rawData.substring(0, 300)}...' : rawData;
@@ -127,13 +140,21 @@ class CmsJsonApi {
   }
 
   /// 1. 拉取站源首页推荐列表与动态分类 (参照 TVBox SiteApi.homeContent 与 TVBox)
-  Future<VodPageResult> fetchHome(String apiEndpoint, {Site? site}) async {
+  Future<VodPageResult> fetchHome(String apiEndpoint, {Site? site}) =>
+      _fetchHome(apiEndpoint, site: site);
+
+  Future<VodPageResult> fetchType4Home(Site site, {bool filter = true}) =>
+      _fetchHome(site.api, site: site, filter: filter);
+
+  Future<VodPageResult> _fetchHome(String apiEndpoint,
+      {Site? site, bool filter = true}) async {
     final siteName = site?.name ?? '未知站源';
     final siteType = site?.type ?? 0;
     _log('SiteApi::fetchHome', '===========================================================');
-    _log('SiteApi::fetchHome', '--> 开始拉取站源首页: [$siteName] (Type: $siteType, API: $apiEndpoint)');
+    _log('SiteApi::fetchHome', '--> 开始拉取站源首页: [$siteName] (Type: $siteType, API: ${maskSensitiveUrl(apiEndpoint)})');
     if (site?.ext != null && site!.ext!.isNotEmpty) {
-      _log('SiteApi::fetchHome', '    站源 Ext 参数: ${site.ext}');
+      // ext 是站源自定义内容，常夹带账号 / 令牌，且格式不定无法按字段打码，只记长度
+      _log('SiteApi::fetchHome', '    站源 Ext 参数: ${site.ext!.length} 字符');
     }
 
     final effectiveEndpoint = _resolveHttpEndpoint(apiEndpoint, site);
@@ -145,22 +166,27 @@ class CmsJsonApi {
     try {
       // 策略 A (TVBox 原版标准): 直接 GET 站源 API (带 extend 参数)
       final extendParam = _getExtendParam(site);
-      final paramsA = <String, dynamic>{};
+      final paramsA = <String, dynamic>{
+        if (siteType == 4) 'filter': filter ? '1' : '0',
+      };
       if (extendParam != null) {
         paramsA['extend'] = extendParam;
       }
+      var homeBaseUrl = effectiveEndpoint;
 
       String raw = await _httpGet(
         effectiveEndpoint,
         queryParams: paramsA.isNotEmpty ? paramsA : null,
         headers: _buildHeaders(site),
         logTag: 'SiteApi::fetchHome',
+        onResponseUrl: (uri) => homeBaseUrl = uri.toString(),
       );
 
-      var result = _parseContent(raw, type: siteType, site: site);
+      var result = _parseContent(raw, type: siteType, site: site,
+          homeBaseUrl: homeBaseUrl);
 
       // 策略 B fallback: 如果直接请求未获得分类且无影片，尝试附带 ac=videolist 或 ac=detail
-      if (result.categories.isEmpty && result.list.isEmpty) {
+      if (result.categories.isEmpty && result.list.isEmpty && siteType != 4) {
         _log('SiteApi::fetchHome', '--> 策略 A 未返回数据，尝试策略 B (附带 ac 参数)...');
         final paramsB = <String, dynamic>{
           'ac': (siteType == 0) ? 'videolist' : 'videolist',
@@ -174,8 +200,11 @@ class CmsJsonApi {
           queryParams: paramsB,
           headers: _buildHeaders(site),
           logTag: 'SiteApi::fetchHome',
+          onResponseUrl: (uri) => homeBaseUrl = uri.toString(),
         );
-        result = _parseContent(raw, type: siteType, site: site);
+        final fallback = _parseContent(raw, type: siteType, site: site,
+            homeBaseUrl: homeBaseUrl);
+        result = fallback.copyWith(siteIcon: fallback.siteIcon ?? result.siteIcon);
       }
 
       // 策略 C fallback (针对 JSON CMS): 如果仍为空，尝试 ac=detail
@@ -193,8 +222,11 @@ class CmsJsonApi {
           queryParams: paramsC,
           headers: _buildHeaders(site),
           logTag: 'SiteApi::fetchHome',
+          onResponseUrl: (uri) => homeBaseUrl = uri.toString(),
         );
-        result = _parseContent(raw, type: siteType, site: site);
+        final fallback = _parseContent(raw, type: siteType, site: site,
+            homeBaseUrl: homeBaseUrl);
+        result = fallback.copyWith(siteIcon: fallback.siteIcon ?? result.siteIcon);
       }
 
       // 如果站源配置中预先指定了 categories 过滤列表，进行过滤 (同 TVBox setTypes)
@@ -210,6 +242,7 @@ class CmsJsonApi {
             categories: filteredCats,
             list: result.list,
             filters: result.filters,
+            siteIcon: result.siteIcon,
           );
         }
       }
@@ -232,8 +265,8 @@ class CmsJsonApi {
 
   /// 2. 分类分页列表查询 (参照 TVBox SiteApi.categoryContent 与 TVBox)
   ///
-  /// [extend] 为用户选的筛选条件：JSON 采集源（type 1）以 `f=<JSON>` 下发（对齐 FongMi），
-  /// 三级回退都带上；为空时不发 `f`。XML 源没有筛选协议，忽略 [extend]。
+  /// [extend] 为筛选条件：type:1 使用 `f=<JSON>`，type:4 使用 `ext=<Base64 UTF8 JSON>`。
+  /// 站源扩展始终独立使用 `extend`；XML 源忽略筛选条件。
   /// [cancelToken] 取消后中止在途 HTTP、不再发后续回退，并返回空结果。
   Future<VodPageResult> fetchCategory(
     String apiEndpoint,
@@ -273,6 +306,9 @@ class CmsJsonApi {
       if (filterParam != null) {
         queryParams['f'] = filterParam;
       }
+      if (siteType == 4) {
+        queryParams['ext'] = base64Encode(utf8.encode(jsonEncode(extend)));
+      }
 
       String raw = await _httpGet(
         effectiveEndpoint,
@@ -304,7 +340,7 @@ class CmsJsonApi {
       if (cancelToken?.isCancelled ?? false) return const VodPageResult.empty();
 
       // 如果仍为空，尝试 fallback 策略 3: 不带 ac 参数 (部分 CMS 仅支持 t=id&pg=page)
-      if (result.list.isEmpty) {
+      if (result.list.isEmpty && siteType != 4) {
         _log('SiteApi::fetchCategory', '--> 尝试 fallback 策略 3 (纯 t/pg 参数)...');
         final noAcParams = <String, dynamic>{
           't': categoryId,
@@ -380,6 +416,7 @@ class CmsJsonApi {
       final map = _ensureJsonMap(trimmed);
       final list = (map['list'] as List<dynamic>?) ?? (map['data'] as List<dynamic>?) ?? [];
       if (list.isEmpty) {
+        if (siteType == 4) throw StateError('未找到影片详情 (ID: $vodId)');
         // Fallback: 尝试使用 id 代替 ids
         _log('SiteApi::fetchDetail', '--> 未找到详情，尝试 id 参数 fallback...');
         final fbParams = <String, dynamic>{
@@ -423,6 +460,23 @@ class CmsJsonApi {
     int page = 1,
     Site? site,
     SearchCancelToken? cancelToken,
+  }) => _search(apiEndpoint, keyword,
+      page: page, site: site, cancelToken: cancelToken);
+
+  Future<VodPageResult> searchType4(Site site, String keyword, {
+    int page = 1,
+    bool quick = false,
+    SearchCancelToken? cancelToken,
+  }) => _search(site.api, keyword,
+      page: page, quick: quick, site: site, cancelToken: cancelToken);
+
+  Future<VodPageResult> _search(
+    String apiEndpoint,
+    String keyword, {
+    int page = 1,
+    bool quick = false,
+    Site? site,
+    SearchCancelToken? cancelToken,
   }) async {
     final siteName = site?.name ?? '未知站源';
     final siteType = site?.type ?? 0;
@@ -447,6 +501,7 @@ class CmsJsonApi {
       final queryParams = <String, dynamic>{
         'wd': query,
         'pg': page.toString(),
+        if (siteType == 4) 'quick': quick ? '1' : '0',
       };
       if (extendParam != null) {
         queryParams['extend'] = extendParam;
@@ -468,7 +523,7 @@ class CmsJsonApi {
       }
 
       // 策略 2 fallback (TVBox 标准): 如果直接 wd 检索为空，尝试带 ac 参数 (ac=detail 或 ac=videolist)
-      if (result.list.isEmpty) {
+      if (result.list.isEmpty && siteType != 4) {
         _log('SiteApi::search', '--> 策略 1 (纯wd) 未返回数据，尝试策略 2 (附带 ac 参数)...');
         final params2 = <String, dynamic>{
           'ac': (siteType == 0) ? 'videolist' : 'detail',
@@ -515,7 +570,7 @@ class CmsJsonApi {
       }
 
       // 如果搜索结果中没有封面图，自动触发 fetchPic 批量补齐海报 (同 TVBox SiteApi.fetchPic)
-      if (result.list.isNotEmpty &&
+      if (siteType != 4 && result.list.isNotEmpty &&
           result.list.any((item) => item.pic.isEmpty) &&
           !(cancelToken?.isCancelled ?? false)) {
         _log('SiteApi::search', '--> 检索结果存在缺少海报的条目，正在执行 fetchPic 补全海报...');
@@ -541,6 +596,50 @@ class CmsJsonApi {
       _log('SiteApi::search', '<-- [$siteName] 搜索发生异常: $e');
       rethrow;
     }
+  }
+
+  /// drpy-node type:4 的播放接口始终请求源站，包括输入本身已是媒体 URL 的情况。
+  Future<SpiderPlayResult> fetchPlayResult(Site site,
+      {required String flag, required String id}) async {
+    if (site.type != 4) throw UnsupportedError('只有 type:4 支持 HTTP 播放接口');
+    final endpoint = _resolveHttpEndpoint(site.api, site);
+    if (endpoint == null) throw const FormatException('type:4 站源没有有效的 HTTP API 地址');
+    final extend = _getExtendParam(site);
+    final String raw;
+    try {
+      raw = await _httpGet(endpoint,
+          queryParams: {
+            'play': id,
+            'flag': flag,
+            if (extend != null) 'extend': extend,
+          },
+          headers: _buildHeaders(site),
+          logTag: 'SiteApi::fetchPlayResult');
+    } on DioException catch (error) {
+      final status = error.response?.statusCode;
+      throw StateError('站源 [${site.name}] type:4 播放请求失败'
+          '（${status == null ? error.type.name : 'HTTP $status'}）');
+    }
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) throw const FormatException('type:4 未返回播放地址');
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(trimmed);
+    } on FormatException {
+      decoded = {'url': trimmed};
+    }
+    if (decoded is String) decoded = {'url': decoded};
+    if (decoded is! Map) throw const FormatException('type:4 播放响应格式无效');
+    if (decoded['error'] != null) {
+      throw FormatException('type:4 播放接口失败：${playResultHint(decoded) ?? '源站返回错误'}');
+    }
+    final result = SpiderPlayResult.fromJson(decoded, sourceLabel: 'type:4');
+    final uri = Uri.tryParse(result.url);
+    if (uri == null || !['http', 'https', 'rtmp', 'rtsp', 'file'].contains(uri.scheme) ||
+        (uri.scheme != 'file' && uri.host.isEmpty)) {
+      throw const FormatException('type:4 未返回有效媒体地址');
+    }
+    return result;
   }
 
   /// 补全搜索结果海报图片 (同 TVBox 原版 SiteApi.fetchPic)
@@ -587,26 +686,28 @@ class CmsJsonApi {
   }
 
   /// 统一解析 JSON / XML 内容
-  VodPageResult _parseContent(String raw, {int type = 1, Site? site}) {
+  VodPageResult _parseContent(String raw,
+      {int type = 1, Site? site, String? homeBaseUrl}) {
     final trimmed = raw.trim();
     if (trimmed.isEmpty) return const VodPageResult.empty();
 
     // 1. 如果以 { 或 [ 开头，优先按 JSON 解析
     if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-      return _parseJsonContent(trimmed, site: site);
+      return _parseJsonContent(trimmed, site: site, homeBaseUrl: homeBaseUrl);
     }
 
     // 2. 如果以 XML 标签开头或 type == 0，按 XML 解析
     if (type == 0 || trimmed.startsWith('<?xml') || trimmed.startsWith('<rss') || trimmed.startsWith('<root') || trimmed.startsWith('<')) {
-      return _parseXmlContent(trimmed, site: site);
+      return _parseXmlContent(trimmed, site: site, homeBaseUrl: homeBaseUrl);
     }
 
     // 3. 默认按 JSON 解析
-    return _parseJsonContent(trimmed, site: site);
+    return _parseJsonContent(trimmed, site: site, homeBaseUrl: homeBaseUrl);
   }
 
   /// 解析 XML 格式采集源
-  VodPageResult _parseXmlContent(String xmlString, {Site? site}) {
+  VodPageResult _parseXmlContent(String xmlString,
+      {Site? site, String? homeBaseUrl}) {
     final categories = <VodCategory>[];
     final items = <VodItem>[];
 
@@ -658,6 +759,10 @@ class CmsJsonApi {
       limit: items.length,
       categories: categories,
       list: items,
+      siteIcon: homeBaseUrl == null ? null : parseHomeSiteIcon({
+        'siteicon': _extractXmlTag(xmlString, 'siteicon'),
+        'siteurl': _extractXmlTag(xmlString, 'siteurl'),
+      }, baseUrl: homeBaseUrl),
     );
   }
 
@@ -667,7 +772,8 @@ class CmsJsonApi {
   }
 
   /// 解析 JSON 格式采集源
-  VodPageResult _parseJsonContent(String jsonString, {Site? site}) {
+  VodPageResult _parseJsonContent(String jsonString,
+      {Site? site, String? homeBaseUrl}) {
     final map = _ensureJsonMap(jsonString);
 
     // 提取视频列表 (兼容 list / data / items / results)
@@ -718,6 +824,9 @@ class CmsJsonApi {
       list: list,
       categories: categories,
       filters: parseVodFilters(map['filters']),
+      siteIcon: homeBaseUrl == null
+          ? null
+          : parseHomeSiteIcon(map, baseUrl: homeBaseUrl),
     );
   }
 

@@ -37,8 +37,8 @@ import javax.crypto.spec.SecretKeySpec;
  */
 public class MyCrypto {
 
-    /** 载荷里的编译期常量，原值 0（由 class 文件 ConstantValue 读出）。 */
-    public static final int o0OoO0oO0oOoO0O0oO = 0;
+    /** 载荷 AwInit 会在初始化时写入，须保持原类的可写静态字段契约。 */
+    public static int o0OoO0oO0oOoO0O0oO = 0;
 
     /** 调用追踪开关：{@code -Dmycrypto.trace=1}，只用于定位站点到底用了哪些算法。 */
     private static final boolean TRACE = "1".equals(System.getProperty("mycrypto.trace"));

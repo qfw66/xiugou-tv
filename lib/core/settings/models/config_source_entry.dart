@@ -9,6 +9,10 @@ class ConfigSourceEntry {
 
   /// 用户自定义名称；为空时界面显示地址
   final String name;
+  final String note;
+
+  /// 用户分类；空串表示未分类。
+  final String category;
 
   /// 最近一次成功加载时间（毫秒时间戳）
   final int lastUsedAt;
@@ -19,6 +23,8 @@ class ConfigSourceEntry {
     required this.kind,
     required this.location,
     this.name = '',
+    this.note = '',
+    this.category = '',
     this.lastUsedAt = 0,
     this.siteCount = 0,
     this.liveCount = 0,
@@ -43,6 +49,8 @@ class ConfigSourceEntry {
       kind: kind,
       location: location,
       name: json['name']?.toString() ?? '',
+      note: json['note']?.toString() ?? '',
+      category: json['category']?.toString() ?? '',
       lastUsedAt: asInt(json['lastUsedAt']),
       siteCount: asInt(json['siteCount']),
       liveCount: asInt(json['liveCount']),
@@ -53,16 +61,20 @@ class ConfigSourceEntry {
         'kind': kind.name,
         'location': location,
         if (name.isNotEmpty) 'name': name,
+        if (note.isNotEmpty) 'note': note,
+        if (category.isNotEmpty) 'category': category,
         'lastUsedAt': lastUsedAt,
         'siteCount': siteCount,
         'liveCount': liveCount,
       };
 
-  ConfigSourceEntry copyWith({String? name, int? lastUsedAt, int? siteCount, int? liveCount}) {
+  ConfigSourceEntry copyWith({String? name, String? note, String? category, int? lastUsedAt, int? siteCount, int? liveCount}) {
     return ConfigSourceEntry(
       kind: kind,
       location: location,
       name: name ?? this.name,
+      note: note ?? this.note,
+      category: category ?? this.category,
       lastUsedAt: lastUsedAt ?? this.lastUsedAt,
       siteCount: siteCount ?? this.siteCount,
       liveCount: liveCount ?? this.liveCount,

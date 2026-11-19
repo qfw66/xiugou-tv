@@ -15,6 +15,8 @@
     Skip compiling the Inno Setup installer.
 .PARAMETER SkipSmoke
     跳过发布产物冒烟门禁（scripts/verify_release.ps1）。仅限本地调试打包；发布不得使用。
+.PARAMETER AllowMachineInstallCoexistence
+    允许门禁以 /CURRENTUSER 在临时目录测试；现有 HKLM 安装必须保持指纹不变，已有 HKCU 安装仍拒绝。
 #>
 
 param (
@@ -22,7 +24,8 @@ param (
     [string]$FlutterPath = "",
     [switch]$SkipZip = $false,
     [switch]$SkipInstaller = $false,
-    [switch]$SkipSmoke = $false
+    [switch]$SkipSmoke = $false,
+    [switch]$AllowMachineInstallCoexistence = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +33,8 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path "$ScriptDir/..").Path
 $BuildOutputDir = "$ProjectRoot/build/windows/x64/runner/Release"
 $DistDir = "$ProjectRoot/dist"
+. (Join-Path $ScriptDir 'package_tree.ps1')
+$PowerShellExe = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
 
 # 版本号默认跟随 pubspec.yaml（开发版本真源）；显式传 -Version 时以参数为准。
 if ([string]::IsNullOrWhiteSpace($Version)) {
@@ -216,7 +221,7 @@ foreach ($requiredRuntimeFile in @("bin/java.exe", "bin/server/jvm.dll")) {
 }
 
 Write-Host "  [*] Building companion-service.jar..." -ForegroundColor Cyan
-& powershell -NoProfile -NonInteractive -File $CompanionScript
+& $PowerShellExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $CompanionScript
 if ($LASTEXITCODE -ne 0) {
     throw "Companion build failed with exit code $LASTEXITCODE."
 }
@@ -270,10 +275,28 @@ foreach ($pyDir in @("pyshell", "pyruntime")) {
     $sourcePyDir = Join-Path $ProjectRoot "companion/dist/$pyDir"
     if (Test-Path -LiteralPath $sourcePyDir -PathType Container) {
         Copy-Item -LiteralPath $sourcePyDir -Destination $TargetCompanionDir -Recurse -Force
-    } elseif ($pyDir -eq "pyshell" -or (Test-Path -LiteralPath (Join-Path $ProjectRoot "companion/$pyDir"))) {
+    } else {
         throw "Companion build did not produce companion/dist/$pyDir (py sources would break in the release package)."
     }
 }
+# 猫源由独立 Node 进程执行；发布包不得依赖开发机 PATH 或上一轮残留文件。
+$NodeRuntimeDir = Join-Path $ProjectRoot "companion/dist/noderuntime"
+foreach ($requiredNodeFile in @("node.exe", "LICENSE")) {
+    $requiredNodePath = Join-Path $NodeRuntimeDir $requiredNodeFile
+    if (-not (Test-Path -LiteralPath $requiredNodePath -PathType Leaf) -or
+        (Get-Item -LiteralPath $requiredNodePath).Length -eq 0) {
+        throw "Companion build did not produce noderuntime/$requiredNodeFile (cat sources require the bundled Node runtime)."
+    }
+}
+Copy-Item -LiteralPath $NodeRuntimeDir -Destination $TargetCompanionDir -Recurse -Force
+# PHP type:3 sources need their own interpreter; remote type:4 sources use HTTP.
+$PhpRuntimeDir = Join-Path $ProjectRoot 'companion/dist/phpruntime'
+foreach ($requiredPhpFile in @('php.exe', 'php8.dll', 'license.txt', 'readme-redist-bins.txt', 'cacert.pem', 'ext/php_curl.dll', 'ext/php_mbstring.dll', 'ext/php_openssl.dll', 'ext/php_sqlite3.dll')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $PhpRuntimeDir $requiredPhpFile) -PathType Leaf)) {
+        throw "PHP runtime missing: $requiredPhpFile. Run scripts/setup_php_runtime.ps1 first."
+    }
+}
+Copy-Item -LiteralPath $PhpRuntimeDir -Destination $TargetCompanionDir -Recurse -Force
 $BundledCompanionFiles = @(Get-ChildItem -LiteralPath $TargetCompanionDir -Recurse -File)
 Write-Host "  [+] Bundled companion-service.jar + $($CompanionLibJars.Count) runtime lib(s) + $($CompanionUnidbgJars.Count) guard-decrypt lib(s) ($($BundledCompanionFiles.Count) files total)." -ForegroundColor Green
 
@@ -334,9 +357,20 @@ if (-not (Test-Path $DistDir)) {
     New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
 }
 
-# 4. Generate Portable ZIP
+# One fresh application tree feeds ZIP, Inno, and the smoke comparison. Never
+# recursively copy Release: its user_data may contain the developer's real profile.
+# Keep the application license and versioned third-party notice with both distributions.
+Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSE') -Destination (Join-Path $BuildOutputDir 'LICENSE') -Force
+$ReleaseLicenses = Join-Path $BuildOutputDir 'licenses'
+New-Item -ItemType Directory -Path $ReleaseLicenses -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $ProjectRoot 'THIRD_PARTY_LICENSES.md') -Destination $ReleaseLicenses -Force
 $PackageStage = Join-Path $ProjectRoot ("build/packaging/" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $PackageStage -Force | Out-Null
+$ApplicationStage = New-StagedApplicationTree -SourceDir $BuildOutputDir -StageDir (Join-Path $PackageStage 'application')
+$StagedAppDir = $ApplicationStage.Root
+$InnoFileList = Join-Path $PackageStage 'application-files.iss'
+Write-PackageInnoFileList -StageDir $StagedAppDir -DestinationPath $InnoFileList
+Write-Host "  [+] Clean application stage: $StagedAppDir ($($ApplicationStage.Files.Count) files; $($ApplicationStage.Excluded.Count) state/cache/log paths excluded)." -ForegroundColor Green
 $Artifacts = @()
 if (-not $SkipZip) {
     Write-Host "[4/5] Packaging Portable ZIP archive..." -ForegroundColor Yellow
@@ -347,15 +381,14 @@ if (-not $SkipZip) {
     # 部分解压工具会把整条路径当成文件名。这里逐个文件写入并显式用 / 作分隔。
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $ZipSourceRoot = [System.IO.Path]::GetFullPath($BuildOutputDir).TrimEnd([char]92, [char]47)
+    $ZipSourceRoot = $StagedAppDir
     $ZipStream = [System.IO.File]::Open($ZipPath, [System.IO.FileMode]::CreateNew)
     try {
         $ZipArchive = New-Object System.IO.Compression.ZipArchive($ZipStream, [System.IO.Compression.ZipArchiveMode]::Create)
         try {
-            foreach ($zipFile in (Get-ChildItem -LiteralPath $ZipSourceRoot -Recurse -File)) {
-                $entryName = $zipFile.FullName.Substring($ZipSourceRoot.Length + 1).Replace([char]92, [char]47)
+            foreach ($entryName in $ApplicationStage.Files) {
                 [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-                    $ZipArchive, $zipFile.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal)
+                    $ZipArchive, (Join-Path $ZipSourceRoot $entryName), $entryName, [System.IO.Compression.CompressionLevel]::Optimal)
             }
         } finally { $ZipArchive.Dispose() }
     } finally { $ZipStream.Dispose() }
@@ -389,7 +422,7 @@ if (-not $SkipInstaller) {
 
     if ($IsccPath) {
         Write-Host "  [+] Running Inno Setup: $IsccPath" -ForegroundColor Cyan
-        & $IsccPath "/DAppVersion=$Version" "/DSourceDir=$BuildOutputDir" "/DOutputDir=$PackageStage" "$ScriptDir/installer.iss"
+        & $IsccPath "/DAppVersion=$Version" "/DSourceDir=$StagedAppDir" "/DPackageFilesInclude=$InnoFileList" "/DOutputDir=$PackageStage" "$ScriptDir/installer.iss"
         if ($LASTEXITCODE -ne 0) {
             throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
         }
@@ -430,10 +463,11 @@ if ($Artifacts.Count -gt 0) {
     } else {
         Write-Host "[6/6] Running release smoke gate..." -ForegroundColor Yellow
         $GateArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "verify_release.ps1"),
-            "-Version", $Version, "-ArtifactDir", $PackageStage, "-BuildOutputDir", $BuildOutputDir)
+            "-Version", $Version, "-ArtifactDir", $PackageStage, "-StagedAppDir", $StagedAppDir)
         if ($SkipZip) { $GateArgs += "-SkipZip" }
+        if ($AllowMachineInstallCoexistence) { $GateArgs += '-AllowMachineInstallCoexistence' }
         if ($SkipInstaller) { $GateArgs += "-SkipInstaller" }
-        & powershell @GateArgs
+        & $PowerShellExe @GateArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Release smoke gate FAILED (exit $LASTEXITCODE). Artifacts kept in $PackageStage; dist was not updated."
         }

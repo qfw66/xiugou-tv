@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../../core/player/models/player_state.dart';
 import '../../../core/push/push_input_resolver.dart';
+import '../../../core/push/webdav_profile_store.dart';
 import '../../../core/push/webdav_repository.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import 'webdav_browser_dialog.dart';
+import 'app_dialog.dart';
 
 /// 所有输入共享解析与播放入口；系统剪贴板只在用户点击时读取。
 class PushStreamDialog extends StatefulWidget {
@@ -17,6 +19,7 @@ class PushStreamDialog extends StatefulWidget {
   final Future<String?> Function()? readClipboard;
   final Future<List<String>> Function()? pickMediaFiles;
   final WebDavRepository? webDavRepository;
+  final WebDavProfileStore? webDavProfileStore;
 
   const PushStreamDialog({
     super.key,
@@ -25,6 +28,7 @@ class PushStreamDialog extends StatefulWidget {
     this.readClipboard,
     this.pickMediaFiles,
     this.webDavRepository,
+    this.webDavProfileStore,
   });
 
   @override
@@ -104,7 +108,7 @@ class _PushStreamDialogState extends State<PushStreamDialog> {
       throw const FormatException('一次最多选择 200 个候选，请缩小选择范围');
     }
     if (candidates.length == 1) return candidates.single;
-    return showDialog<String>(
+    return showAppDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('选择要播放的媒体'),
@@ -160,10 +164,12 @@ class _PushStreamDialogState extends State<PushStreamDialog> {
       });
 
   Future<void> _fromWebDav() => _run(() async {
-        final spec = await showDialog<MediaPlaySpec>(
+        final spec = await showAppDialog<MediaPlaySpec>(
           context: context,
-          builder: (_) =>
-              WebDavBrowserDialog(repository: widget.webDavRepository),
+          builder: (_) => WebDavBrowserDialog(
+            repository: widget.webDavRepository,
+            profileStore: widget.webDavProfileStore,
+          ),
         );
         if (!mounted || _closing || spec == null) return;
         _webDavSelection = spec;
@@ -233,7 +239,7 @@ class _PushStreamDialogState extends State<PushStreamDialog> {
                   IconButton(
                     tooltip: '关闭推送',
                     onPressed: _close,
-                    icon: Icon(Icons.close, color: palette.textSub),
+                    icon: Icon(Icons.close_rounded, color: palette.textSub),
                   ),
                 ]),
                 const SizedBox(height: 18),
@@ -264,17 +270,17 @@ class _PushStreamDialogState extends State<PushStreamDialog> {
                 Wrap(spacing: 8, runSpacing: 8, children: [
                   OutlinedButton.icon(
                     onPressed: _busy ? null : _fromClipboard,
-                    icon: const Icon(Icons.content_paste, size: 17),
+                    icon: const Icon(Icons.content_paste_rounded, size: 17),
                     label: const Text('识别剪贴板'),
                   ),
                   OutlinedButton.icon(
                     onPressed: _busy ? null : _fromFiles,
-                    icon: const Icon(Icons.folder_open, size: 17),
+                    icon: const Icon(Icons.folder_open_rounded, size: 17),
                     label: const Text('选择媒体文件'),
                   ),
                   OutlinedButton.icon(
                     onPressed: _busy ? null : _fromWebDav,
-                    icon: const Icon(Icons.cloud_outlined, size: 17),
+                    icon: const Icon(Icons.cloud_rounded, size: 17),
                     label: const Text('浏览 WebDAV'),
                   ),
                 ]),
@@ -311,7 +317,7 @@ class _PushStreamDialogState extends State<PushStreamDialog> {
                               : palette.borderStrong),
                     ),
                     child: Column(children: [
-                      Icon(Icons.file_download_outlined,
+                      Icon(Icons.file_download_rounded,
                           color: _dragging ? palette.danger : palette.textSub),
                       const SizedBox(height: 6),
                       Text('将媒体文件拖到这里即可播放',

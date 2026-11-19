@@ -66,10 +66,10 @@ public final class HardshellPipeline {
     }
 
     /**
-     * 按源声明的修补器链修补 dex2jar 产物。
+     * 按源声明的修补器链修补 dex2jar 产物，并处理精确内容匹配的兼容修补。
      *
-     * <p>识别依据是产物自身特征（{@link ShellRegistry#matchPayload}），
-     * 因此调用点无需知道自己正在处理哪个源。
+     * <p>壳形态由 {@link ShellRegistry#matchPayload} 判定；PanConfig 的补充修补
+     * 只匹配已验证的原始 SHA-256，不扩大为普通 jar 的通用转换规则。
      *
      * @param converted dex2jar 产物（就地修补）
      * @param sourceJar 修补前的原始载荷 jar（用于判定形态）
@@ -77,14 +77,18 @@ public final class HardshellPipeline {
      */
     public static boolean repair(File converted, File sourceJar) {
         if (converted == null || !converted.isFile()) return false;
+        boolean changed = FishArrayCloneRepair.repair(converted, sourceJar);
+        changed = PanConfigRepair.repair(converted, sourceJar) || changed;
+        changed = WoggCatalogRepair.repair(converted, sourceJar) || changed;
         ShellProfile profile = ShellRegistry.matchPayload(sourceJar);
-        if (profile == null || profile.repairIds.length == 0) return false;
-        return RepairChain.run(converted, profile);
+        if (profile == null || profile.repairIds.length == 0) return changed;
+        return RepairChain.run(converted, profile) || changed;
     }
 
-    /** 转换产物缓存名里的修补链版本戳；非加固载荷为空串（不影响既有缓存名）。 */
+    /** 转换缓存带修补版本戳；未命中壳形态或精确内容修补的源保持原缓存名。 */
     public static String repairStamp(File sourceJar) {
-        return RepairChain.stamp(ShellRegistry.matchPayload(sourceJar));
+        return RepairChain.stamp(ShellRegistry.matchPayload(sourceJar)) + PanConfigRepair.stamp(sourceJar)
+                + WoggCatalogRepair.stamp(sourceJar) + FishArrayCloneRepair.stamp(sourceJar);
     }
 
     /** 加固载荷自己的初始化入口类（{@code payload.init}）；非加固载荷或未声明时为 null。 */

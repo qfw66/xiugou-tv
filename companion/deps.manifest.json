@@ -1,6 +1,6 @@
 {
   "note": "构建期依赖（javac classpath / 打包输入 / 运行时子进程）；各自保留上游许可。",
-  "count": 41,
+  "count": 43,
   "files": [
     {
       "path": "companion/lib/android-json-0.0.20131108.vaadin1.jar",
@@ -38,6 +38,11 @@
       "sha256": "cb4046c0ca469961b93d6159f87ae17ff449847a3677ffdde59ba09091bf1d84"
     },
     {
+      "path": "companion/lib/commons-lang3-3.18.0.jar",
+      "bytes": 702952,
+      "sha256": "4eeeae8d20c078abb64b015ec158add383ac581571cddc45c68f0c9ae0230720"
+    },
+    {
       "path": "companion/lib/core-3.5.3.jar",
       "bytes": 607650,
       "sha256": "8d8064c1636fdaef7189dd9055c7d59950a8940a12f2293956446ec3c109fd82"
@@ -68,9 +73,9 @@
       "sha256": "cd4344a16aab7e98d4415fd91ef0ff10c438398e9fa35a93f2957915eb41c7af"
     },
     {
-      "path": "companion/lib/gson-2.10.1.jar",
-      "bytes": 283367,
-      "sha256": "4241c14a7727c34feea6507ec801318a3d4a90f070e4525681079fb94ee4c593"
+      "path": "companion/lib/gson-2.11.0.jar",
+      "bytes": 298435,
+      "sha256": "57928d6e5a6edeb2abd3770a8f95ba44dce45f3b23b7a9dc2b309c581552a78b"
     },
     {
       "path": "companion/lib/icu4j-24.1.2.jar",
@@ -121,6 +126,11 @@
       "path": "companion/lib/regex-24.1.2.jar",
       "bytes": 3565453,
       "sha256": "f54d2e8c04e457e14ea7ecabacef355af14f9dfd25259326b64aa5cbc53afcbb"
+    },
+    {
+      "path": "companion/lib/smbj-0.13.0.jar",
+      "bytes": 604980,
+      "sha256": "d9a2fb2585ec2f62d2689b894e0b98f30ac694d3da18509dbd99ed60959ab093"
     },
     {
       "path": "companion/lib/truffle-api-24.1.2.jar",

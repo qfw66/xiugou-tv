@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>生命周期与 Android 一致：首次 {@link #show()} 前调用 {@link #onCreate}（自定义弹窗在这里
  * {@code setContentView}）；{@link #cancel()} 先回调取消监听再关闭；关闭时回调关闭监听。
  */
-public class Dialog implements DialogInterface {
+public class Dialog implements DialogInterface, KeyEvent.Callback {
 
     public static final int BUTTON_POSITIVE = -1;
     public static final int BUTTON_NEGATIVE = -2;
@@ -218,4 +218,16 @@ public class Dialog implements DialogInterface {
         if (onKeyListener != null && onKeyListener.onKey(this, KeyEvent.KEYCODE_BACK, null)) return;
         if (cancelable) cancel();
     }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) { return false; }
+
+    @Override
+    public boolean onKeyLongPress(int keyCode, KeyEvent event) { return false; }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) { return false; }
+
+    @Override
+    public boolean onKeyMultiple(int keyCode, int count, KeyEvent event) { return false; }
 }

@@ -62,6 +62,8 @@ public class Main {
 
         // 安装 Android 运行时补丁（AES/CBC/PKCS7Padding 等），幂等。
         AndroidBridge.install();
+        // 拦住载荷自己发起的 System.exit：进程活着，动作失败但服务不崩。
+        ExitGuard.install();
         // 旧版本把原生库/解库目录留在 %TEMP%（每次启动 unidbg 一份），启动时尽力清一次
         com.fongmi.companion.fs.NativeCache.sweepLegacyTemp();
 

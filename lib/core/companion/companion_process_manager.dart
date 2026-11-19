@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../net/http_client_factory.dart';
+import 'companion_log.dart';
+import 'companion_recovery.dart';
 import 'companion_stderr_filter.dart';
 import 'process_job.dart';
 
@@ -21,9 +23,9 @@ enum CompanionStatus {
 
 /// 本地 Java 伴随进程管理器
 /// 负责 Java 伴随进程的生命周期管理、多级 Java 运行时探测与就绪验证
-class CompanionProcessManager {
+class CompanionProcessManager implements CompanionRecoveryHost {
   static final CompanionProcessManager _instance =
-      CompanionProcessManager.scoped();
+      CompanionProcessManager.scoped(log: CompanionLog.shared());
   factory CompanionProcessManager() => _instance;
 
   /// companion 进程的 JVM 调优参数（⑥ 内存批定案，对照数据见
@@ -33,6 +35,9 @@ class CompanionProcessManager {
     '-Xmx768m',
     '-XX:MaxMetaspaceSize=128m',
     '-XX:+UseSerialGC',
+    // JDK 17+ 只有显式 allow 才允许 setSecurityManager；ExitGuard 靠它拦截
+    // 载荷发起的 System.exit(1)（否则一次站源动作就能把整个服务打死）。
+    '-Djava.security.manager=allow',
   ];
 
   /// 调试开关：
@@ -62,6 +67,7 @@ class CompanionProcessManager {
     // 就自动停用，下次使用经懒启动链路重新拉起；检测粒度 idleCheckInterval。
     this.idleTimeout = const Duration(minutes: 30),
     this.idleCheckInterval = const Duration(minutes: 1),
+    CompanionLog? log,
   })  : _dio = dio ??
             HttpClientFactory.createDio(BaseOptions(
                 connectTimeout: const Duration(seconds: 3),
@@ -70,7 +76,8 @@ class CompanionProcessManager {
             ? File(Platform.resolvedExecutable).parent.path
             : p.normalize(p.absolute(applicationDirectory)),
         _javaResolver = javaResolver,
-        _processStarter = processStarter ?? _startAdopted;
+        _processStarter = processStarter ?? _startAdopted,
+        _log = log ?? CompanionLog.shared();
 
   /// 默认启动方式：拉起后立即交给 Job Object，主程序崩溃 / 被强杀时整棵 companion 进程树随之终止。
   /// companion 的孙进程（密码服务、python）都是首次用到站点时才派生，晚于这里的收养，因此全部在 Job 内。
@@ -98,6 +105,9 @@ class CompanionProcessManager {
 
   final Dio _dio;
 
+  /// 诊断日志：进程生命周期、stderr 关键行与自愈结果（见 [CompanionLog]）。
+  final CompanionLog _log;
+
   Process? _process;
   Future<bool>? _starting;
   Future<void>? _stopping;
@@ -109,6 +119,10 @@ class CompanionProcessManager {
   Timer? _idleWatch;
   DateTime _lastActivity = DateTime.now();
 
+  /// 播放会话租约计数：网盘直链由 companion 的本地代理持续传流，期间没有 RPC，
+  /// 因此不能只看 [notifyActivity]。持有租约时永不因空闲停用（见 [_onIdleTick]）。
+  int _activeLeases = 0;
+
   bool get _stopRequested => _closed || _stopping != null;
   int? _port;
   CompanionStatus _status = CompanionStatus.stopped;
@@ -117,10 +131,34 @@ class CompanionProcessManager {
 
   CompanionStatus get status => _status;
   int? get port => _port;
+
+  @override
   bool get isRunning => _status == CompanionStatus.running && _port != null;
+
+  /// 应用正在退出（[shutdown] 之后）：任何自愈都不该再拉起新进程。
+  @override
+  bool get isClosed => _closed;
+
+  /// 诊断日志（自愈失败时提示里会带上它的路径）。
+  @override
+  CompanionLog get companionLog => _log;
+
+  @override
   String get lastError => _lastError;
   String? get resolvedJavaPath => _resolvedJavaPath;
   String get baseUrl => isRunning ? 'http://127.0.0.1:$_port' : '';
+
+  /// JVM 致命错误文件（`hs_err_pid<pid>.log`）的落点：与 `companion.log` 同目录。
+  ///
+  /// 站源载荷偶发「无任何输出就退出」时，这是唯一能说明是否原生崩溃的证据。
+  String _hsErrorFile() {
+    try {
+      final dir = File(_log.path).parent.path;
+      return '$dir/hs_err_pid%p.log';
+    } catch (_) {
+      return 'hs_err_pid%p.log';
+    }
+  }
 
   /// 就绪端口：服务进入 running 时为端口号，停止 / 退出 / 启动失败时为 null。
   /// 载荷弹窗通道据此启停长轮询（见 CompanionUiChannel）。
@@ -165,6 +203,16 @@ class CompanionProcessManager {
     if (first == null) return null;
     if (first != 1) return first;
     return int.tryParse(match.group(2) ?? '') ?? first;
+  }
+
+  /// 关掉调试也要落盘的 stdout 行：退出原因比性能日志重要得多。
+  static bool _isDiagnosticStdout(String line) {
+    return line.startsWith('[ExitGuard]') ||
+        line.startsWith('[COMPANION_ERROR]') ||
+        line.startsWith('[COMPANION_STOPPING]') ||
+        line.startsWith('[COMPANION_HALT_TIMEOUT]') ||
+        line.startsWith('[recovery]') ||
+        line.startsWith('[SpiderServer]');
   }
 
   /// 探测 Java 可执行文件的主版本；不可执行或输出无法识别时返回 null。
@@ -227,6 +275,7 @@ class CompanionProcessManager {
   }
 
   /// 同一生命周期内的预热与按需请求共享一次启动。
+  @override
   Future<bool> start({String? jarPath, int targetPort = 0}) async {
     if (_closed) return false;
     // 空闲停用（或普通 stop）进行中：等待停止收尾后按需重启，避免恰逢停用
@@ -251,6 +300,22 @@ class CompanionProcessManager {
     });
   }
 
+  /// 自愈专用：进程还在但 HTTP 已不可达（卡死 / 半死）时，先停再起一次。
+  ///
+  /// 直接调 [start] 会因为 `isRunning` 仍为 true 而立即返回 true，等于没重启；
+  /// 停不下来时 [_terminateProcess] 会升级成 taskkill 进程树。全程复用
+  /// [_starting] / [_stopping] 的 singleflight，并发自愈也只会有一个新进程。
+  @override
+  Future<bool> restart() async {
+    _log.write('[restart] 请求重启（status=$_status lastError=$_lastError）');
+    try {
+      await stop();
+    } catch (error) {
+      _log.write('[restart] 停止阶段失败：$error');
+    }
+    return start();
+  }
+
   Future<bool> _start(String? jarPath, int targetPort) async {
     _status = CompanionStatus.starting;
     _lastError = '';
@@ -266,10 +331,15 @@ class CompanionProcessManager {
         _lastError =
             'Java Runtime Environment (JRE) >= $minimumJavaMajorVersion '
             'not found in runtime/jre, APPDATA, JAVA_HOME or PATH.';
+        _log.write('[start] 失败：$_lastError');
         return false;
       }
       if (!File(resolvedJar).existsSync()) {
         throw StateError('Companion service jar not found at $resolvedJar');
+      }
+      _log.write('[start] java=$javaCmd jar=$resolvedJar port=$targetPort');
+      if (debugCompanion) {
+        debugPrint('[companion] runtime java=$javaCmd jar=$resolvedJar');
       }
       final ready = Completer<int?>();
       String? fallback;
@@ -282,8 +352,11 @@ class CompanionProcessManager {
       // --stdin-watch=on 让 Java 侧在主进程异常退出（stdin 管道关闭）时自杀，
       // 避免留下无人回收的孤儿进程（见 companion/src/.../Main.java）。
       final process = await _processStarter(javaCmd, [
-        '-noverify',
+        // 非法转换字节码必须在加载时拒绝，否则 GC 扫描栈可能使 JVM 致命退出。
+        '-Xverify:all',
         ...companionJvmTuningArgs,
+        // 原生崩溃（hs_err）与 JVM 致命错误落到用户数据目录，便于用户直接回传。
+        '-XX:ErrorFile=${_hsErrorFile()}',
         if (debugCompanion) '-Dxiugou.debug=true',
         // 只改控制台输出编码，不动 file.encoding：后者会影响载荷里 new String(bytes) 的语义。
         if (debugCompanion) '-Dsun.stdout.encoding=UTF-8',
@@ -299,16 +372,25 @@ class CompanionProcessManager {
         if (fallback != null && fallback.isNotEmpty) '--fallback-proxy=$fallback',
       ]);
       _process = process;
+      _log.write('[start] pid=${process.pid}');
       _stdoutSubscription = process.stdout
           .transform(const Utf8Decoder(allowMalformed: true))
           .transform(const LineSplitter())
           .listen((line) {
         if (debugCompanion) debugPrint('[companion] $line');
-        final match =
-            RegExp(r'^\[COMPANION_READY\] PORT=(\d+)$').firstMatch(line.trim());
+        final trimmed = line.trim();
+        if (trimmed.isEmpty) return;
+        final match = RegExp(r'^\[COMPANION_READY\] PORT=(\d+)$').firstMatch(trimmed);
         final port = int.tryParse(match?.group(1) ?? '');
         if (port != null && port > 0 && port <= 65535 && !ready.isCompleted) {
+          _log.write('[ready] port=$port');
           ready.complete(port);
+        } else if (debugCompanion) {
+          _log.write('[stdout] $trimmed');
+        } else if (_isDiagnosticStdout(trimmed)) {
+          // 关掉调试时也要留下「为什么退出」的证据：ExitGuard 的拦截行、致命异常、
+          // 停机握手，这些都在 stdout 上，用户日志里缺了就只剩「无法连接」。
+          _log.write('[stdout] $trimmed');
         }
       }, onError: (Object error) {
         if (!ready.isCompleted) ready.complete(null);
@@ -323,19 +405,23 @@ class CompanionProcessManager {
         // 载荷（加固壳）大量 `catch { printStackTrace() }`，一条异常十几行；
         // 这里折叠成一行再转发，避免 debug 控制台被「看起来像崩了」的堆栈刷满。
         for (final folded in _stderrFilter.feed(line)) {
+          _log.write('[stderr] $folded');
           if (debugCompanion) debugPrint('[companion:err] $folded');
         }
         final meaningful = _stderrFilter.lastMeaningfulLine;
         if (meaningful != null) _lastError = meaningful;
       }, onError: (Object error) {
         _lastError = '$error';
+        _log.write('[stderr] 读取失败：$error');
         if (debugCompanion) debugPrint('[companion:err] $error');
       }, onDone: () {
         for (final folded in _stderrFilter.flush()) {
+          _log.write('[stderr] $folded');
           if (debugCompanion) debugPrint('[companion:err] $folded');
         }
       });
-      unawaited(process.exitCode.then((_) {
+      unawaited(process.exitCode.then((code) {
+        _log.write('[exit] code=$code pid=${process.pid}');
         if (!ready.isCompleted) ready.complete(null);
         if (identical(_process, process)) {
           _disarmIdleWatch();
@@ -369,9 +455,11 @@ class CompanionProcessManager {
       _readyPort.value = port;
       _lastActivity = DateTime.now();
       _armIdleWatch();
+      _log.write('[start] 就绪 port=$port');
       return true;
     } catch (error) {
       _lastError = '$error';
+      _log.write('[start] 失败：$error');
       if (!_stopRequested) {
         try {
           await _terminateProcess();
@@ -386,6 +474,7 @@ class CompanionProcessManager {
   }
 
   /// 发送健康检查
+  @override
   Future<bool> checkHealth() async {
     if (_port == null) return false;
     try {
@@ -406,6 +495,34 @@ class CompanionProcessManager {
   /// 真实使用上报：每次 spider RPC（加载/调用/自检）调用，推迟空闲停用。
   void notifyActivity() {
     _lastActivity = DateTime.now();
+  }
+
+  /// 当前持有的播放租约数（诊断与单测用）。
+  int get activeLeases => _activeLeases;
+
+  /// 申请一份“正在使用 companion”的租约：播放会话在关闭 / 换集 / 换源 / 出错前
+  /// 都应持有它，避免本地网盘代理正在传流时被空闲停用掐断（REPORT：
+  /// .do-it/verification/netdisk-idle-20261114/REPORT.md）。
+  ///
+  /// 租约只阻止**空闲**停用；显式 [stop] / [shutdown] 仍然生效。
+  /// 持有者必须 [CompanionLease.release]（可重复调用，只有首次生效）。
+  CompanionLease acquireLease(String reason) {
+    _activeLeases++;
+    _lastActivity = DateTime.now();
+    if (_debugFromDefine) {
+      debugPrint('[companion] 租约申请（$reason），当前 $_activeLeases');
+    }
+    return CompanionLease._(this, reason);
+  }
+
+  void _releaseLease(String reason) {
+    if (_activeLeases <= 0) return;
+    _activeLeases--;
+    // 释放时重置计时：释放后仍要完整等满 idleTimeout 才允许回收。
+    _lastActivity = DateTime.now();
+    if (_debugFromDefine) {
+      debugPrint('[companion] 租约释放（$reason），剩余 $_activeLeases');
+    }
   }
 
   /// 停止完成后可重新启动；完成意味着已确认子进程退出。
@@ -443,6 +560,7 @@ class CompanionProcessManager {
     final process = _process;
     if (process == null) return;
     final port = _port;
+    _log.write('[stop] pid=${process.pid} port=$port');
     if (port != null) {
       try {
         await _dio
@@ -450,10 +568,12 @@ class CompanionProcessManager {
             .timeout(exitTimeout);
       } catch (_) {
         // HTTP 失败不代表进程消失；仍须等待或终止已持有的进程。
+        _log.write('[stop] /shutdown 通知失败（继续等待退出）');
       }
       try {
         await process.exitCode.timeout(exitTimeout);
       } on TimeoutException {
+        _log.write('[stop] ${exitTimeout.inMilliseconds}ms 未退出，终止进程树');
         await _killProcessTree(process);
         await _awaitExitOrWarn(process);
       }
@@ -502,6 +622,7 @@ class CompanionProcessManager {
     } on TimeoutException {
       _lastError = 'companion 进程在 ${exitTimeout.inMilliseconds}ms 内未退出'
           '（pid=${process.pid}），已尝试终止进程树';
+      _log.write('[stop] $_lastError');
       debugPrint('[companion] $_lastError');
     }
   }
@@ -519,8 +640,14 @@ class CompanionProcessManager {
 
   void _onIdleTick() {
     if (!isRunning || _stopping != null || _starting != null) return;
+    // 播放租约存活即视为“正在使用”：本地代理可能正持续传流，RPC 计时不可信。
+    if (_activeLeases > 0) {
+      _lastActivity = DateTime.now();
+      return;
+    }
     if (DateTime.now().difference(_lastActivity) < idleTimeout) return;
     // 空闲停用走普通 stop 链路（HTTP /shutdown → 兜底 kill）；失败静默，留待下轮。
+    _log.write('[idle] 空闲停用 companion');
     unawaited(stop().catchError((Object _) {}));
   }
 
@@ -538,5 +665,30 @@ class CompanionProcessManager {
       }
     }
     return p.normalize(candidates.first);
+  }
+}
+
+/// 一份“播放会话正在使用 companion”的租约。
+///
+/// 语义：持有期间 [CompanionProcessManager] 不会因空闲而停用 companion
+/// （网盘直链播放只有本地代理传流、没有 RPC，空闲计时看不到）；释放后恢复
+/// 完整空闲计时。租约不阻止用户显式停用（设置页 / 退出应用）。
+class CompanionLease {
+  CompanionLease._(this._manager, this.reason);
+
+  final CompanionProcessManager _manager;
+
+  /// 谁持有（日志与单测定位用，如 `vod:playing`）。
+  final String reason;
+
+  bool _released = false;
+
+  bool get isReleased => _released;
+
+  /// 可重复调用；只有首次释放生效。
+  void release() {
+    if (_released) return;
+    _released = true;
+    _manager._releaseLease(reason);
   }
 }

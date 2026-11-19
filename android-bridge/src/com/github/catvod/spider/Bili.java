@@ -6,11 +6,11 @@ import com.github.catvod.bean.Result;
 import com.github.catvod.bean.Vod;
 import com.github.catvod.crawler.Spider;
 import com.github.catvod.net.OkHttp;
-import com.github.catvod.utils.Json;
 import com.github.catvod.utils.Util;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -19,31 +19,31 @@ public class Bili extends Spider {
 
     /** 形态一：`data.result` 是视频对象数组（老接口）。 */
     private static final String API_SEARCH_TYPE =
-            "https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=%s&page=%d";
+            "/x/web-interface/search/type?search_type=video&keyword=%s&page=%d";
     /** 形态二：`data.result` 是「分组数组」，video 在 `result_type=video` 的 `data` 里。 */
     private static final String API_SEARCH_ALL =
-            "https://api.bilibili.com/x/web-interface/search/all/v2?keyword=%s&page=%d";
+            "/x/web-interface/search/all/v2?keyword=%s&page=%d";
 
     private String jsonUrl = "";
-    private String rawExtend = "";
+    private String catalog;
 
     @Override
-    public void init(Context context, String extend) {
-        this.rawExtend = extend != null ? extend.trim() : "";
-        if (rawExtend.startsWith("{")) {
-            this.jsonUrl = Json.optString(rawExtend, "json", "");
-        } else if (rawExtend.startsWith("http://") || rawExtend.startsWith("https://")) {
-            this.jsonUrl = rawExtend;
+    public synchronized void init(Context context, String extend) throws Exception {
+        catalog = null;
+        jsonUrl = "";
+        String value = extend != null ? extend.trim() : "";
+        if (value.startsWith("{")) {
+            jsonUrl = new JSONObject(value).optString("json", "").trim();
+        } else if (value.startsWith("http://") || value.startsWith("https://")) {
+            jsonUrl = value;
         }
     }
 
     @Override
-    public String homeContent(boolean filter) throws Exception {
+    public synchronized String homeContent(boolean filter) throws Exception {
         if (!jsonUrl.isEmpty()) {
-            String remoteJson = OkHttp.string(jsonUrl);
-            if (remoteJson != null && remoteJson.trim().startsWith("{")) {
-                return remoteJson;
-            }
+            if (catalog == null) catalog = readCatalog();
+            return catalog;
         }
 
         List<Class> classes = Arrays.asList(
@@ -57,29 +57,77 @@ public class Bili extends Spider {
         return Result.get().classes(classes).string();
     }
 
+    private String readCatalog() throws Exception {
+        okhttp3.Request request = new okhttp3.Request.Builder().url(jsonUrl).build();
+        try (okhttp3.Response response = OkHttp.client().newCall(request).execute()) {
+            if (!response.isSuccessful() || response.body() == null) {
+                throw new IOException("Bilibili 分类配置请求失败（HTTP " + response.code() + "）");
+            }
+            JSONObject data = new JSONObject(response.body().string());
+            JSONArray source = data.getJSONArray("class");
+            JSONArray categories = new JSONArray();
+            for (int i = 0; i < source.length(); i++) {
+                JSONObject category = source.optJSONObject(i);
+                if (category == null) continue;
+                String id = category.optString("type_id", category.optString("id", "")).trim();
+                // peizhi 是移动插件的登录操作，桌面分类请求会把它误当成搜索词。
+                if (!id.isEmpty() && !id.equals("peizhi")) categories.put(category);
+            }
+            if (categories.length() == 0) throw new IOException("Bilibili 分类配置没有节目分类");
+            return data.put("class", categories).toString();
+        }
+    }
+
     @Override
     public String categoryContent(String tid, String pg, boolean filter, HashMap<String, String> extend) throws Exception {
         String keyword = (tid != null && !tid.isEmpty()) ? tid : "热门";
         int pageNum = 1;
         try { pageNum = Integer.parseInt(pg); } catch (Exception ignored) {}
-        return searchContent(keyword, false, String.valueOf(pageNum));
+        if (extend != null) {
+            String selected = extend.getOrDefault("tid", "").trim();
+            if (!selected.isEmpty() && !selected.equals("0")) keyword = selected;
+        }
+        StringBuilder options = new StringBuilder();
+        for (String field : Arrays.asList("order", "duration")) {
+            String value = extend == null ? "" : extend.getOrDefault(field, "").trim();
+            if (!value.isEmpty() && !value.equals("0")) {
+                options.append('&').append(field).append('=')
+                        .append(URLEncoder.encode(value, StandardCharsets.UTF_8));
+            }
+        }
+        return search(keyword, pageNum, options.toString());
     }
 
     @Override
     public String detailContent(List<String> ids) throws Exception {
         if (ids == null || ids.isEmpty()) return Result.string(Collections.emptyList());
         String bvid = ids.get(0);
-        String url = "https://api.bilibili.com/x/web-interface/view?bvid=" + bvid;
-        String json = OkHttp.string(url, getHeaders());
+        JSONObject video = requestData("/x/web-interface/view?" + videoQuery(bvid));
+        List<String> episodes = new ArrayList<>();
+        JSONArray pages = video.optJSONArray("pages");
+        if (pages != null) {
+            for (int i = 0; i < pages.length(); i++) {
+                JSONObject page = pages.optJSONObject(i);
+                if (page == null || page.optLong("cid", 0) <= 0) continue;
+                String title = page.optString("part", "").trim();
+                if (title.isEmpty()) title = "第 " + (i + 1) + " P";
+                episodes.add(title.replace('#', '＃').replace('$', '＄')
+                        + "$" + bvid + "_" + page.getLong("cid"));
+            }
+        }
+        if (episodes.isEmpty() && video.optLong("cid", 0) > 0) {
+            episodes.add("正片$" + bvid + "_" + video.getLong("cid"));
+        }
+        if (episodes.isEmpty()) throw new IllegalStateException("Bilibili 未返回可播放分 P");
 
         Vod vod = new Vod();
         vod.setVodId(bvid);
-        vod.setVodName(Json.optString(json, "title", bvid));
-        vod.setVodPic(Json.optString(json, "pic", ""));
-        vod.setVodRemarks(Json.optString(json, "duration", ""));
-        vod.setVodContent(Json.optString(json, "desc", ""));
+        vod.setVodName(video.optString("title", bvid));
+        vod.setVodPic(video.optString("pic", ""));
+        vod.setVodRemarks(video.optString("duration", ""));
+        vod.setVodContent(video.optString("desc", ""));
         vod.setVodPlayFrom("Bilibili");
-        vod.setVodPlayUrl("高清$" + bvid);
+        vod.setVodPlayUrl(String.join("#", episodes));
 
         return Result.string(vod);
     }
@@ -95,6 +143,11 @@ public class Bili extends Spider {
             pageNum = Math.max(1, Integer.parseInt(pg));
         } catch (Exception ignored) {
         }
+        return search(key, pageNum, "");
+    }
+
+    private String search(String key, int pageNum, String options) {
+        pageNum = Math.max(1, pageNum);
         String keyword = key == null ? "" : key.trim();
         String encoded = URLEncoder.encode(keyword, StandardCharsets.UTF_8);
 
@@ -104,7 +157,8 @@ public class Bili extends Spider {
         // 形态一（老接口）：data.result 是视频对象数组。
         // 2026-10 起匿名桌面请求普遍被风控：HTTP 412 / {"code":-412,"message":"request was banned"}，
         // 或返回人机验证 HTML（HTTP 200 但不是 JSON）。
-        Feed primary = Feed.parse(OkHttp.string(String.format(API_SEARCH_TYPE, encoded, pageNum), getHeaders()));
+        Feed primary = Feed.parse(requestApi(String.format(API_SEARCH_TYPE, encoded, pageNum) + options));
+        boolean receivedValidResponse = primary.ok;
         if (primary.ok) {
             list.addAll(primary.videos);
             if (list.isEmpty()) failures.add("search/type 解析到 0 条");
@@ -115,7 +169,8 @@ public class Bili extends Spider {
         // 形态二（兼容）：data.result 是分组数组，视频在 result_type=video 的 data 里。
         // 关键差异是**层级**变了，元素字段（bvid/title/pic/duration）保持一致。
         if (list.isEmpty()) {
-            Feed all = Feed.parse(OkHttp.string(String.format(API_SEARCH_ALL, encoded, pageNum), getHeaders()));
+            Feed all = Feed.parse(requestApi(String.format(API_SEARCH_ALL, encoded, pageNum) + options));
+            receivedValidResponse |= all.ok;
             if (all.ok) {
                 list.addAll(all.videos);
                 if (list.isEmpty()) failures.add("search/all/v2 无 video 分组");
@@ -124,8 +179,11 @@ public class Bili extends Spider {
             }
         }
 
+        if (!receivedValidResponse) {
+            throw new IllegalStateException("Bilibili 搜索接口不可用：" + String.join("；", failures));
+        }
         if (list.isEmpty()) {
-            // 不能静默返回空列表：否则调用方拿到 {"list":[],"total":100} 会误判成「站点没内容」。
+            // 有效空结果和接口失败必须分开；另一个接口被限流不应把空搜索变成错误。
             System.err.println("[Bili] 搜索未取到影片 keyword=" + keyword + " page=" + pageNum
                     + " 原因: " + String.join("；", failures));
         } else if (!failures.isEmpty()) {
@@ -166,8 +224,13 @@ public class Bili extends Spider {
                     feed.error = "code=" + code + " message=" + root.optString("message", "");
                     return feed;
                 }
+                JSONObject data = root.optJSONObject("data");
+                if (data == null || data.optJSONArray("result") == null) {
+                    feed.error = "响应缺少搜索结果";
+                    return feed;
+                }
                 feed.ok = true;
-                collect(root.optJSONObject("data"), feed.videos);
+                collect(data, feed.videos);
             } catch (Exception e) {
                 feed.error = "JSON 解析失败: " + e.getMessage();
             }
@@ -230,8 +293,74 @@ public class Bili extends Spider {
 
     @Override
     public String playerContent(String flag, String id, List<String> vipFlags) throws Exception {
-        String playUrl = "https://www.bilibili.com/video/" + id;
-        return Result.get().parse(1).url(playUrl).string();
+        String[] parts = id.split("_", -1);
+        String videoId = parts[0];
+        String query = videoQuery(videoId);
+        long cid;
+        if (parts.length == 1) {
+            // 已保存的旧播放记录只有 BV/AV 号，仍解析到该视频的首个分 P。
+            JSONObject video = requestData("/x/web-interface/view?" + query);
+            cid = video.optLong("cid", 0);
+            JSONArray pages = video.optJSONArray("pages");
+            if (cid <= 0 && pages != null && pages.length() > 0) {
+                cid = pages.getJSONObject(0).optLong("cid", 0);
+            }
+        } else if (parts.length == 2 && parts[1].matches("[0-9]+")) {
+            cid = Long.parseLong(parts[1]);
+        } else {
+            throw new IllegalArgumentException("Bilibili 播放 ID 格式无效");
+        }
+        if (cid <= 0) throw new IllegalStateException("Bilibili 未返回可播放分 P");
+        JSONObject playback = requestData("/x/player/playurl?" + query + "&cid=" + cid
+                + "&qn=64&fnval=1&fnver=0&fourk=0");
+        JSONArray urls = playback.optJSONArray("durl");
+        if (urls == null || urls.length() == 0) {
+            throw new IllegalStateException("Bilibili 未返回直连媒体，可能需要登录或该视频不可播放");
+        }
+        // 多段 FLV 不能只取第一段，否则界面正常但影片被截断。
+        if (urls.length() != 1) throw new IllegalStateException("Bilibili 分段媒体暂不支持直连播放");
+        String media = urls.getJSONObject(0).optString("url", "");
+        if (!media.startsWith("https://") && !media.startsWith("http://")) {
+            throw new IllegalStateException("Bilibili 媒体地址无效");
+        }
+        Map<String, String> headers = getHeaders();
+        headers.put("Referer", "https://www.bilibili.com/video/"
+                + (videoId.matches("[0-9]+") ? "av" + videoId : videoId));
+        headers.put("Origin", "https://www.bilibili.com");
+        return Result.get().parse(0).url(media).header(headers).string();
+    }
+
+    protected String requestApi(String path) {
+        okhttp3.Request.Builder request = new okhttp3.Request.Builder()
+                .url("https://api.bilibili.com" + path);
+        getHeaders().forEach(request::header);
+        try (okhttp3.Response response = OkHttp.client().newCall(request.build()).execute()) {
+            return response.body() == null ? "" : response.body().string();
+        } catch (IOException error) {
+            return "";
+        }
+    }
+
+    private JSONObject requestData(String path) {
+        String body = requestApi(path);
+        JSONObject response;
+        try {
+            response = new JSONObject(body);
+        } catch (org.json.JSONException error) {
+            throw new IllegalStateException("Bilibili 返回非 JSON 响应，可能受到访问限制");
+        }
+        int code = response.optInt("code", -1);
+        JSONObject data = response.optJSONObject("data");
+        if (code != 0 || data == null) {
+            throw new IllegalStateException("Bilibili 接口不可用，code=" + code);
+        }
+        return data;
+    }
+
+    private static String videoQuery(String id) {
+        if (id != null && id.matches("BV[0-9A-Za-z]+")) return "bvid=" + id;
+        if (id != null && id.matches("(?:av)?[0-9]+")) return "aid=" + id.replaceFirst("^av", "");
+        throw new IllegalArgumentException("Bilibili 视频 ID 格式无效");
     }
 
     private Map<String, String> getHeaders() {

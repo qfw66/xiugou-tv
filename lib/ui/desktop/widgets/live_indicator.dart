@@ -28,7 +28,7 @@ class LiveIndicator extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(Icons.circle, size: 6, color: palette.danger),
+        Icon(Icons.circle_rounded, size: 6, color: palette.danger),
         const SizedBox(width: 5),
         Flexible(
           child: Text(

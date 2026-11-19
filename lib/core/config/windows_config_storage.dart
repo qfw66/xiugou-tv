@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 import '../api/models/vod_models.dart';
 import '../storage/data_directory_manager.dart';
 import '../storage/data_restore_guard.dart';
+import 'config_credentials.dart';
 import 'models/desktop_window_config.dart';
 import 'models/config_snapshot.dart';
 import 'models/history_record.dart';
@@ -17,6 +18,9 @@ class WindowsConfigStorage {
   static const String _historyFileName = 'history.json';
   static const String _favoritesFileName = 'favorites.json';
 
+  /// 配置源凭据（按主机）：与订阅地址分开存，换地址不影响已记住的账号。
+  static const String _configCredentialsFileName = 'config_credentials.json';
+
   /// 直播收藏单独落盘（§33）：与点播收藏刻意不共用文件 —— 两者的模型、失效判定
   /// 和点击行为都不同（点播要点详情，直播要直接起播），混存会让任一侧的格式演进
   /// 变成另一侧的迁移风险。
@@ -26,12 +30,12 @@ class WindowsConfigStorage {
 
   /// 存储目录路径（同步计算，不触盘）。
   ///
-  /// N-2：默认仍是 `%APPDATA%/XiugouTV`（环境变量缺失时 `%USERPROFILE%/.XiugouTV`），
+  /// 便携版默认是安装目录下的 `user_data`（安装目录不可写时回退 `%APPDATA%/XiugouTV`），
   /// 若用户在设置里选择了自定义目录，则由 [DataDirectoryManager] 在启动时解析并返回。
   /// 供不便等待异步 IO 的诊断展示等场景使用。
   static String storageDirectoryPath() => DataDirectoryManager.currentPath;
 
-  /// 获取或初始化 Windows 专用数据目录 (%APPDATA%/XiugouTV)
+  /// 获取或初始化数据目录（便携版为 `<exe>/user_data`，只读安装目录回退 `%APPDATA%/XiugouTV`）
   Future<Directory> getStorageDirectory() async {
     if (_baseDir != null) return _baseDir!;
 
@@ -127,6 +131,34 @@ class WindowsConfigStorage {
     final dir = await getStorageDirectory();
     await _atomicWrite(
         p.join(dir.path, 'current_config.json'), jsonEncode(snapshot.toJson()));
+  }
+
+  /// 读取配置源凭据（按主机）。
+  ///
+  /// 坏条目跳过、整份损坏时返回空表：凭据缺失只影响下一次加载需要重新输入，
+  /// 不该让启动失败。
+  Future<List<ConfigCredentials>> readConfigCredentials() async {
+    try {
+      final dir = await getStorageDirectory();
+      final file = File(p.join(dir.path, _configCredentialsFileName));
+      if (!await file.exists()) return const [];
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is! List) return const [];
+      return decoded
+          .map(ConfigCredentials.tryFromJson)
+          .whereType<ConfigCredentials>()
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<void> saveConfigCredentials(
+      List<ConfigCredentials> credentials) async {
+    final dir = await getStorageDirectory();
+    await _atomicWrite(
+        p.join(dir.path, _configCredentialsFileName),
+        jsonEncode(credentials.map((entry) => entry.toJson()).toList()));
   }
 
   Future<Map<String, HomeSitePreference>> readHomeSitePreferences() async {

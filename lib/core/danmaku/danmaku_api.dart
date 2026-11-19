@@ -99,9 +99,19 @@ class DanmakuApi {
 
   /// 按片名 + 集名搜索候选（已按匹配度排序）。
   Future<List<DanmakuCandidate>> search(String name, String episode,
-      {DanmakuCancelToken? cancel}) async {
-    final uri = Uri.parse('$_base/danmaku')
-        .replace(queryParameters: {'name': name, 'episode': episode});
+          {DanmakuCancelToken? cancel}) =>
+      _search({'name': name, 'episode': episode}, cancel);
+
+  /// 只按关键词（片名）搜索候选：播放页「搜索弹幕」拿当前片名当关键词，
+  /// 服务端会把该片各集的候选一起返回（实测 `?name=醉梦` 可用）。
+  Future<List<DanmakuCandidate>> searchKeyword(String keyword,
+          {DanmakuCancelToken? cancel}) =>
+      _search({'name': keyword}, cancel);
+
+  Future<List<DanmakuCandidate>> _search(
+      Map<String, String> queryParameters, DanmakuCancelToken? cancel) async {
+    final uri =
+        Uri.parse('$_base/danmaku').replace(queryParameters: queryParameters);
     final body = await _get(uri, searchTimeout, cancel);
     return DanmakuCandidate.listFromJson(jsonDecode(body));
   }

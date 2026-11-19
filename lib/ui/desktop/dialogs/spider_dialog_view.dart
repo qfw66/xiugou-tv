@@ -220,8 +220,8 @@ class _SpiderDialogViewState extends State<SpiderDialogView> {
                 if (list.mode == 'single') ...[
                   Icon(
                     list.isChecked(i)
-                        ? Icons.radio_button_checked
-                        : Icons.radio_button_unchecked,
+                        ? Icons.radio_button_checked_rounded
+                        : Icons.radio_button_unchecked_rounded,
                     size: 18,
                     color:
                         list.isChecked(i) ? palette.accentInk : palette.textSub,
@@ -360,8 +360,8 @@ class _SpiderDialogViewState extends State<SpiderDialogView> {
             child: Row(mainAxisSize: MainAxisSize.min, children: [
               Icon(
                   node.checked
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_unchecked,
+                      ? Icons.radio_button_checked_rounded
+                      : Icons.radio_button_unchecked_rounded,
                   size: 18,
                   color: node.checked ? palette.accentInk : palette.textSub),
               const SizedBox(width: AppSpacing.sm),

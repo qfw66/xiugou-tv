@@ -132,7 +132,7 @@ String filterSelectionSummary(
 }
 
 /// 分类条右侧的折叠开关：展开时显示「筛选 N ▴」，折叠时附已选摘要。
-class CategoryFilterToggle extends StatelessWidget {
+class CategoryFilterToggle extends StatefulWidget {
   final List<VodFilter> filters;
   final Map<String, String> selection;
   final bool expanded;
@@ -147,32 +147,48 @@ class CategoryFilterToggle extends StatelessWidget {
   });
 
   @override
+  State<CategoryFilterToggle> createState() => _CategoryFilterToggleState();
+}
+
+class _CategoryFilterToggleState extends State<CategoryFilterToggle> {
+  bool _hovered = false;
+
+  @override
   Widget build(BuildContext context) {
     final palette = context.palette;
-    final count = sanitizeFilterSelection(selection, filters).length;
-    final summary = filterSelectionSummary(filters, selection);
+    final count =
+        sanitizeFilterSelection(widget.selection, widget.filters).length;
+    final summary = filterSelectionSummary(widget.filters, widget.selection);
     final label = StringBuffer('筛选');
     if (count > 0) label.write(' $count');
-    if (!expanded && summary.isNotEmpty) label.write('：$summary');
+    if (!widget.expanded && summary.isNotEmpty) label.write('：$summary');
     final active = count > 0;
     return FocusRing(
-      onTap: onToggle,
-      semanticLabel: expanded ? '收起筛选' : '展开筛选',
+      onTap: widget.onToggle,
+      semanticLabel: widget.expanded ? '收起筛选' : '展开筛选',
       borderRadius: const BorderRadius.all(Radius.circular(AppRadii.pill)),
       child: MouseRegion(
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
           key: const ValueKey('category-filter-toggle'),
-          onTap: onToggle,
+          onTap: widget.onToggle,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
-              color: active ? palette.accentWash : palette.card,
+              color: _hovered
+                  ? palette.hover
+                  : active
+                      ? palette.accentWash
+                      : palette.card,
               borderRadius: BorderRadius.circular(AppRadii.pill),
               border: Border.all(
-                color: active
-                    ? palette.accentInk.withValues(alpha: 0.45)
-                    : context.glassBorder,
+                color: _hovered
+                    ? palette.accentInk
+                    : active
+                        ? palette.accentInk.withValues(alpha: 0.45)
+                        : context.glassBorder,
               ),
             ),
             child: Row(
@@ -180,7 +196,9 @@ class CategoryFilterToggle extends StatelessWidget {
               children: [
                 Icon(Icons.tune_rounded,
                     size: 14,
-                    color: active ? palette.accentInk : palette.textSub),
+                    color: active || _hovered
+                        ? palette.accentInk
+                        : palette.textSub),
                 const SizedBox(width: 6),
                 ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 260),
@@ -191,13 +209,17 @@ class CategoryFilterToggle extends StatelessWidget {
                     style: TextStyle(
                       fontSize: AppType.body,
                       fontWeight: FontWeight.w600,
-                      color: active ? palette.accentInk : palette.textBody,
+                      color: _hovered
+                          ? palette.textTitle
+                          : active
+                              ? palette.accentInk
+                              : palette.textBody,
                     ),
                   ),
                 ),
                 const SizedBox(width: 2),
                 Icon(
-                  expanded
+                  widget.expanded
                       ? Icons.expand_less_rounded
                       : Icons.expand_more_rounded,
                   size: 16,

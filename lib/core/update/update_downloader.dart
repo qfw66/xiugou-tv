@@ -71,18 +71,61 @@ class UpdateDownloader {
   final Dio _dio;
   final bool _ownsDio;
   final Future<Directory> Function() _dataDirectory;
+  final Duration connectionTimeout;
+  final Duration downloadIdleTimeout;
+  final Duration slowSpeedWindow;
+  final int minimumBytesPerSecond;
 
   UpdateDownloader({
     Dio? dio,
     Future<Directory> Function()? dataDirectory,
-  })  : _ownsDio = dio == null,
+    this.connectionTimeout = const Duration(seconds: 10),
+    this.downloadIdleTimeout = const Duration(seconds: 15),
+    this.slowSpeedWindow = const Duration(seconds: 15),
+    this.minimumBytesPerSecond = 8 * 1024,
+  })  : assert(connectionTimeout > Duration.zero),
+        assert(downloadIdleTimeout > Duration.zero),
+        assert(slowSpeedWindow > Duration.zero),
+        assert(minimumBytesPerSecond >= 0),
+        _ownsDio = dio == null,
         _dio = dio ??
             HttpClientFactory.createDio(BaseOptions(
-              connectTimeout: const Duration(seconds: 10),
-              receiveTimeout: const Duration(minutes: 5),
+              connectTimeout: connectionTimeout,
+              receiveTimeout: downloadIdleTimeout,
             )),
         _dataDirectory =
             dataDirectory ?? WindowsConfigStorage().getStorageDirectory;
+
+  static const _cancelled = DownloadResult(
+    failure: DownloadFailure.cancelled,
+    message: '下载已取消',
+  );
+  static const _timedOut = DownloadResult(
+    failure: DownloadFailure.timeout,
+    message: '下载速度过低或等待超时，已保留进度，可重试续传',
+  );
+  static const _badResponse = DownloadResult(
+    failure: DownloadFailure.badResponse,
+    message: '安装包响应格式或长度无效，已取消此来源',
+  );
+  static const _maxChecksumBytes = 1024 * 1024;
+
+  Duration get _idleTimeout {
+    final configured = _dio.options.receiveTimeout;
+    return configured != null &&
+            configured > Duration.zero &&
+            configured < downloadIdleTimeout
+        ? configured
+        : downloadIdleTimeout;
+  }
+
+  _DownloadRequest _request(CancelToken cancelToken) => _DownloadRequest(
+        cancelToken,
+        connectionTimeout: connectionTimeout,
+        idleTimeout: _idleTimeout,
+        slowSpeedWindow: slowSpeedWindow,
+        minimumBytesPerSecond: minimumBytesPerSecond,
+      );
 
   void close() {
     if (_ownsDio) _dio.close(force: true);
@@ -95,7 +138,9 @@ class UpdateDownloader {
     required void Function(int received, int total) onProgress,
     void Function()? onVerifying,
     List<DownloadCandidate>? candidates,
+    List<UpdateMirror> mirrors = kBuiltinMirrors,
   }) async {
+    if (cancelToken.isCancelled) return _cancelled;
     final fileName = _safeSegment(p.basename(asset.name));
     if (fileName.isEmpty) {
       return const DownloadResult(
@@ -112,13 +157,15 @@ class UpdateDownloader {
       );
     }
 
-    final expected = asset.sha256 ??
+    final expected = normalizeSha256(asset.sha256) ??
         await _checksumFromManifest(
           manifest,
           asset.name,
           cancelToken,
-          useMirror: list.any((c) => c.viaMirror),
+          candidates: list,
+          mirrors: mirrors,
         );
+    if (cancelToken.isCancelled) return _cancelled;
     if (expected == null) {
       return const DownloadResult(
         failure: DownloadFailure.checksumMissing,
@@ -150,16 +197,23 @@ class UpdateDownloader {
 
     DownloadResult? last;
     for (final candidate in list) {
-      final outcome = await _downloadFrom(
-        candidate: candidate,
-        asset: asset,
-        expected: expected,
-        part: part,
-        target: target,
-        cancelToken: cancelToken,
-        onProgress: onProgress,
-        onVerifying: onVerifying,
-      );
+      if (cancelToken.isCancelled) return _cancelled.withSource(candidate);
+      final DownloadResult outcome;
+      try {
+        outcome = await _downloadFrom(
+          candidate: candidate,
+          asset: asset,
+          expected: expected,
+          part: part,
+          target: target,
+          cancelToken: cancelToken,
+          onProgress: onProgress,
+          onVerifying: onVerifying,
+        );
+      } on FileSystemException catch (error) {
+        return _writeFailure(error, asset.size).withSource(candidate);
+      }
+      if (cancelToken.isCancelled) return _cancelled.withSource(candidate);
       if (outcome.ok) return outcome.withSource(candidate);
       // 与源无关的终态失败：换源没有意义，直接返回
       if (outcome.failure == DownloadFailure.cancelled ||
@@ -203,6 +257,7 @@ class UpdateDownloader {
     // 上一轮已经下完（或已改名为正式文件）但状态丢失：先校验，命中即完成
     if (!await part.exists() && await target.exists()) {
       final existing = await sha256OfFile(target);
+      if (cancelToken.isCancelled) return _cancelled;
       if (existing == expected) {
         return DownloadResult(path: target.path, sha256: existing);
       }
@@ -214,14 +269,16 @@ class UpdateDownloader {
     var start = await part.exists() ? await part.length() : 0;
     if (start > 0 && asset.size != null && start == asset.size) {
       final existing = await sha256OfFile(part);
+      if (cancelToken.isCancelled) return _cancelled;
       if (existing == expected) {
-        await _promote(part, target);
+        await _promote(part, target, cancelToken);
         return DownloadResult(path: target.path, sha256: existing);
       }
       start = 0;
     }
 
     for (var attempt = 0; attempt < 2; attempt++) {
+      if (cancelToken.isCancelled) return _cancelled;
       final (failure, restart) = await _transfer(
         url: candidate.url,
         asset: asset,
@@ -236,8 +293,11 @@ class UpdateDownloader {
       start = 0;
     }
 
+    if (cancelToken.isCancelled) return _cancelled;
     onVerifying?.call();
+    if (cancelToken.isCancelled) return _cancelled;
     final actual = await sha256OfFile(part);
+    if (cancelToken.isCancelled) return _cancelled;
     if (actual != expected) {
       try {
         await part.delete();
@@ -248,7 +308,7 @@ class UpdateDownloader {
       );
     }
     try {
-      await _promote(part, target);
+      await _promote(part, target, cancelToken);
     } catch (error) {
       return DownloadResult(
         failure: _isDiskFull(error)
@@ -269,141 +329,180 @@ class UpdateDownloader {
     required CancelToken cancelToken,
     required void Function(int received, int total) onProgress,
   }) async {
-    Response<ResponseBody> response;
+    final request = _request(cancelToken);
+    RandomAccessFile? output;
+    var discardPartial = false;
     try {
-      response = await _dio.get<ResponseBody>(
+      final response = await _dio.get<ResponseBody>(
         url,
         options: Options(
           responseType: ResponseType.stream,
+          receiveTimeout: _idleTimeout,
           validateStatus: (_) => true,
           followRedirects: true,
           headers: {
+            'Accept-Encoding': 'identity',
             if (start > 0) 'Range': 'bytes=$start-',
           },
         ),
-        cancelToken: cancelToken,
+        cancelToken: request.token,
       );
-    } on DioException catch (error) {
-      return (
-        DownloadResult(
-          failure: _mapDioFailure(error),
-          message: _dioMessage(error),
-        ),
-        false
-      );
-    }
-
-    final status = response.statusCode ?? 0;
-    if (status == 416 && start > 0) {
-      try {
+      request.receivedHeaders();
+      final status = response.statusCode ?? 0;
+      if (status == 416 && start > 0) {
         if (await part.exists()) await part.delete();
-      } catch (_) {}
-      return (null, true);
-    }
-    if (status == 404) {
-      return (
-        const DownloadResult(
-          failure: DownloadFailure.notFound,
-          message: '安装包不存在（404），请到发布页手动下载',
-        ),
-        false
-      );
-    }
-    if (status != 200 && status != 206) {
-      return (
-        DownloadResult(
-          failure: DownloadFailure.server,
-          message: '下载失败（HTTP $status）',
-        ),
-        false
-      );
-    }
+        return (null, true);
+      }
+      if (status == 404) {
+        return (
+          const DownloadResult(
+            failure: DownloadFailure.notFound,
+            message: '安装包不存在（404），请到发布页手动下载',
+          ),
+          false
+        );
+      }
+      if (status != 200 && status != 206) {
+        return (
+          DownloadResult(
+            failure: DownloadFailure.server,
+            message: '下载失败（HTTP $status）',
+          ),
+          false
+        );
+      }
+      if (response.data == null || _hasHtmlContentType(response.headers)) {
+        return (_badResponse, false);
+      }
 
-    final append = status == 206 && start > 0;
-    final length =
-        int.tryParse(response.headers.value(Headers.contentLengthHeader) ?? '');
-    final total = append
-        ? (length == null ? asset.size : start + length)
-        : (length ?? asset.size);
+      final lengthHeader = response.headers.value(Headers.contentLengthHeader);
+      final length = int.tryParse(lengthHeader ?? '');
+      if (lengthHeader != null && (length == null || length < 0)) {
+        return (_badResponse, false);
+      }
+      final append = status == 206 && start > 0;
+      int? bodyLength = length;
+      int? total = asset.size ?? length;
+      if (status == 206) {
+        final range = RegExp(r'^bytes (\d+)-(\d+)/(\d+|\*)$')
+            .firstMatch(response.headers.value('content-range') ?? '');
+        if (range == null) return (_badResponse, false);
+        final first = int.tryParse(range.group(1)!);
+        final last = int.tryParse(range.group(2)!);
+        final rangeTotal = int.tryParse(range.group(3)!);
+        if (first != start ||
+            last == null ||
+            last < start ||
+            (rangeTotal != null && last >= rangeTotal) ||
+            (asset.size != null && rangeTotal != asset.size)) {
+          return (_badResponse, false);
+        }
+        bodyLength = last - start + 1;
+        if (length != null && length != bodyLength) {
+          return (_badResponse, false);
+        }
+        total = rangeTotal ?? asset.size;
+      } else if (length != null && asset.size != null && length != asset.size) {
+        return (_badResponse, false);
+      }
 
-    IOSink sink;
-    try {
-      sink = part.openWrite(mode: append ? FileMode.append : FileMode.write);
-    } catch (error) {
-      return (
-        DownloadResult(
-          failure: _isDiskFull(error)
-              ? DownloadFailure.diskFull
-              : DownloadFailure.writeFailed,
-          message: _writeMessage(error, asset.size),
-        ),
-        false
-      );
-    }
-
-    var written = append ? start : 0;
-    try {
-      await for (final chunk
-          in response.data?.stream ?? const Stream<Uint8List>.empty()) {
-        sink.add(chunk);
-        written += chunk.length;
+      if (cancelToken.isCancelled) return (_cancelled, false);
+      output = await part.open(mode: append ? FileMode.append : FileMode.write);
+      var received = 0;
+      final prefix = <int>[];
+      await for (final chunk in response.data!.stream) {
+        if (cancelToken.isCancelled) return (_cancelled, false);
+        if (request.timedOut) return (_timedOut, false);
+        if (chunk.isEmpty) continue;
+        request.receivedBytes(chunk.length);
+        if ((bodyLength != null && received + chunk.length > bodyLength) ||
+            (total != null &&
+                (append ? start : 0) + received + chunk.length > total)) {
+          discardPartial = true;
+          return (_badResponse, false);
+        }
+        if (!append && prefix.length < 512) {
+          prefix.addAll(chunk.take(512 - prefix.length));
+          if (_looksLikeHtml(prefix)) {
+            discardPartial = true;
+            return (_badResponse, false);
+          }
+        }
+        await output.writeFrom(chunk);
+        received += chunk.length;
+        final written = (append ? start : 0) + received;
         onProgress(written, total ?? written);
       }
-      await sink.flush();
-      await sink.close();
-    } catch (error) {
-      try {
-        await sink.close();
-      } catch (_) {}
-      if (_isDiskFull(error)) {
-        return (
-          DownloadResult(
-            failure: DownloadFailure.diskFull,
-            message: _writeMessage(error, asset.size),
-          ),
-          false
-        );
+      request.receivedBody();
+      await output.flush();
+      await output.close();
+      output = null;
+      if (cancelToken.isCancelled) return (_cancelled, false);
+      if ((bodyLength != null && received != bodyLength) ||
+          (total != null && (append ? start : 0) + received != total)) {
+        return (_badResponse, false);
       }
-      if (error is DioException) {
-        return (
-          DownloadResult(
-            failure: _mapDioFailure(error),
-            message: _dioMessage(error),
-          ),
-          false
-        );
-      }
+      return (null, false);
+    } on FileSystemException catch (error) {
+      return (_writeFailure(error, asset.size), false);
+    } on DioException catch (error) {
       return (
-        DownloadResult(
-          failure: DownloadFailure.writeFailed,
-          message: _writeMessage(error, asset.size),
+        cancelToken.isCancelled
+            ? _cancelled
+            : request.timedOut
+                ? _timedOut
+                : DownloadResult(
+                    failure: _mapDioFailure(error),
+                    message: _dioMessage(error),
+                  ),
+        false
+      );
+    } on IOException {
+      return (
+        const DownloadResult(
+          failure: DownloadFailure.network,
+          message: '网络中断，已保留进度，可继续下载',
         ),
         false
       );
+    } finally {
+      request.close();
+      try {
+        await output?.close();
+      } catch (_) {}
+      if (discardPartial && await part.exists()) await part.delete();
     }
-    return (null, false);
   }
 
-  /// 从同源 `SHA256SUMS` 里取目标文件的摘要；没有则返回 null。
-  ///
-  /// 资产直连不可达时，`SHA256SUMS` 同样可能拿不到，因此允许经镜像再试一次。
   Future<String?> _checksumFromManifest(
     UpdateManifest manifest,
     String assetName,
     CancelToken cancelToken, {
-    bool useMirror = false,
+    required List<DownloadCandidate> candidates,
+    required List<UpdateMirror> mirrors,
   }) async {
     final sums = manifest.checksums;
     if (sums == null || !sums.isHttps) return null;
-    final urls = <String>[sums.url];
-    if (useMirror) {
-      for (final mirror in kBuiltinMirrors) {
+    final urls = <String>{};
+    for (final candidate in candidates) {
+      if (!candidate.viaMirror) {
+        urls.add(sums.url);
+        continue;
+      }
+      for (final mirror in mirrors) {
+        if (mirror.id != candidate.mirrorId) continue;
         final resolved = mirror.resolve(sums.url);
-        if (resolved != null && !urls.contains(resolved)) urls.add(resolved);
+        if (resolved != null && Uri.tryParse(resolved)?.scheme == 'https') {
+          urls.add(resolved);
+        }
+        break;
       }
     }
+    urls.add(sums.url);
     for (final url in urls) {
+      if (cancelToken.isCancelled) return null;
       final digest = await _readSums(url, assetName, cancelToken);
+      if (cancelToken.isCancelled) return null;
       if (digest != null) return digest;
     }
     return null;
@@ -414,17 +513,35 @@ class UpdateDownloader {
     String assetName,
     CancelToken cancelToken,
   ) async {
+    final request = _request(cancelToken);
     try {
-      final response = await _dio.get<String>(
+      final response = await _dio.get<ResponseBody>(
         url,
         options: Options(
-          responseType: ResponseType.plain,
+          responseType: ResponseType.stream,
+          receiveTimeout: _idleTimeout,
           validateStatus: (_) => true,
         ),
-        cancelToken: cancelToken,
+        cancelToken: request.token,
       );
-      if (response.statusCode != 200) return null;
-      for (final line in const LineSplitter().convert(response.data ?? '')) {
+      request.receivedHeaders();
+      if (response.statusCode != 200 ||
+          response.data == null ||
+          _hasHtmlContentType(response.headers)) {
+        return null;
+      }
+      final bytes = BytesBuilder(copy: false);
+      await for (final chunk in response.data!.stream) {
+        if (cancelToken.isCancelled || request.timedOut) return null;
+        if (chunk.isEmpty) continue;
+        request.receivedBytes(chunk.length);
+        if (bytes.length + chunk.length > _maxChecksumBytes) return null;
+        bytes.add(chunk);
+      }
+      request.receivedBody();
+      final content = bytes.takeBytes();
+      if (_looksLikeHtml(content.take(512).toList())) return null;
+      for (final line in const LineSplitter().convert(utf8.decode(content))) {
         final trimmed = line.trim();
         if (trimmed.isEmpty || trimmed.startsWith('#')) continue;
         final match =
@@ -434,14 +551,45 @@ class UpdateDownloader {
           return match.group(1)!.toLowerCase();
         }
       }
-    } catch (_) {
+    } on DioException {
       return null;
+    } on IOException {
+      return null;
+    } on FormatException {
+      return null;
+    } finally {
+      request.close();
     }
     return null;
   }
 
-  Future<void> _promote(File part, File target) async {
-    if (await target.exists()) await target.delete();
+  static bool _hasHtmlContentType(Headers headers) {
+    final type = headers.value(Headers.contentTypeHeader)?.split(';').first
+        .trim().toLowerCase();
+    return type == 'text/html' || type == 'application/xhtml+xml';
+  }
+
+  static bool _looksLikeHtml(List<int> prefix) {
+    final text = utf8.decode(prefix, allowMalformed: true)
+        .replaceFirst(RegExp(r'^\uFEFF'), '').trimLeft();
+    return RegExp(r'^(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)',
+        caseSensitive: false).hasMatch(text);
+  }
+
+  static DownloadResult _writeFailure(Object error, int? size) => DownloadResult(
+        failure: _isDiskFull(error)
+            ? DownloadFailure.diskFull
+            : DownloadFailure.writeFailed,
+        message: _writeMessage(error, size),
+      );
+
+  Future<void> _promote(File part, File target, CancelToken cancelToken) async {
+    if (cancelToken.isCancelled) return;
+    if (await target.exists()) {
+      if (cancelToken.isCancelled) return;
+      await target.delete();
+    }
+    if (cancelToken.isCancelled) return;
     await part.rename(target.path);
   }
 
@@ -527,6 +675,86 @@ class UpdateDownloader {
       default:
         return '下载失败（HTTP ${error.response?.statusCode ?? '-'}）';
     }
+  }
+}
+
+class _DownloadRequest {
+  _DownloadRequest(
+    CancelToken userToken, {
+    required Duration connectionTimeout,
+    required this.idleTimeout,
+    required this.slowSpeedWindow,
+    required this.minimumBytesPerSecond,
+  }) {
+    if (userToken.isCancelled) {
+      token.cancel(userToken.cancelError);
+    } else {
+      userToken.whenCancel.then((error) {
+        if (!_closed && !token.isCancelled) token.cancel(error);
+      });
+      _connectionTimer = Timer(connectionTimeout, _timeout);
+    }
+  }
+
+  final CancelToken token = CancelToken();
+  final Duration idleTimeout;
+  final Duration slowSpeedWindow;
+  final int minimumBytesPerSecond;
+  final Stopwatch _speedClock = Stopwatch();
+  Timer? _connectionTimer;
+  Timer? _idleTimer;
+  Timer? _speedTimer;
+  var _windowBytes = 0;
+  var _closed = false;
+  var timedOut = false;
+
+  void receivedHeaders() {
+    _connectionTimer?.cancel();
+    if (token.isCancelled) return;
+    _resetIdle();
+    if (minimumBytesPerSecond > 0) {
+      _speedClock.start();
+      _speedTimer = Timer.periodic(slowSpeedWindow, (_) {
+        if (_windowBytes * Duration.microsecondsPerSecond <
+            minimumBytesPerSecond * _speedClock.elapsedMicroseconds) {
+          _timeout();
+        } else {
+          _windowBytes = 0;
+          _speedClock.reset();
+        }
+      });
+    }
+  }
+
+  void receivedBytes(int count) {
+    if (count <= 0 || token.isCancelled) return;
+    _windowBytes += count;
+    _resetIdle();
+  }
+
+  void _resetIdle() {
+    _idleTimer?.cancel();
+    _idleTimer = Timer(idleTimeout, _timeout);
+  }
+
+  void _timeout() {
+    if (_closed || token.isCancelled) return;
+    timedOut = true;
+    token.cancel('download candidate exceeded transfer budget');
+    receivedBody();
+  }
+
+  void receivedBody() {
+    _connectionTimer?.cancel();
+    _idleTimer?.cancel();
+    _speedTimer?.cancel();
+    _speedClock.stop();
+  }
+
+  void close() {
+    _closed = true;
+    receivedBody();
+    if (!token.isCancelled) token.cancel('download candidate closed');
   }
 }
 

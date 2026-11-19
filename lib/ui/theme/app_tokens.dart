@@ -75,6 +75,16 @@ abstract final class AppMotion {
 
   /// 默认缓动：减速到达，符合"到达感"
   static const Curve ease = Curves.easeOutCubic;
+
+  /// 跟随系统减少动态效果；辅助导航同样使用即时反馈。
+  static bool reduced(BuildContext context) {
+    final media = MediaQuery.maybeOf(context);
+    return (media?.disableAnimations ?? false) ||
+        (media?.accessibleNavigation ?? false);
+  }
+
+  static Duration durationOf(BuildContext context, Duration duration) =>
+      reduced(context) ? Duration.zero : duration;
 }
 
 /// 字号档位（7 档）。
@@ -84,7 +94,7 @@ abstract final class AppMotion {
 /// `13.5 → title`、`15 / 16 → heading`、`17 / 18 → h2`。
 abstract final class AppType {
   /// 角标、弱提示
-  static const double caption = 11;
+  static const double caption = 12;
 
   /// 正文（用得最多）
   static const double body = 12;
@@ -105,7 +115,7 @@ abstract final class AppType {
   static const double h1 = 20;
 
   /// 极微字：海报角标 / 评分胶囊（再小就看不清了）
-  static const double micro = 10;
+  static const double micro = 11;
 
   /// 大屏主按钮文字（介于正文与分区标题之间）
   static const double lead = 15;

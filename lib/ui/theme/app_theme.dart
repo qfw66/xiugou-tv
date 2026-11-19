@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'app_palette.dart';
+import 'app_tokens.dart';
 
 /// 由调色板生成两套 `ThemeData`。
 ///
@@ -10,6 +11,10 @@ ThemeData buildAppTheme({
   required Brightness brightness,
   required AppPalette palette,
 }) {
+  const typography = TextStyle(
+    fontFamily: 'Segoe UI',
+    fontFamilyFallback: ['Microsoft YaHei', 'PingFang SC', 'sans-serif'],
+  );
   final scheme = ColorScheme(
     brightness: brightness,
     primary: palette.accent,
@@ -32,6 +37,41 @@ ThemeData buildAppTheme({
     scaffoldBackgroundColor: palette.background,
     canvasColor: palette.panel,
     dividerColor: palette.divider,
+    dialogTheme: DialogThemeData(
+      backgroundColor: palette.panel,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadii.lg),
+        side: BorderSide(color: palette.divider),
+      ),
+      titleTextStyle: typography.copyWith(
+        color: palette.textTitle,
+        fontSize: AppType.h2,
+        fontWeight: FontWeight.w600,
+      ),
+      contentTextStyle: typography.copyWith(
+        color: palette.textBody,
+        fontSize: AppType.title,
+        height: 1.5,
+      ),
+    ),
+    popupMenuTheme: PopupMenuThemeData(
+      color: palette.panel,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadii.md),
+        side: BorderSide(color: palette.divider),
+      ),
+    ),
+    // 选区保留真实字色，不复用品牌填充的透明叠加；即使 textDim 压在
+    // 不透明选区上，深浅主题也分别达到 4.65:1 / 4.59:1。
+    textSelectionTheme: TextSelectionThemeData(
+      cursorColor: palette.selectionInk,
+      selectionColor: brightness == Brightness.dark
+          ? const Color(0xFF1A2B43)
+          : const Color(0xFFE7EFFF),
+      selectionHandleColor: palette.selectionInk,
+    ),
     fontFamily: 'Segoe UI',
     fontFamilyFallback: const [
       'Microsoft YaHei',
@@ -47,6 +87,21 @@ ThemeData buildAppTheme({
     ),
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(foregroundColor: palette.accentInk),
+    ),
+    switchTheme: SwitchThemeData(
+      // 按值比较状态映射，普通页面重建不能触发全局主题动画。
+      thumbColor: WidgetStateProperty<Color?>.fromMap({
+        WidgetState.disabled: null,
+        WidgetState.selected: scheme.onPrimary,
+        WidgetState.any: scheme.onSurface,
+      }),
+      overlayColor: WidgetStateProperty<Color?>.fromMap({
+        WidgetState.disabled: null,
+        WidgetState.pressed: palette.accentInk.withValues(alpha: 0.12),
+        WidgetState.focused: palette.accentInk.withValues(alpha: 0.12),
+        WidgetState.hovered: palette.accentInk.withValues(alpha: 0.08),
+        WidgetState.any: null,
+      }),
     ),
     // Tooltip 的退场动画归零（2026-10-22）：Tooltip 的浮层挂在整页 Overlay 上，
     // 若宿主（弹窗 / 抽屉 / 控制条）先被移除、浮层还在做退场动画，引擎会收到

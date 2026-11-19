@@ -1,0 +1,9 @@
+{
+  "runtime": "Node.js",
+  "version": "24.19.0",
+  "platform": "win-x64",
+  "origin": "local installed Node.js; Authenticode verified Valid, OpenJS Foundation",
+  "sha256": "3602f2bb1a10f2cbab4c36886218a33c1ab3db87290e73b033c46c77147d0237",
+  "license": "LICENSE",
+  "verifiedOn": "2026-11-11"
+}

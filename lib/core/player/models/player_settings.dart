@@ -69,6 +69,9 @@ class PlayerSettings {
   /// 关闭后控制条收起时画面底部不再留任何线条。
   final bool showMiniProgress;
 
+  /// 在播放器左上角显示实际视频宽高。默认关闭；尺寸未知时不显示。
+  final bool showResolution;
+
   /// §14 起播早期出错时自动尝试备用线路。默认 true（与此前常开行为一致）；
   /// 关闭后出错只提示，由用户在线路抽屉里手动换。
   final bool autoLineSwitch;
@@ -118,6 +121,7 @@ class PlayerSettings {
     this.danmaku = DanmakuSettings.defaults,
     this.segmentsAutoApply = true,
     this.showMiniProgress = true,
+    this.showResolution = false,
     this.autoLineSwitch = true,
     this.holdRate = defaultHoldRate,
     this.shortcuts = PlayerShortcutBindings.defaults,
@@ -235,6 +239,7 @@ class PlayerSettings {
       danmaku: DanmakuSettings.fromJson(json['danmaku']),
       segmentsAutoApply: json['segmentsAutoApply'] != false,
       showMiniProgress: json['showMiniProgress'] != false,
+      showResolution: json['showResolution'] == true,
       autoLineSwitch: json['autoLineSwitch'] != false,
       holdRate: _pickHoldRate(json['holdRate']),
       shortcuts: PlayerShortcutBindings.fromJson(json['shortcuts']),
@@ -268,6 +273,7 @@ class PlayerSettings {
         'danmaku': danmaku.toJson(),
         'segmentsAutoApply': segmentsAutoApply,
         'showMiniProgress': showMiniProgress,
+        'showResolution': showResolution,
         'autoLineSwitch': autoLineSwitch,
         'holdRate': holdRate,
         'shortcuts': shortcuts.toJson(),
@@ -322,6 +328,7 @@ class PlayerSettings {
     DanmakuSettings? danmaku,
     bool? segmentsAutoApply,
     bool? showMiniProgress,
+    bool? showResolution,
     bool? autoLineSwitch,
     double? holdRate,
     PlayerShortcutBindings? shortcuts,
@@ -348,6 +355,7 @@ class PlayerSettings {
       danmaku: danmaku ?? this.danmaku,
       segmentsAutoApply: segmentsAutoApply ?? this.segmentsAutoApply,
       showMiniProgress: showMiniProgress ?? this.showMiniProgress,
+      showResolution: showResolution ?? this.showResolution,
       autoLineSwitch: autoLineSwitch ?? this.autoLineSwitch,
       holdRate: holdRate ?? this.holdRate,
       shortcuts: shortcuts ?? this.shortcuts,
@@ -379,6 +387,7 @@ class PlayerSettings {
       other.danmaku == danmaku &&
       other.segmentsAutoApply == segmentsAutoApply &&
       other.showMiniProgress == showMiniProgress &&
+      other.showResolution == showResolution &&
       other.autoLineSwitch == autoLineSwitch &&
       other.holdRate == holdRate &&
       other.shortcuts == shortcuts &&
@@ -390,6 +399,6 @@ class PlayerSettings {
   @override
   int get hashCode => Object.hashAll([hwdec, defaultVolume, defaultRate, audioChannels, audioDelayMs,
       toneMapping, scale, brightness, contrast, saturation, gamma, cacheSecs, hideWindowTitleBar,
-      danmakuEnabled, danmaku, segmentsAutoApply, showMiniProgress, autoLineSwitch, holdRate, shortcuts,
+      danmakuEnabled, danmaku, segmentsAutoApply, showMiniProgress, showResolution, autoLineSwitch, holdRate, shortcuts,
       externalPlayer, autoHideCursor, browserHeaders, autoDetectLiveDirectMode]);
 }

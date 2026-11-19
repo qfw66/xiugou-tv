@@ -14,6 +14,7 @@ import '../../../core/player/playback_http_headers.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../widgets/focus_ring.dart';
+import 'escape_closable.dart';
 
 /// 导入只影响直播仓库，取消文件选择不会提交任何变更。
 class LiveImportDialog extends StatefulWidget {
@@ -90,7 +91,7 @@ class _LiveImportDialogState extends State<LiveImportDialog> {
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
-    return PopScope(
+    return EscapeClosable(child: PopScope(
       canPop: !_busy,
       child: AlertDialog(
         backgroundColor: palette.panel,
@@ -105,7 +106,7 @@ class _LiveImportDialogState extends State<LiveImportDialog> {
               color: palette.accentWash,
               borderRadius: BorderRadius.circular(AppRadii.md),
             ),
-            child: Icon(Icons.playlist_add, color: palette.accentInk, size: 20),
+            child: Icon(Icons.playlist_add_rounded, color: palette.accentInk, size: 20),
           ),
           const SizedBox(width: 10),
           Text('导入直播源', style: TextStyle(color: palette.textTitle)),
@@ -174,7 +175,7 @@ class _LiveImportDialogState extends State<LiveImportDialog> {
             radius: AppRadii.pill,
             child: OutlinedButton.icon(
               onPressed: _busy ? null : _importFile,
-              icon: const Icon(Icons.folder_open, size: 18),
+              icon: const Icon(Icons.folder_open_rounded, size: 18),
               label: const Text('选择本地文件'),
             ),
           ),
@@ -190,7 +191,7 @@ class _LiveImportDialogState extends State<LiveImportDialog> {
           ),
         ],
       ),
-    );
+    ));
   }
 }
 
@@ -396,7 +397,7 @@ class _LiveDirectDialogState extends State<LiveDirectDialog> {
               color: palette.accentWash,
               borderRadius: BorderRadius.circular(AppRadii.md),
             ),
-            child: Icon(Icons.link, color: palette.accentInk, size: 20),
+            child: Icon(Icons.link_rounded, color: palette.accentInk, size: 20),
           ),
           const SizedBox(width: 10),
           Text('播放直播直链', style: TextStyle(color: palette.textTitle)),

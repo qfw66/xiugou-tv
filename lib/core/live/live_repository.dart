@@ -9,6 +9,7 @@ import '../config/windows_config_storage.dart';
 import '../net/http_client_factory.dart';
 import '../player/models/player_state.dart';
 import '../storage/data_restore_guard.dart';
+import '../settings/models/source_categories.dart';
 import 'live_channel_merge.dart';
 import 'live_direct_mode_memory.dart';
 import 'live_playlist_parser.dart';
@@ -48,6 +49,7 @@ class LiveRepository {
   LiveSourceHistory _sourceHistory = LiveSourceHistory.empty;
   String? _sourceHistoryWarning;
   final _sourceChanges = StreamController<void>.broadcast();
+  final _sourceHistoryChanges = StreamController<void>.broadcast();
   var _sequence = 0;
   var _disposed = false;
 
@@ -76,6 +78,10 @@ class LiveRepository {
 
   /// 独立直播源设置（需先走 [loadSourceHistory] 或任一初始化路径）。
   LiveSourceHistory get sourceHistory => _sourceHistory;
+  List<String> get sourceCategories => _sourceHistory.categoryNames;
+  String? get sourceHistoryWarning => _sourceHistoryWarning;
+  /// 元数据保存通知，仅供管理界面刷新，不驱动频道或播放加载。
+  Stream<void> get sourceHistoryChanges => _sourceHistoryChanges.stream;
 
   /// 直播实际使用的频道来源变化时触发：切换 / 删除 / 清空独立直播源，或新增手动频道。
   /// 只用于通知「需要重新加载频道」，点播配置不受影响。
@@ -374,8 +380,15 @@ class LiveRepository {
       }
       final next = entry.copyWith(lives: List.unmodifiable(detected.lives));
       if (jsonEncode(next.toJson()) != jsonEncode(entry.toJson())) {
-        await _commitSourceHistory(
-            (history) => history.replace(next), notify: false);
+        await _commitSourceHistory((history) {
+          final index = history.entries.indexWhere(
+              (item) => item.location == next.location);
+          if (index < 0) return history;
+          return history.replace(next.copyWith(
+            note: history.entries[index].note,
+            category: history.entries[index].category,
+          ));
+        }, notify: false);
       }
       warnings.addAll(refreshWarnings);
       return (entry: next, channels: channels);
@@ -477,18 +490,19 @@ class LiveRepository {
           _manualChannel(parsed.name ?? _streamName(uri), uri.toString()));
     }
     final detected = await _detectSource(uri, allowSingle: true);
-    if (detected is Live) {
+    if (detected.value case final Live single) {
       return _saveManualChannel(Live(
-        name: parsed.name ?? detected.name,
-        url: detected.url,
+        name: parsed.name ?? single.name,
+        url: single.url,
         group: manualSourceName,
-        logo: detected.logo,
-        epg: detected.epg,
-        headers: detected.headers,
+        logo: single.logo,
+        epg: single.epg,
+        headers: single.headers,
       ));
     }
-    return LiveSourceApplyResult.source(
-        await _activateSource(detected as LiveSourceEntry));
+    return LiveSourceApplyResult.source(await _activateSource(
+        detected.value as LiveSourceEntry,
+        onCommitted: detected.warmCache));
   }
 
   /// 从历史切换：重新拉取并识别；失败抛出，当前直播源不变。
@@ -499,8 +513,70 @@ class LiveRepository {
       throw const FormatException('直播源地址无效');
     }
     final detected = await _detectSource(uri, allowSingle: false);
-    return _activateSource(detected as LiveSourceEntry);
+    return _activateSource(detected.value as LiveSourceEntry,
+        onCommitted: detected.warmCache);
   }
+
+  Future<void> updateSourceNote(String location, String note) =>
+      _commitSourceHistory((history) {
+        final index = history.entries.indexWhere(
+            (entry) => entry.location == location);
+        if (index < 0) return history;
+        return history.replace(history.entries[index].copyWith(note: note.trim()));
+      }, notify: false);
+
+  Future<void> createSourceCategory(String name) =>
+      _commitSourceHistory((history) => LiveSourceHistory(
+        active: history.active,
+        entries: history.entries,
+        categories: SourceCategories(history.categoryNames).create(name).names,
+      ), notify: false);
+
+  /// 重命名直播分类：目录与条目归属一次提交，不触发播放通知。
+  Future<void> renameSourceCategory(String from, String name) =>
+      _commitSourceHistory((history) {
+        final value = SourceCategories.validate(name);
+        final categories = SourceCategories(history.categoryNames).rename(from, value);
+        return LiveSourceHistory(
+          active: history.active,
+          categories: categories.names,
+          entries: List.unmodifiable(history.entries.map((entry) =>
+              entry.category == from ? entry.copyWith(category: value) : entry)),
+        );
+      }, notify: false);
+
+  /// 删除直播分类：其下条目回到「未分类」，当前活动源不变。
+  Future<void> deleteSourceCategory(String name) =>
+      _commitSourceHistory((history) {
+        final value = SourceCategories.validate(name);
+        final categories = SourceCategories(history.categoryNames).remove(value);
+        return LiveSourceHistory(
+          active: history.active,
+          categories: categories.names,
+          entries: List.unmodifiable(history.entries.map((entry) =>
+              entry.category == value ? entry.copyWith(category: '') : entry)),
+        );
+      }, notify: false);
+
+  /// 一个批次一次原子替换，保留顺序、备注与当前源；不触发播放通知。
+  Future<void> assignSourceCategory(Iterable<String> locations, String category) {
+    final ids = locations.toSet();
+    return _commitSourceHistory((history) {
+      final value = SourceCategories.validate(category, allowEmpty: true);
+      if (ids.isEmpty || !ids.every((id) => history.entries.any((e) => e.location == id))) {
+        throw StateError('所选源已变化，请重新选择后再分配');
+      }
+      return LiveSourceHistory(
+        active: history.active,
+        categories: SourceCategories(history.categoryNames).include([value]).names,
+        entries: List.unmodifiable(history.entries.map((entry) => ids.contains(entry.location)
+            ? entry.copyWith(category: value) : entry)),
+      );
+    }, notify: false);
+  }
+
+  Future<void> updateSourceCategory(String location, String category) =>
+      assignSourceCategory([location], category);
 
   /// 删除一条历史；删的是当前直播源时直播回退到主配置源。
   Future<void> removeSourceEntry(String location) =>
@@ -510,9 +586,13 @@ class LiveRepository {
   Future<void> clearActiveSource() =>
       _commitSourceHistory((history) => history.deactivate());
 
-  /// 拉取并识别独立直播源地址。返回 [LiveSourceEntry]（可设为直播源）或
+  /// 拉取并识别独立直播源地址。`value` 为 [LiveSourceEntry]（可设为直播源）或
   /// [Live]（[allowSingle] 时只有一个频道 / 是播放流本身）。
-  Future<Object> _detectSource(Uri uri, {required bool allowSingle}) async {
+  ///
+  /// 清单的预热频道通过 `warmCache` 交给调用方，只能在源历史成功提交后写入缓存：
+  /// 同一地址重新导入时缓存键不变，提前写入会让保存失败后的 load 看到候选频道。
+  Future<({Object value, void Function()? warmCache})> _detectSource(Uri uri,
+      {required bool allowSingle}) async {
     final document = await _fetchSourceText(uri);
     final location = uri.toString();
     final detected =
@@ -528,36 +608,44 @@ class LiveRepository {
             ? '配置里的直播没有可播放的频道'
             : '配置里的直播都无法加载：${warnings.first}');
       }
-      return LiveSourceEntry(
-        location: location,
-        kind: LiveSourceKind.config,
-        lastUsedAt: now,
-        channelCount: count,
-        lives: List.unmodifiable(detected.lives),
+      return (
+        value: LiveSourceEntry(
+          location: location,
+          kind: LiveSourceKind.config,
+          lastUsedAt: now,
+          channelCount: count,
+          lives: List.unmodifiable(detected.lives),
+        ),
+        warmCache: null,
       );
     }
     if (detected.lives.isEmpty) {
-      if (allowSingle) return _manualChannel(_streamName(uri), location);
+      if (allowSingle) {
+        return (value: _manualChannel(_streamName(uri), location), warmCache: null);
+      }
       throw const FormatException('该地址是单个播放流，不是频道清单');
     }
     final playable = detected.lives.where(_isPlayable).toList();
     if (playable.isEmpty) throw const FormatException('频道清单里没有可播放的地址');
-    if (allowSingle && _playableCount(playable) == 1) return playable.first;
+    if (allowSingle && _playableCount(playable) == 1) {
+      return (value: playable.first, warmCache: null);
+    }
     final entry = LiveSourceEntry(
       location: location,
       kind: LiveSourceKind.playlist,
       lastUsedAt: now,
       channelCount: _playableCount(playable),
     );
-    // 预热缓存：随后 load() 直接用这次的结果，不再重复下载。
+    // 预热缓存：提交成功后 load() 直接用这次的结果，不再重复下载。
     final playlist = _livesOf(entry).single;
-    _configuredCache.putBounded(
-      _playlistCacheKey(LivePlaylistParser.resolveAddress(playlist.url, uri),
-          playlist),
-      List.unmodifiable(detected.lives),
-      _maxConfiguredSources,
+    final key = _playlistCacheKey(
+        LivePlaylistParser.resolveAddress(playlist.url, uri), playlist);
+    final channels = List<Live>.unmodifiable(detected.lives);
+    return (
+      value: entry,
+      warmCache: () =>
+          _configuredCache.putBounded(key, channels, _maxConfiguredSources),
     );
-    return entry;
   }
 
   /// 判断返回内容：配置 JSON → lives；频道清单 → 频道；HLS 播放流 → 空列表（playlist 类型）。
@@ -617,20 +705,37 @@ class LiveRepository {
     }
   }
 
-  Future<LiveSourceEntry> _activateSource(LiveSourceEntry entry) async {
-    await _commitSourceHistory((history) => history.activate(entry));
-    return entry;
+  Future<LiveSourceEntry> _activateSource(LiveSourceEntry entry,
+      {void Function()? onCommitted}) async {
+    var activated = entry;
+    await _commitSourceHistory((history) {
+      final index = history.entries.indexWhere(
+          (item) => item.location == entry.location);
+      if (index >= 0) {
+        activated = entry.copyWith(
+          note: history.entries[index].note,
+          category: history.entries[index].category,
+        );
+      }
+      return history.activate(activated);
+    }, onCommitted: onCommitted);
+    return activated;
   }
 
   /// 独立直播源设置落盘（与其它直播文件共用写队列，原子替换）。
-  /// 当前直播源有变化时发出 [sourceChanges]。
+  /// 落盘成功后先执行 [onCommitted]（如预热频道缓存），再发出 [sourceChanges]；
+  /// 失败时内存历史与缓存都保持原样。
   Future<void> _commitSourceHistory(
     LiveSourceHistory Function(LiveSourceHistory) change, {
     bool notify = true,
+    void Function()? onCommitted,
   }) {
     final future = _writeQueue.catchError((_) {}).then((_) async {
       if (_disposed) throw StateError('直播源仓库已关闭');
       await _initialize();
+      if (_sourceHistoryWarning != null) {
+        throw StateError('直播源目录读取失败，请修复文件后重启再保存');
+      }
       final next = change(_sourceHistory);
       if (dataRestorePendingRestart) {
         throw const DataRestorePendingRestartException();
@@ -647,16 +752,20 @@ class LiveRepository {
       final changed = !_sameEntry(_sourceHistory.activeEntry, next.activeEntry);
       _sourceHistory = next;
       _sourceHistoryWarning = null;
+      if (!_disposed) _sourceHistoryChanges.add(null);
+      onCommitted?.call();
       if (notify && changed) _notifySourceChanged();
     });
     _writeQueue = future;
     return future;
   }
 
+  // 备注和分类不参与频道来源比较。
   static bool _sameEntry(LiveSourceEntry? a, LiveSourceEntry? b) =>
       a == null || b == null
           ? a == b
-          : jsonEncode(a.toJson()) == jsonEncode(b.toJson());
+          : jsonEncode(a.copyWith(note: '', category: '').toJson()) ==
+              jsonEncode(b.copyWith(note: '', category: '').toJson());
 
   /// 单个播放地址：追加到「手动添加」，同地址只更新名称。
   Future<LiveSourceApplyResult> _saveManualChannel(Live channel) async {
@@ -910,6 +1019,7 @@ class LiveRepository {
   void dispose() {
     _disposed = true;
     unawaited(_sourceChanges.close());
+    unawaited(_sourceHistoryChanges.close());
     if (_ownsDio) _dio.close(force: true);
   }
 

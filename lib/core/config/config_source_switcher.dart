@@ -2,6 +2,9 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 
+import 'config_credentials.dart';
+import 'config_network_error.dart';
+
 import '../config/config_repository.dart';
 import '../config/models/vod_config.dart';
 import '../live/live_repository.dart';
@@ -188,15 +191,7 @@ String configSwitchErrorText(Object error) {
     if (path.isEmpty || error.message.contains(path)) return error.message;
     return '${error.message}：$path';
   }
-  if (error is DioException) {
-    if (error.type == DioExceptionType.badResponse) {
-      return 'HTTP ${error.response?.statusCode ?? '错误'}';
-    }
-    if (error.type == DioExceptionType.connectionError) return '无法连接';
-    if (error.type == DioExceptionType.badCertificate) return '证书无效';
-    if (error.type == DioExceptionType.cancel) return '已取消';
-    if (error.type.name.toLowerCase().contains('timeout')) return '连接超时';
-    return '网络错误';
-  }
+  if (error is DioException) return configNetworkErrorText(error);
+  if (error is ConfigAuthRequired) return error.message;
   return error.toString().replaceFirst('Exception: ', '');
 }

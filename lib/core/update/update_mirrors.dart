@@ -1,27 +1,10 @@
-/// 内置镜像：GitHub 前缀代理。
-///
-/// 这类镜像不是「自建清单源」，而是把 `前缀 + 完整 GitHub URL` 拼成一个可直连
-/// 地址。因此改写必须严格限定：只接受 https、且 host 在 [kMirrorableHosts]
-/// 白名单内的绝对 URL；用户自定义源给出的任意地址永不参与拼接，避免把镜像
-/// 当成 SSRF 跳板。
-///
-/// 实测（2026-10-21）：用户给出的 5 个镜像里只有 `gh-proxy.com` 同时支持
-/// 清单接口、Range 与 ETag 透传；`ghfast.top` 只支持资产（API 返回 403
-/// `Invalid input`），作为第二下载兜底；其余为 404 / 403 / 已停服。
-/// 详见 `docs/UPDATE_CHECK_PLAN.md` §14。
+/// 更新镜像仅改写 GitHub 自有域名的 HTTPS 地址。
 library;
 
 class UpdateMirror {
-  /// 稳定标识：写进健康缓存与偏好文件，不随展示名变化。
   final String id;
-
-  /// 展示名（关于页与错误文案使用）。
   final String label;
-
-  /// 前缀，必须以 `/` 结尾。
   final String prefix;
-
-  /// 是否支持代理 `api.github.com`（清单接口）。
   final bool proxiesApi;
 
   const UpdateMirror({
@@ -31,26 +14,85 @@ class UpdateMirror {
     this.proxiesApi = false,
   });
 
-  /// 把 GitHub 自有域名地址改写为镜像地址；不满足条件时返回 null（调用方保持原样）。
   String? resolve(String originalUrl) {
-    if (!prefix.endsWith('/')) return null;
+    if (!isValidMirrorPrefix(prefix)) return null;
     final uri = Uri.tryParse(originalUrl);
-    if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) return null;
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        uri.userInfo.isNotEmpty ||
+        uri.port != 443 ||
+        uri.hasFragment ||
+        originalUrl.contains('\\')) {
+      return null;
+    }
     if (!kMirrorableHosts.contains(uri.host.toLowerCase())) return null;
     return '$prefix$originalUrl';
   }
 
-  /// 清单接口地址的改写；不支持 API 代理的镜像返回 null。
   String? resolveApi(String originalUrl) =>
       proxiesApi ? resolve(originalUrl) : null;
+
+  Map<String, Object> toJson() => {
+        'id': id,
+        'label': label,
+        'prefix': prefix,
+        'proxiesApi': proxiesApi,
+      };
 
   @override
   String toString() => 'UpdateMirror($id, $prefix)';
 }
 
-/// 允许参与前缀拼接的 GitHub 自有域名。
-///
-/// 只放 GitHub 的域名：`github.com` 是资产入口，后两个是重定向后的实际存储域。
+/// 配置端点和代理前缀都只能指向普通公网 DNS 名称，拒绝编码、用户信息及非 HTTPS。
+/// 目录请求不跟随重定向；代理下载仍沿用下载器的重定向与 SHA-256 校验。
+bool isValidMirrorEndpoint(String value) {
+  if (value.isEmpty ||
+      value.length > 2048 ||
+      RegExp(r'[\s\x00-\x1f\x7f\\%]').hasMatch(value)) {
+    return false;
+  }
+  if (!RegExp(
+          r"^https://[a-z0-9.-]+(?::443)?(?:/[a-z0-9._~!$&'()*+,;=:@/\-]*)?$",
+          caseSensitive: false)
+      .hasMatch(value)) {
+    return false;
+  }
+  final uri = Uri.tryParse(value);
+  if (uri == null ||
+      uri.scheme != 'https' ||
+      uri.userInfo.isNotEmpty ||
+      uri.port != 443 ||
+      uri.hasQuery ||
+      uri.hasFragment) {
+    return false;
+  }
+  final host = uri.host.toLowerCase();
+  if (host.length > 253 ||
+      !host.contains('.') ||
+      host.endsWith('.localhost') ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal') ||
+      host.endsWith('.localdomain') ||
+      host.endsWith('.home.arpa')) {
+    return false;
+  }
+  final labels = host.split('.');
+  final labelPattern = RegExp(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$');
+  if (labels.any((label) => !labelPattern.hasMatch(label)) ||
+      !RegExp(r'^[a-z]{2,63}$').hasMatch(labels.last)) {
+    return false;
+  }
+  // 检查原始路径，避免 Uri 归一化先消除 ../ 或 ./。
+  final rawPath = value.substring(value.indexOf('://') + 3);
+  final pathStart = rawPath.indexOf('/');
+  final path = pathStart < 0 ? '' : rawPath.substring(pathStart);
+  if (path.split('/').any((part) => part == '.' || part == '..')) return false;
+  return true;
+}
+
+bool isValidMirrorPrefix(String value) =>
+    value.length <= 512 && value.endsWith('/') && isValidMirrorEndpoint(value);
+
 const Set<String> kMirrorableHosts = {
   'github.com',
   'objects.githubusercontent.com',
@@ -58,24 +100,39 @@ const Set<String> kMirrorableHosts = {
   'api.github.com',
 };
 
-/// 内置镜像清单（按尝试顺序）。
-///
-/// 只有 `gh-proxy.com` 支持清单接口；`ghfast.top` 仅参与下载候选。
+/// 保留已有可用源，加入用户提供的候选；不表示各站当前都可用。
+/// 清单 API 仅允许已知支持的 gh-proxy，其余只用于资产下载。
 const List<UpdateMirror> kBuiltinMirrors = [
   UpdateMirror(
-    id: 'gh-proxy',
-    label: 'gh-proxy.com',
-    prefix: 'https://gh-proxy.com/',
-    proxiesApi: true,
-  ),
+      id: 'gh-proxy',
+      label: 'gh-proxy.com',
+      prefix: 'https://gh-proxy.com/',
+      proxiesApi: true),
   UpdateMirror(
-    id: 'ghfast',
-    label: 'ghfast.top',
-    prefix: 'https://ghfast.top/',
-  ),
+      id: 'down-mxw',
+      label: 'down.mxw.xx.kg',
+      prefix: 'https://down.mxw.xx.kg/'),
+  UpdateMirror(id: 'tvv', label: 'tvv.tw', prefix: 'https://tvv.tw/'),
+  UpdateMirror(
+      id: 'fastgit', label: 'fastgit.cc', prefix: 'https://fastgit.cc/'),
+  UpdateMirror(
+      id: 'imciel',
+      label: 'ghproxy.imciel.com',
+      prefix: 'https://ghproxy.imciel.com/'),
+  UpdateMirror(
+      id: 'felicity',
+      label: 'ghproxy.felicity.land',
+      prefix: 'https://ghproxy.felicity.land/'),
+  UpdateMirror(
+      id: 'z321', label: 'gg.z321.cc.cd', prefix: 'https://gg.z321.cc.cd/'),
+  UpdateMirror(
+      id: 'xsadwsd',
+      label: 'xsadwsd.kdns.fr',
+      prefix: 'https://xsadwsd.kdns.fr/'),
+  UpdateMirror(
+      id: 'ghfast', label: 'ghfast.top', prefix: 'https://ghfast.top/'),
 ];
 
-/// 按 id 取内置镜像；未知 id 返回 null。
 UpdateMirror? builtinMirror(String id) {
   for (final mirror in kBuiltinMirrors) {
     if (mirror.id == id) return mirror;
@@ -83,21 +140,13 @@ UpdateMirror? builtinMirror(String id) {
   return null;
 }
 
-/// 一个下载候选：原始地址，或经某个镜像改写后的地址。
 class DownloadCandidate {
   final String url;
-
-  /// null 表示直连（官方或自定义源）。
   final String? mirrorId;
-
-  /// 展示用标签，如 `官方` / `镜像 gh-proxy.com`。
   final String label;
 
-  const DownloadCandidate({
-    required this.url,
-    required this.label,
-    this.mirrorId,
-  });
+  const DownloadCandidate(
+      {required this.url, required this.label, this.mirrorId});
 
   bool get viaMirror => mirrorId != null;
 
@@ -105,60 +154,43 @@ class DownloadCandidate {
   String toString() => 'DownloadCandidate($label, $url)';
 }
 
-/// 组装下载候选：上次成功源 → 官方 → 其余镜像。
-///
-/// - 地址不是 GitHub 自有域名时（自定义源）只返回原地址，绝不改写；
-/// - 关闭镜像开关时同样只返回原地址；
-/// - 冷却中的镜像排在最后（下载是用户主动动作，不清空候选，只是降权）。
+/// 可用的上次成功镜像 → 其余可用镜像 → 直连 → 冷却镜像。
+/// 自定义的非 GitHub 资产和明确关闭镜像的请求均只走原地址。
 List<DownloadCandidate> downloadCandidates({
   required String assetUrl,
   required bool useMirror,
   String? lastGoodMirrorId,
   Set<String> coolingDown = const {},
+  List<UpdateMirror> mirrors = kBuiltinMirrors,
 }) {
-  final direct = DownloadCandidate(
-    url: assetUrl,
-    label: _labelForUrl(assetUrl),
-  );
+  final direct =
+      DownloadCandidate(url: assetUrl, label: _labelForUrl(assetUrl));
   if (!useMirror) return [direct];
-
-  final rewritten = <UpdateMirror, String>{};
-  for (final mirror in kBuiltinMirrors) {
-    final resolved = mirror.resolve(assetUrl);
-    if (resolved != null) rewritten[mirror] = resolved;
+  final available = <DownloadCandidate>[];
+  final cooling = <DownloadCandidate>[];
+  final urls = <String>{assetUrl};
+  final ids = <String>{};
+  for (final mirror in mirrors) {
+    final url = mirror.resolve(assetUrl);
+    if (url == null || !urls.add(url) || !ids.add(mirror.id)) continue;
+    final isCooling = coolingDown.contains(mirror.id);
+    final candidate = DownloadCandidate(
+      url: url,
+      mirrorId: mirror.id,
+      label: '镜像 ${mirror.label}${isCooling ? '（近期失败）' : ''}',
+    );
+    if (isCooling) {
+      cooling.add(candidate);
+    } else if (mirror.id == lastGoodMirrorId) {
+      available.insert(0, candidate);
+    } else {
+      available.add(candidate);
+    }
   }
-  if (rewritten.isEmpty) return [direct];
-
-  final ordered = <DownloadCandidate>[];
-  final lastGood = lastGoodMirrorId == null
-      ? null
-      : rewritten.keys.where((m) => m.id == lastGoodMirrorId).firstOrNull;
-  if (lastGood != null) {
-    ordered.add(DownloadCandidate(
-      url: rewritten[lastGood]!,
-      mirrorId: lastGood.id,
-      label: '镜像 ${lastGood.label}',
-    ));
-  }
-  ordered.add(direct);
-  for (final entry in rewritten.entries) {
-    if (entry.key.id == lastGoodMirrorId) continue;
-    ordered.add(DownloadCandidate(
-      url: entry.value,
-      mirrorId: entry.key.id,
-      label: coolingDown.contains(entry.key.id)
-          ? '镜像 ${entry.key.label}（近期失败）'
-          : '镜像 ${entry.key.label}',
-    ));
-  }
-  return ordered;
+  return [...available, direct, ...cooling];
 }
 
 String _labelForUrl(String url) {
   final host = Uri.tryParse(url)?.host ?? '';
   return host.isEmpty ? '直连' : '直连 $host';
-}
-
-extension _FirstOrNull<T> on Iterable<T> {
-  T? get firstOrNull => isEmpty ? null : first;
 }

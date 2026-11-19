@@ -26,7 +26,7 @@ class _PlayerShortcutsPanelState extends State<PlayerShortcutsPanel> {
     }
   }
 
-  Future<void> _edit(PlayerShortcutAction action) => showDialog<void>(
+  Future<void> _edit(PlayerShortcutAction action) => showAppDialog<void>(
         context: context,
         barrierDismissible: false,
         builder: (_) => _ShortcutCaptureDialog(
@@ -58,7 +58,7 @@ class _PlayerShortcutsPanelState extends State<PlayerShortcutsPanel> {
                 child: OutlinedButton.icon(
                   key: const ValueKey('reset-player-shortcuts'),
                   style: _outlinedStyle(context),
-                  icon: const Icon(Icons.restore, size: 18),
+                  icon: const Icon(Icons.restore_rounded, size: 18),
                   label: const Text('恢复默认'),
                   onPressed: settings.shortcuts ==
                           PlayerShortcutBindings.defaults
@@ -248,7 +248,7 @@ class _ShortcutCaptureDialogState extends State<_ShortcutCaptureDialog> {
                       child: OutlinedButton.icon(
                         key: const ValueKey('restore-player-shortcut'),
                         style: _outlinedStyle(context),
-                        icon: const Icon(Icons.restore, size: 18),
+                        icon: const Icon(Icons.restore_rounded, size: 18),
                         label: const Text('恢复此项默认'),
                         onPressed: _saving
                             ? null

@@ -29,7 +29,8 @@ import java.util.Map;
 /**
  * 等价于 {@code Dex2jar.from(in).to(out)} 的默认配置（跳过调试信息、只算 maxs、不优化 synchronized），
  * 差别：IR 优化管线里的 {@code NewTransformer} 换成 {@link PreciseNewTransformer}；
- * 超长字符串常量改由 {@link LongStringConstants} 处理（不走 DexFix 的改写）。
+ * 超长字符串常量改由 {@link LongStringConstants} 处理（不走 DexFix 的改写）；
+ * 生成 class 后再过一遍 {@link InterfaceMethodRefs}，把指向接口的方法引用改成 InterfaceMethodref。
  *
  * <p>dex2jar 的优化管线写死在 {@code Dex2jar.doTranslate} 内部的匿名 {@code ExDex2Asm} 里，
  * {@code T_NEW} 又是 {@code static final}，无法注入，只能在这里复刻驱动流程。
@@ -43,17 +44,25 @@ public final class PreciseDex2jar {
     private PreciseDex2jar() {
     }
 
+    /** 既有精确字节修补之后生成严格 JVM 校验所需的最终产物。 */
+    public static void finishVerification(File converted, java.util.Set<String> payloadFirst) throws IOException {
+        JvmVerificationRepair.finish(converted, payloadFirst, PreciseDex2jar.class.getClassLoader());
+    }
+
     /** 转换结果统计。 */
     public static final class Result {
         public final int classes;
         public final int keptMismatchedNew;
         /** 按段拼接还原的超长字符串常量处数。 */
         public final int longStrings;
+        /** 改成 InterfaceMethodref 的方法引用处数。 */
+        public final int interfaceRefs;
 
-        Result(int classes, int keptMismatchedNew, int longStrings) {
+        Result(int classes, int keptMismatchedNew, int longStrings, int interfaceRefs) {
             this.classes = classes;
             this.keptMismatchedNew = keptMismatchedNew;
             this.longStrings = longStrings;
+            this.interfaceRefs = interfaceRefs;
         }
     }
 
@@ -68,6 +77,8 @@ public final class PreciseDex2jar {
         // 超长字符串常量先换成占位串，避开 DexFix 的寄存器越界改写，生成字节码时再展开
         LongStringConstants longStrings = new LongStringConstants();
         int longStringCount = longStrings.stash(fileNode);
+        // 接口集合要在生成字节码前就从 dex 里取全：class 逐个生成时看不到别的 class 的声明
+        InterfaceMethodRefs interfaceRefs = InterfaceMethodRefs.of(fileNode, PreciseDex2jar.class.getClassLoader());
 
         Files.deleteIfExists(outJar);
         Path parent = outJar.toAbsolutePath().getParent();
@@ -81,15 +92,15 @@ public final class PreciseDex2jar {
         try (FileSystem zip = FileSystems.newFileSystem(uri, env)) {
             Path root = zip.getPath("/");
             java.util.Set<String> failed = new java.util.LinkedHashSet<>();
-            runPass(fileNode, handler, newTransformer, longStrings, root, classCount, failed, null);
+            runPass(fileNode, handler, newTransformer, longStrings, interfaceRefs, root, classCount, failed, null);
             if (!failed.isEmpty()) {
                 java.util.Set<String> retry = new java.util.LinkedHashSet<>(failed);
                 failed.clear();
-                runPass(fileNode, handler, newTransformer, longStrings, root, classCount, failed, retry);
+                runPass(fileNode, handler, newTransformer, longStrings, interfaceRefs, root, classCount, failed, retry);
                 System.err.println("[PreciseDex2jar] 重算栈帧重试 " + retry.size() + " 个类，仍失败 " + failed.size() + " 个: " + failed);
             }
         }
-        return new Result(classCount[0], newTransformer.keptMismatched.get(), longStringCount);
+        return new Result(classCount[0], newTransformer.keptMismatched.get(), longStringCount, interfaceRefs.patched());
     }
 
     /**
@@ -100,11 +111,10 @@ public final class PreciseDex2jar {
      * 按栈帧重放字节码，遇到 dex2jar 产出的某些写法抛 {@code ArrayIndexOutOfBoundsException}；
      * 以前这个类会被静默丢掉，运行时变成 NoClassDefFoundError（pg.jar 的
      * {@code com/github/catvod/parser/merge/h0/g}，整个 jar 的 Init 都跑不起来）。
-     * 重算栈帧需要类型层次，这里一律合并成 java/lang/Object：companion 总是带 -noverify 启动，
-     * 栈帧只是格式要求，不参与校验。
+     * 此处重试只负责取得完整中间产物；最终栈帧由 finishVerification 按真实类型层次重建。
      */
     private static void runPass(DexFileNode fileNode, DexExceptionHandler handler, PreciseNewTransformer newTransformer,
-                                LongStringConstants longStrings, Path root, int[] classCount,
+                                LongStringConstants longStrings, InterfaceMethodRefs interfaceRefs, Path root, int[] classCount,
                                 java.util.Set<String> failed, java.util.Set<String> only) {
             ClassVisitorFactory cvf = name -> {
                 if (only != null && !only.contains(name)) return null;
@@ -122,7 +132,7 @@ public final class PreciseDex2jar {
                         String className = rca.getClassName();
                         byte[] data;
                         try {
-                            data = cw.toByteArray();
+                            data = interfaceRefs.fix(cw.toByteArray());
                         } catch (Exception ex) {
                             System.err.println("[PreciseDex2jar] ASM 生成 class 失败(" + (only == null ? "maxs" : "frames") + "): " + className + " " + ex);
                             failed.add(name);

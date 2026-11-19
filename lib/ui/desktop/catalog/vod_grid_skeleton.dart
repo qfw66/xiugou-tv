@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
+import '../widgets/app_motion.dart';
 import 'vod_grid_view.dart' show VodGridMetrics;
 
 /// 首页 / 分类海报网格的首屏加载骨架（Infuse × Netflix 风格画报级对齐）。
@@ -10,31 +11,15 @@ import 'vod_grid_view.dart' show VodGridMetrics;
 /// - 与全新画报卡片严格保持一致的圆角（[AppRadii.lg] 16px）、微透边框（[context.glassBorder]）
 ///   与全景渐变结构，彻底杜绝数据加载完成时的布局跳动（skill: `content-jumping`）；
 /// - 维持单次淡入 200ms（[AppMotion.enter]），不做无限循环 shimmer，保证自动化测试与动效敏感用户友好。
-class VodGridSkeleton extends StatefulWidget {
+class VodGridSkeleton extends StatelessWidget {
   /// 占位卡片数量
   final int count;
 
   const VodGridSkeleton({super.key, this.count = 12});
 
   @override
-  State<VodGridSkeleton> createState() => _VodGridSkeletonState();
-}
-
-class _VodGridSkeletonState extends State<VodGridSkeleton>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _fade =
-      AnimationController(vsync: this, duration: AppMotion.enter)..forward();
-
-  @override
-  void dispose() {
-    _fade.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: _fade,
+    return AppEntrance(
       child: LayoutBuilder(
         builder: (context, constraints) {
           return GridView.builder(
@@ -47,7 +32,7 @@ class _VodGridSkeletonState extends State<VodGridSkeleton>
               crossAxisSpacing: VodGridMetrics.spacing,
               mainAxisSpacing: VodGridMetrics.spacing,
             ),
-            itemCount: widget.count,
+            itemCount: count,
             itemBuilder: (context, index) => const _SkeletonCard(),
           );
         },

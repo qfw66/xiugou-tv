@@ -28,6 +28,8 @@ class CompanionUiChannel {
   bool _started = false;
   bool _disposed = false;
   DateTime? _lastDialogShownAt;
+  DateTime? _lastToastAt;
+  final Set<int> _openDialogs = {};
 
   CompanionUiChannel({
     required this.readyPort,
@@ -46,6 +48,12 @@ class CompanionUiChannel {
 
   /// 最近一次有新弹窗出现的时间（用于判断「这次点击已经由载荷弹窗接管」）。
   DateTime? get lastDialogShownAt => _lastDialogShownAt;
+
+  /// 最近一次载荷 Toast 的时间（设置类条目常只回一条提示，不弹窗）。
+  DateTime? get lastToastAt => _lastToastAt;
+
+  /// 载荷侧仍打开的弹窗数；归零即用户已处理完本轮登录 / 设置弹窗。
+  int get openDialogCount => _openDialogs.length;
 
   void start() {
     if (_started || _disposed) return;
@@ -111,9 +119,21 @@ class CompanionUiChannel {
 
   void _emit(SpiderUiEvent event) {
     if (_disposed) return;
-    if ((event is SpiderDialogShown && !event.isUpdate) ||
-        (event is SpiderUiReset && event.dialogs.isNotEmpty)) {
-      _lastDialogShownAt = DateTime.now();
+    switch (event) {
+      case SpiderDialogShown(:final dialog, :final isUpdate):
+        if (!isUpdate) _lastDialogShownAt = DateTime.now();
+        _openDialogs.add(dialog.id);
+      case SpiderUiReset(:final dialogs):
+        if (dialogs.isNotEmpty) _lastDialogShownAt = DateTime.now();
+        _openDialogs
+          ..clear()
+          ..addAll(dialogs.map((d) => d.id));
+      case SpiderDialogDismissed(:final id):
+        _openDialogs.remove(id);
+      case SpiderToast():
+        _lastToastAt = DateTime.now();
+      default:
+        break;
     }
     _events.add(event);
   }
@@ -133,6 +153,8 @@ class CompanionUiChannel {
           res.data is String ? jsonDecode(res.data as String) : res.data;
       final accepted = raw is Map && raw['accepted'] == true;
       if (!accepted) {
+        // 载荷已不认这个弹窗，之后也不会再发 dismiss：本地按已关闭处理
+        _openDialogs.remove(input.dialogId);
         debugPrint(
             '[spider-ui] 操作未被接受：dialog=${input.dialogId} type=${input.type}');
       }

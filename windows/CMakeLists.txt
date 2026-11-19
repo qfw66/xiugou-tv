@@ -57,6 +57,14 @@ add_subdirectory("runner")
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
+# package_info_plus uses JNI on Android, while its Windows implementation reads
+# version resources. jni 1.1.2 applies DELAYLOAD to an unset TARGET_NAME; keep the
+# optional bridge loadable without requiring a developer JDK on the search path.
+if(TARGET jni AND MSVC)
+  target_link_options(jni PRIVATE "/DELAYLOAD:jvm.dll")
+  target_link_libraries(jni delayimp)
+endif()
+
 
 # === Installation ===
 # Support files are copied into place next to the executable, so that it can

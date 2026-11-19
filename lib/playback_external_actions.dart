@@ -99,7 +99,7 @@ Future<bool> _confirmExternalPlayback(
     BuildContext context, WidgetRef ref, List<String> warnings) async {
   final token = ref.read(playbackSourceChangeProvider)?.cancelToken;
   final navigator = Navigator.of(context, rootNavigator: true);
-  final route = DialogRoute<bool>(
+  final route = AppDialogRoute<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: const Text('使用外部播放器'),

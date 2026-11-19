@@ -5,6 +5,7 @@ import '../../theme/app_tokens.dart';
 import '../catalog/poster_image.dart';
 import '../widgets/focus_ring.dart';
 import 'history_sections.dart';
+import 'app_dialog.dart';
 
 /// 播放历史记录弹窗（Infuse × Netflix 风格流媒体沉浸质感）。
 ///
@@ -144,7 +145,7 @@ class HistoryDialog extends StatelessWidget {
                             horizontal: 12, vertical: 8),
                       ),
                       onPressed: () {
-                        showDialog(
+                        showAppDialog(
                           context: context,
                           builder: (ctx) => AlertDialog(
                             backgroundColor: palette.card,
@@ -190,7 +191,7 @@ class HistoryDialog extends StatelessWidget {
                       child: const Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.delete_sweep_outlined, size: 18),
+                          Icon(Icons.delete_sweep_rounded, size: 18),
                           SizedBox(width: 8),
                           Text('清空历史',
                               style: TextStyle(fontSize: AppType.label)),
@@ -263,32 +264,38 @@ class HistoryDialog extends StatelessWidget {
     return dialog;
   }
 
-  /// 按日期分组渲染：区块标题 + 该组内的记录卡片
+  /// 按日期分组渲染：区块标题 + 该组内的记录卡片。
+  ///
+  /// 历史可达上千条且每张卡都带封面，用 builder 只构建视口附近的行。
   Widget _buildGroupedList(BuildContext context) {
     final sections = groupHistoryRecords(records, now: now);
-    final rows = <Widget>[];
-    for (final section in sections) {
-      rows.add(
-          _SectionHeader(title: section.title, count: section.records.length));
-      for (final record in section.records) {
-        rows.add(
-          Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: _HistoryCard(
-              record: record,
-              timeText: _formatTime(record.timestamp),
-              onPlay: () {
-                Navigator.of(context).pop();
-                onPlayRecord(record);
-              },
-              onDelete: () => onDeleteRecord(record.id),
-            ),
+    // 元素是 HistorySection（区块标题）或 HistoryRecord（记录卡片）
+    final rows = <Object>[
+      for (final section in sections) ...[section, ...section.records],
+    ];
+
+    return ListView.builder(
+      itemCount: rows.length,
+      itemBuilder: (context, index) {
+        final row = rows[index];
+        if (row is HistorySection) {
+          return _SectionHeader(title: row.title, count: row.records.length);
+        }
+        final record = row as HistoryRecord;
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: _HistoryCard(
+            record: record,
+            timeText: _formatTime(record.timestamp),
+            onPlay: () {
+              Navigator.of(context).pop();
+              onPlayRecord(record);
+            },
+            onDelete: () => onDeleteRecord(record.id),
           ),
         );
-      }
-    }
-
-    return ListView(children: rows);
+      },
+    );
   }
 }
 

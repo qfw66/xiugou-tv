@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "process_job.h"
+#include "webdav_secrets_channel.h"
 
 #include "win32_window.h"
 #include "window_fullscreen.h"
@@ -35,6 +36,9 @@ class FlutterWindow : public Win32Window {
   // Keeps the process-job channel alive for the lifetime of the engine.
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       process_job_channel_;
+
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      webdav_secrets_channel_;
 
   // §52 一步式全屏；通道析构早于本对象（OnDestroy 里先清通道）。
   std::unique_ptr<WindowFullscreen> fullscreen_;

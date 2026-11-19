@@ -68,6 +68,45 @@ class ParseEngine {
     return MediaPlaySpec(url: trimmed);
   }
 
+  /// 站点显式指定的 JSON 解析前缀；失败时不能把原始ID当成媒体返回。
+  Future<MediaPlaySpec> parseSiteJson(String prefix, String rawUrl,
+      {Map<String, String>? requestHeaders}) async {
+    final endpoint = prefix.substring('json:'.length).trim();
+    final uri = Uri.tryParse(endpoint);
+    if (uri == null || !{'http', 'https'}.contains(uri.scheme) || uri.host.isEmpty) {
+      throw const FormatException('站点 JSON 解析地址无效');
+    }
+    final response = await _dio.get<String>(
+      '$endpoint${Uri.encodeComponent(rawUrl.trim())}',
+      options: Options(headers: requestHeaders, responseType: ResponseType.plain),
+    );
+    final dynamic decoded;
+    try {
+      decoded = jsonDecode(response.data ?? '');
+    } on FormatException {
+      throw const FormatException('站点 JSON 解析服务未返回有效 JSON');
+    }
+    if (decoded is! Map) throw const FormatException('站点 JSON 解析结果无效');
+    final data = decoded['data'];
+    final result = data is Map && decoded['url'] == null ? data : decoded;
+    final url = result['url']?.toString().trim() ?? '';
+    final media = Uri.tryParse(url);
+    if (media == null || !{'http', 'https', 'rtmp', 'rtsp'}.contains(media.scheme) || media.host.isEmpty) {
+      throw const FormatException('站点 JSON 解析未返回可播放地址');
+    }
+    final headers = <String, String>{};
+    Object? rawHeaders = result['header'] ?? result['headers'];
+    if (rawHeaders is String) {
+      try { rawHeaders = jsonDecode(rawHeaders); } on FormatException { rawHeaders = null; }
+    }
+    if (rawHeaders is Map) {
+      for (final entry in rawHeaders.entries) {
+        headers[entry.key.toString()] = entry.value.toString();
+      }
+    }
+    return MediaPlaySpec(url: url, headers: headers.isEmpty ? null : headers);
+  }
+
   bool _isDirectMediaUrl(String url) {
     final lower = url.toLowerCase();
     return lower.contains('.m3u8') ||

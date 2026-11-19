@@ -560,7 +560,7 @@ Future<CrossSiteCandidate?> _choosePlaybackSource(BuildContext context,
     WidgetRef ref, List<CrossSiteCandidate> candidates) async {
   final token = ref.read(playbackSourceChangeProvider)?.cancelToken;
   final navigator = Navigator.of(context, rootNavigator: true);
-  final route = DialogRoute<CrossSiteCandidate>(
+  final route = AppDialogRoute<CrossSiteCandidate>(
       context: context,
       builder: (dialogContext) => AlertDialog(
             title: const Text('选择播放来源'),

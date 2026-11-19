@@ -21,7 +21,7 @@ Future<T?> showPlayerSideDrawer<T>({
     barrierLabel: barrierLabel,
     // 遮罩固定压暗：无论深 / 浅主题，背后的视频都退到背景（与原播放设置对话框一致）。
     barrierColor: const Color(0x66000000),
-    transitionDuration: AppMotion.enter,
+    transitionDuration: AppMotion.durationOf(context, AppMotion.enter),
     pageBuilder: (dialogContext, _, __) => LayoutBuilder(
       builder: (layoutContext, constraints) {
         final w = constraints.maxWidth * 0.85 < width
@@ -51,7 +51,9 @@ Future<T?> showPlayerSideDrawer<T>({
     transitionBuilder: (context, animation, _, child) => SlideTransition(
       position: Tween<Offset>(begin: const Offset(1, 0), end: Offset.zero)
           .animate(CurvedAnimation(
-              parent: animation,
+              parent: AppMotion.reduced(context)
+                  ? const AlwaysStoppedAnimation(1.0)
+                  : animation,
               curve: AppMotion.ease,
               reverseCurve: AppMotion.ease.flipped)),
       child: child,
@@ -125,7 +127,7 @@ class PlayerSideDrawerFrame extends StatelessWidget {
                   icon: Icon(Icons.close_rounded, color: palette.playerText, size: 18),
                   tooltip: closeTooltip,
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+                  constraints: const BoxConstraints.tightFor(width: 32, height: 32),
                   onPressed: () => Navigator.of(context).pop(),
                 ),
               ],

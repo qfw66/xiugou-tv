@@ -224,6 +224,7 @@ public final class DebugLog {
             Map<String, String> params) {
         if (!RPC) return;
         out("RPC", id, "--> " + method + " site=" + safe(siteKey) + " api=" + safe(api));
+        if ("csp_GM".equals(api) || "GM".equals(api)) return;
         if (ext != null && !ext.isEmpty()) out("RPC", id, "    ext(" + ext.length() + "B): " + truncate(ext));
         if (jar != null && !jar.isEmpty()) out("RPC", id, "    jar: " + tail(jar, 90));
         StringBuilder sb = new StringBuilder();
@@ -240,10 +241,15 @@ public final class DebugLog {
     }
 
     public static void rpcResult(long id, String method, String result) {
+        rpcResult(id, method, result, false);
+    }
+
+    /** Playback capabilities and GM page metadata must never be copied into debug logs. */
+    public static void rpcResult(long id, String method, String result, boolean metadataOnly) {
         if (!RPC) return;
         int size = result == null ? 0 : result.length();
         out("RPC", id, "<-- " + method + " " + size + "B");
-        if (size > 0) out("RPC", id, "    " + truncate(result));
+        if (size > 0 && !metadataOnly && !"playerContent".equals(method)) out("RPC", id, "    " + truncate(result));
     }
 
     // ==================================================================================

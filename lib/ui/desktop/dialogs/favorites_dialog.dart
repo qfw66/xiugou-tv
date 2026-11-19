@@ -182,26 +182,30 @@ class _FavoritesDialogState extends State<FavoritesDialog> {
                       // 关闭按钮
                       FocusOutline(
                         radius: AppRadii.pill,
-                        child: Material(
-                          color: Colors.transparent,
-                          child: InkWell(
-                            onTap: () => Navigator.of(context).pop(),
-                            borderRadius: BorderRadius.circular(AppRadii.pill),
-                            hoverColor: palette.raised,
-                            child: Container(
-                              width: 36,
-                              height: 36,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: palette.border,
-                                  width: 1,
+                        child: Tooltip(
+                          message: '关闭',
+                          child: Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              onTap: () => Navigator.of(context).pop(),
+                              borderRadius:
+                                  BorderRadius.circular(AppRadii.pill),
+                              hoverColor: palette.raised,
+                              child: Container(
+                                width: 36,
+                                height: 36,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: palette.border,
+                                    width: 1,
+                                  ),
                                 ),
-                              ),
-                              child: Icon(
-                                Icons.close_rounded,
-                                color: palette.textSub,
-                                size: 18,
+                                child: Icon(
+                                  Icons.close_rounded,
+                                  color: palette.textSub,
+                                  size: 18,
+                                ),
                               ),
                             ),
                           ),
@@ -471,7 +475,7 @@ class _FavoritesDialogState extends State<FavoritesDialog> {
                       color: palette.textSub,
                       visualDensity: VisualDensity.compact,
                     ),
-                    Icon(Icons.play_circle_outline,
+                    Icon(Icons.play_circle_outline_rounded,
                         size: 22, color: palette.accentInk),
                   ],
                 ),
@@ -627,9 +631,10 @@ class _FavoriteItemCardState extends State<_FavoriteItemCard> {
                     ),
 
                   // 5. 右上角浮动删除收藏按钮（微透磨砂圆形，悬停变深红）
+                  // 视觉 26px、命中 32px：外扩 3px，圆钮的视觉位置不变
                   Positioned(
-                    top: 8,
-                    right: 8,
+                    top: 5,
+                    right: 5,
                     child: _RemoveButton(
                       itemId: item.id,
                       onRemove: widget.onRemove,
@@ -717,35 +722,41 @@ class _RemoveButtonState extends State<_RemoveButton> {
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
           key: ValueKey('favorite-remove-${widget.itemId}'),
+          behavior: HitTestBehavior.opaque,
           onTap: widget.onRemove,
-          child: AnimatedContainer(
-            duration: _isHovered ? AppMotion.enter : AppMotion.exit,
-            width: 26,
-            height: 26,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: _isHovered
-                  ? const Color(0xE6C62828)
-                  : const Color(0xCC000000),
-              border: Border.all(
-                color: _isHovered
-                    ? Colors.white.withValues(alpha: 0.3)
-                    : Colors.white.withValues(alpha: 0.18),
-                width: 1,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.35),
-                  blurRadius: 4,
-                  offset: const Offset(0, 2),
+          child: SizedBox.square(
+            dimension: 32,
+            child: Center(
+              child: AnimatedContainer(
+                duration: _isHovered ? AppMotion.enter : AppMotion.exit,
+                width: 26,
+                height: 26,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _isHovered
+                      ? const Color(0xE6C62828)
+                      : const Color(0xCC000000),
+                  border: Border.all(
+                    color: _isHovered
+                        ? Colors.white.withValues(alpha: 0.3)
+                        : Colors.white.withValues(alpha: 0.18),
+                    width: 1,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.35),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            child: const Center(
-              child: Icon(
-                Icons.close_rounded,
-                size: 14,
-                color: Colors.white,
+                child: const Center(
+                  child: Icon(
+                    Icons.close_rounded,
+                    size: 14,
+                    color: Colors.white,
+                  ),
+                ),
               ),
             ),
           ),

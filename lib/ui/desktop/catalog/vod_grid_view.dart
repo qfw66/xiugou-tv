@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../core/api/models/vod_models.dart';
 import '../../theme/app_palette.dart';
+import '../widgets/app_motion.dart';
 import '../widgets/focus_ring.dart';
 import '../../theme/app_tokens.dart';
 import 'poster_image.dart';
@@ -19,7 +20,7 @@ abstract final class VodGridMetrics {
 
   /// 网格内边距
   static const EdgeInsets padding =
-      EdgeInsets.symmetric(horizontal: 16, vertical: 12);
+      EdgeInsets.all(8);
 
   /// 按可用宽度计算列数（3–8 列）
   static int crossAxisCount(double maxWidth) =>
@@ -54,29 +55,11 @@ class VodGridView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = AppPalette.of(context);
     if (items.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 64,
-              height: 64,
-              decoration: BoxDecoration(
-                color: palette.raised,
-                borderRadius: BorderRadius.circular(AppRadii.pill),
-              ),
-              child:
-                  Icon(Icons.movie_outlined, size: 32, color: palette.textDim),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              '当前分类暂无影视内容',
-              style: TextStyle(color: palette.textSub, fontSize: AppType.label),
-            ),
-          ],
-        ),
+      return const AppEmptyState(
+        icon: Icons.movie_outlined,
+        title: '当前分类暂无影视内容',
+        message: '试试其他分类，或切换片源后重新查看。',
       );
     }
 
@@ -99,9 +82,7 @@ class VodGridView extends StatelessWidget {
               index: index,
               poster: imageProviderFor?.call(item) ??
                   posterImageProvider(item.pic,
-                      targetWidth: VodGridMetrics.posterCacheWidth) ??
-                  ResizeImage(NetworkImage(item.pic),
-                      width: VodGridMetrics.posterCacheWidth),
+                      targetWidth: VodGridMetrics.posterCacheWidth),
               onTap: () => onItemTap(item),
             );
           },
@@ -117,7 +98,7 @@ class _VodCard extends StatefulWidget {
   final VoidCallback onTap;
 
   /// 海报解码器（默认 `ResizeImage(NetworkImage(...))`；豆瓣图床由外部注入）
-  final ImageProvider poster;
+  final ImageProvider? poster;
 
   const _VodCard({
     required this.item,
@@ -134,13 +115,15 @@ class _VodCardState extends State<_VodCard> {
   bool _isHovered = false;
 
   /// 悬停动效节奏（D2）：进入 200ms / 离开 140ms——离开更快才「跟手」。
-  Duration get _hoverMotion => _isHovered ? AppMotion.enter : AppMotion.exit;
+  Duration get _hoverMotion => AppMotion.durationOf(
+      context, _isHovered ? AppMotion.enter : AppMotion.exit);
 
   /// 计算顶部左侧标签（如：「豆瓣热播」「4K」「1080P」「更新至xx集」）。
   ///
   /// B2 角标真实性：只在有真实信息时渲染——已移除「豆瓣热播」等假数据兜底，
   /// 无信息返回 null（角标不渲染）。
   String? _resolveTopBadge() {
+    if (widget.item.isFolder) return '目录';
     if (widget.item.tag != null && widget.item.tag!.isNotEmpty) {
       return widget.item.tag!;
     }
@@ -175,10 +158,9 @@ class _VodCardState extends State<_VodCard> {
         onEnter: (_) => setState(() => _isHovered = true),
         onExit: (_) => setState(() => _isHovered = false),
         cursor: SystemMouseCursors.click,
-        // 先缩放再套焦点环：否则缩放只作用于卡片，焦点环停在 100% 尺寸，
-        // 放大 4% 之后环就比卡片小一圈（描边与影片大小对不上）。
+        // invariant: 缩放包住焦点环，描边与卡片始终使用同一尺寸。
         child: AnimatedScale(
-          scale: _isHovered ? 1.04 : 1.0,
+          scale: _isHovered && !AppMotion.reduced(context) ? 1.02 : 1.0,
           duration: _hoverMotion,
           curve: AppMotion.ease,
           child: FocusRing(
@@ -191,14 +173,8 @@ class _VodCardState extends State<_VodCard> {
                 duration: _hoverMotion,
                 curve: AppMotion.ease,
                 decoration: BoxDecoration(
-                  color: palette.card,
+                  color: Colors.transparent,
                   borderRadius: BorderRadius.circular(AppRadii.lg),
-                  // 边框不再画在 decoration 上：`Border.all` 在圆角矩形上是
-                  // 居中描边，一半落在盒子外会被圆角裁剪吃掉，四角几乎看不见。
-                  // 描边改由 Stack 最上层的 [_CardRingPainter] 负责。
-                  boxShadow: _isHovered
-                      ? AppShadows.cardHover(palette.accentInk)
-                      : null,
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: Stack(
@@ -210,7 +186,7 @@ class _VodCardState extends State<_VodCard> {
                     // NetworkImage('') 并真的发起请求，加载失败后再走 errorBuilder：
                     // 上千个频道滚动时就是上千次无效请求 + 异常上报，直接拖垮滚动。
                     // 空 URL 直接渲染占位，不发请求。
-                    if (widget.item.pic.trim().isEmpty)
+                    if (widget.item.pic.trim().isEmpty || widget.poster == null)
                       Container(
                         color: palette.raised,
                         child: Center(
@@ -223,7 +199,7 @@ class _VodCardState extends State<_VodCard> {
                       )
                     else
                       Image(
-                        image: widget.poster,
+                        image: widget.poster!,
                         fit: BoxFit.cover,
                         errorBuilder: (context, error, stackTrace) => Container(
                           color: palette.raised,

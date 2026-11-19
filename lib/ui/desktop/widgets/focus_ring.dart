@@ -43,6 +43,12 @@ class FocusRing extends StatefulWidget {
   /// 在黑底上几乎不可见。
   final Color? color;
 
+  /// 出现时是否主动取得焦点（例如收起侧栏后的唯一展开入口）。
+  final bool autofocus;
+
+  /// 外部焦点节点；用于在状态切换后主动把焦点移回本控件。
+  final FocusNode? focusNode;
+
   const FocusRing({
     super.key,
     required this.child,
@@ -50,8 +56,9 @@ class FocusRing extends StatefulWidget {
     this.borderRadius = const BorderRadius.all(Radius.circular(AppRadii.md)),
     this.semanticLabel,
     this.color,
+    this.autofocus = false,
+    this.focusNode,
   });
-
   @override
   State<FocusRing> createState() => _FocusRingState();
 }
@@ -66,6 +73,8 @@ class _FocusRingState extends State<FocusRing> {
 
     return FocusableActionDetector(
       enabled: enabled,
+      autofocus: widget.autofocus,
+      focusNode: widget.focusNode,
       onShowFocusHighlight: (value) {
         if (value != _focused) setState(() => _focused = value);
       },

@@ -45,14 +45,30 @@ class _VodListRow extends StatefulWidget {
 
 class _VodListRowState extends State<_VodListRow> {
   bool _isHovered = false;
+  bool _isPressed = false;
+  late final FocusNode _focusNode = FocusNode()
+    ..addListener(_handleFocusChange);
+
+  void _handleFocusChange() => setState(() {});
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
 
   /// 悬停节奏（D2）：进 200ms / 出 140ms。
-  Duration get _hoverMotion => _isHovered ? AppMotion.enter : AppMotion.exit;
+  Duration get _hoverMotion => AppMotion.durationOf(
+      context,
+      _isHovered || _isPressed || _focusNode.hasFocus
+          ? AppMotion.enter
+          : AppMotion.exit);
 
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
     final item = widget.item;
+    final selected = _focusNode.hasFocus || _isPressed;
     final siteName = item.siteName?.trim() ?? '';
     final source = siteName.isNotEmpty
         ? siteName
@@ -71,14 +87,17 @@ class _VodListRowState extends State<_VodListRow> {
           decoration: BoxDecoration(
             color: palette.card,
             borderRadius: BorderRadius.circular(AppRadii.sm),
-            border: Border.all(color: palette.borderStrong, width: 1),
+            border: Border.all(color: palette.divider, width: 1),
           ),
           child: Text(
             source,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-                fontSize: AppType.caption, color: palette.textSub),
+              fontSize: AppType.caption,
+              fontWeight: FontWeight.w500,
+              color: palette.textSub,
+            ),
           ),
         ),
       ),
@@ -118,7 +137,7 @@ class _VodListRowState extends State<_VodListRow> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                      fontSize: AppType.body, color: palette.textDim),
+                      fontSize: AppType.body, color: palette.textSub),
                 ),
               ),
             if (year.isNotEmpty)
@@ -127,21 +146,39 @@ class _VodListRowState extends State<_VodListRow> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                    fontSize: AppType.body, color: palette.textDim),
+                    fontSize: AppType.body, color: palette.textSub),
               ),
           ],
         ),
     ];
 
     return FocusRing(
+      focusNode: _focusNode,
       onTap: widget.onTap,
       semanticLabel: item.name,
       borderRadius: const BorderRadius.all(Radius.circular(AppRadii.md)),
       child: InkWell(
         onTap: widget.onTap,
-        hoverColor: palette.hover,
+        canRequestFocus: false,
+        borderRadius: BorderRadius.circular(AppRadii.md),
+        hoverColor: Colors.transparent,
+        highlightColor: Colors.transparent,
+        splashFactory: AppMotion.reduced(context)
+            ? NoSplash.splashFactory
+            : Theme.of(context).splashFactory,
         onHover: (hovering) => setState(() => _isHovered = hovering),
-        child: Padding(
+        onHighlightChanged: (pressed) => setState(() => _isPressed = pressed),
+        child: AnimatedContainer(
+          duration: _hoverMotion,
+          curve: AppMotion.ease,
+          decoration: BoxDecoration(
+            color: selected
+                ? palette.selectionFill
+                : _isHovered
+                    ? palette.hover
+                    : Colors.transparent,
+            borderRadius: BorderRadius.circular(AppRadii.md),
+          ),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
           child: LayoutBuilder(
             builder: (context, constraints) => Row(
@@ -150,10 +187,14 @@ class _VodListRowState extends State<_VodListRow> {
                   child: AnimatedDefaultTextStyle(
                     duration: _hoverMotion,
                     curve: AppMotion.ease,
-                    style: TextStyle(
+                    style: DefaultTextStyle.of(context).style.copyWith(
                       fontSize: AppType.title,
-                      color: _isHovered ? palette.textTitle : palette.textMain,
-                      fontWeight: FontWeight.w500,
+                      color: selected
+                          ? palette.selectionInk
+                          : _isHovered
+                              ? palette.textTitle
+                              : palette.textMain,
+                      fontWeight: FontWeight.w600,
                     ),
                     child: Tooltip(
                       message: item.name,

@@ -7,6 +7,7 @@ public class Result {
     private List<Vod> list;
     private Map<String, List<Filter>> filters;
     private String url;
+    private String header;
     private int parse = 0;
     private int jx = 0;
     private Integer page;
@@ -18,6 +19,10 @@ public class Result {
 
     public static Result get() {
         return new Result();
+    }
+
+    public static String error(String msg) {
+        return get().vod(Collections.emptyList()).msg(msg).string();
     }
 
     public static String string(List<Class> classes, List<Vod> list) {
@@ -52,6 +57,10 @@ public class Result {
         return this;
     }
 
+    public Result vod(Vod item) {
+        return vod(Collections.singletonList(item));
+    }
+
     public Result vod(List<Vod> list) {
         this.list = list;
         return this;
@@ -62,8 +71,18 @@ public class Result {
         return this;
     }
 
+    // 已编译的站源会按 LinkedHashMap 精确签名调用此方法。
+    public Result filters(LinkedHashMap<String, List<Filter>> filters) {
+        return filters((Map<String, List<Filter>>) filters);
+    }
+
     public Result url(String url) {
         this.url = url;
+        return this;
+    }
+
+    public Result header(Map<String, String> headers) {
+        if (!headers.isEmpty()) this.header = new com.google.gson.Gson().toJson(headers);
         return this;
     }
 
@@ -149,6 +168,12 @@ public class Result {
         if (url != null) {
             if (!first) sb.append(",");
             sb.append("\"url\":\"").append(escape(url)).append("\"");
+            first = false;
+        }
+
+        if (header != null) {
+            if (!first) sb.append(",");
+            sb.append("\"header\":").append(new com.google.gson.Gson().toJson(header));
             first = false;
         }
 

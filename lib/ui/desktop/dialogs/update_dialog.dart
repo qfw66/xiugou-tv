@@ -4,6 +4,7 @@ import '../../../core/update/update_controller.dart';
 import '../../../core/update/update_service.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
+import 'escape_closable.dart';
 
 /// 更新对话框（纯展示：状态与回调由 [UpdateDialogHost] 注入，便于测试）。
 class UpdateDialog extends StatelessWidget {
@@ -43,7 +44,7 @@ class UpdateDialog extends StatelessWidget {
     final palette = AppPalette.of(context);
     final result = state.result;
     final busy = state.busy;
-    return PopScope<void>(
+    return EscapeClosable(child: PopScope<void>(
       canPop: !busy,
       child: Dialog(
         backgroundColor: palette.panel,
@@ -73,7 +74,7 @@ class UpdateDialog extends StatelessWidget {
           ),
         ),
       ),
-    );
+    ));
   }
 
   Widget _header(BuildContext context, AppPalette palette) {
@@ -111,7 +112,7 @@ class UpdateDialog extends StatelessWidget {
         IconButton(
           tooltip: state.busy ? '下载中无法关闭，请先取消' : '关闭',
           onPressed: state.busy ? null : onClose,
-          icon: Icon(Icons.close, color: palette.textSub),
+          icon: Icon(Icons.close_rounded, color: palette.textSub),
         ),
       ],
     );
@@ -211,7 +212,7 @@ class UpdateDialog extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(top: 6),
             child: Row(children: [
-              Icon(Icons.science_outlined, size: 15, color: palette.textDim),
+              Icon(Icons.science_rounded, size: 15, color: palette.textDim),
               const SizedBox(width: 6),
               Text('这是预发布版本，可能不稳定',
                   style: TextStyle(
@@ -222,7 +223,7 @@ class UpdateDialog extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(top: 6),
             child: Row(children: [
-              Icon(Icons.visibility_off_outlined,
+              Icon(Icons.visibility_off_rounded,
                   size: 15, color: palette.textDim),
               const SizedBox(width: 6),
               Text('已跳过此版本（自动检查不再提示）',
@@ -326,7 +327,7 @@ class UpdateDialog extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(children: [
-            Icon(Icons.verified_outlined, size: 16, color: palette.success),
+            Icon(Icons.verified_rounded, size: 16, color: palette.success),
             const SizedBox(width: 6),
             Text('校验通过（SHA-256），可安装',
                 style:

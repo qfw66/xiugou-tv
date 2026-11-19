@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../../net/site_icon_url.dart';
 import '../../player/models/player_state.dart';
 import '../config_decoder.dart';
 
@@ -18,6 +19,12 @@ class Site {
   final List<String>? categories;
   final Map<String, String>? header;
 
+  /// 配置明确提供的站源图标；[logo] 是兼容字段，不推测 favicon。
+  final String? icon;
+  final String? logo;
+
+  String? get iconUrl => resolveSiteIconUrl(icon) ?? resolveSiteIconUrl(logo);
+
   const Site({
     required this.key,
     required this.name,
@@ -31,20 +38,24 @@ class Site {
     this.playUrl,
     this.categories,
     this.header,
+    this.icon,
+    this.logo,
   });
 
   /// 与手机端 `BaseLoader.getSpider` 的 api 判定对齐：
   /// `.js` 走 JS 引擎、`.py` 走 Python 引擎、`csp_` 走 JAR；
   /// `type == 3` 是历史约定，配置里并非所有 spider 站源都标注它。
-  bool get isJavaScriptSource => api.contains('.js');
+  bool get isJavaScriptSource => type != 4 && api.contains('.js');
 
-  bool get isPythonSource => api.contains('.py');
+  bool get supportsSearch => searchable != 0 && api.trim().isNotEmpty;
 
-  bool get isJarSource => api.startsWith('csp_');
+  bool get isPythonSource => type != 4 && api.contains('.py');
 
-  /// 需要 Spider 执行环境（Companion）的站源；Python 源同样需要，但当前无引擎。
-  bool get usesCompanion =>
-      type == 3 || isJavaScriptSource || isPythonSource || isJarSource;
+  bool get isJarSource => type != 4 && api.startsWith('csp_');
+
+  /// type:4 是显式 HTTP 协议，路径或参数中的脚本后缀不改变它的路由。
+  bool get usesCompanion => type != 4 &&
+      (type == 3 || isJavaScriptSource || isPythonSource || isJarSource);
 
   /// 当前桌面端无法执行的站源（缺少 Chaquopy 等运行时）。
   bool get isUnsupportedSource => isPythonSource;
@@ -85,6 +96,8 @@ class Site {
           ?.map((e) => e.toString())
           .toList(),
       header: parsedHeader,
+      icon: siteIconReference(json['icon']),
+      logo: siteIconReference(json['logo']),
     );
   }
 
@@ -95,6 +108,8 @@ class Site {
     String? api,
     String? ext,
     String? jar,
+    String? icon,
+    String? logo,
   }) =>
       Site(
         key: key ?? this.key,
@@ -109,6 +124,8 @@ class Site {
         playUrl: playUrl,
         categories: categories,
         header: header,
+        icon: icon ?? this.icon,
+        logo: logo ?? this.logo,
       );
 
   Map<String, dynamic> toJson() => {
@@ -124,6 +141,8 @@ class Site {
     if (playUrl != null) 'playUrl': playUrl,
     if (categories != null) 'categories': categories,
     if (header != null) 'header': header,
+    if (icon != null) 'icon': icon,
+    if (logo != null) 'logo': logo,
   };
 
   /// 调试输出：`print(site)` / `debugPrint('$site')` 可直接打印全部关键字段。
@@ -456,6 +475,7 @@ class VodConfig {
   final String? wallpaper;
   final String? warning;
   final List<Site> sites;
+  Iterable<Site> get searchableSites => sites.where((site) => site.supportsSearch);
   final List<Parse> parses;
   final List<Live> lives;
   final List<FlagRule> rules;
@@ -485,14 +505,18 @@ class VodConfig {
     final rawFlags = json['flags'] as List<dynamic>? ?? [];
     final rawAds = json['ads'] as List<dynamic>? ?? [];
 
+    // NowShowTime 订阅（{websites:[{id,name,jsUrl}]}）没有 sites，映射成 XPTV 脚本站交给 companion。
+    final siteMaps = rawSites.whereType<Map<String, dynamic>>().toList();
+    final effectiveSites =
+        siteMaps.isEmpty ? _websitesAsSites(json['websites']) : siteMaps;
+
     return VodConfig(
       spider: rawSpider,
       wallpaper: json['wallpaper']?.toString(),
       warning: json['warning']?.toString(),
-      sites: rawSites
-          .whereType<Map<String, dynamic>>()
+      sites: _withUniqueKeys(effectiveSites
           .map((m) => Site.fromJson(m, defaultSpider: rawSpider))
-          .toList(),
+          .toList()),
       parses: rawParses
           .whereType<Map<String, dynamic>>()
           .map(Parse.fromJson)
@@ -505,6 +529,62 @@ class VodConfig {
       flags: rawFlags.map((e) => e.toString()).toList(),
       ads: rawAds.map((e) => e.toString()).toList(),
     );
+  }
+
+  /// XPTV 配置里的站点普遍不写 key；空 key 会让选站、缓存与 companion 的 spider 实例全部串台。
+  /// 以 api（其次 name）生成 key，重复时追加 `_2`、`_3`…，并避开显式声明的 key。
+  static List<Site> _withUniqueKeys(List<Site> sites) {
+    if (sites.every((site) => site.key.isNotEmpty)) return sites;
+    final used = {
+      for (final site in sites)
+        if (site.key.isNotEmpty) site.key,
+    };
+    String claim(Site site) {
+      final api = site.api.trim();
+      final name = site.name.trim();
+      final base = api.isNotEmpty ? api : (name.isNotEmpty ? name : 'site');
+      var candidate = base;
+      for (var n = 2; !used.add(candidate); n++) {
+        candidate = '${base}_$n';
+      }
+      return candidate;
+    }
+
+    return [
+      for (final site in sites)
+        site.key.isNotEmpty ? site : site.copyWith(key: claim(site)),
+    ];
+  }
+
+  static List<Map<String, dynamic>> _websitesAsSites(Object? raw) {
+    if (raw is! List) return const [];
+    final result = <Map<String, dynamic>>[];
+    for (final (index, item) in raw.indexed) {
+      if (item is! Map) continue;
+      final jsUrl = item['jsUrl']?.toString().trim() ?? '';
+      if (jsUrl.isEmpty) continue;
+      final name = item['name']?.toString().trim() ?? '';
+      final rawId = item['id']?.toString().trim() ?? '';
+      final id = rawId.isNotEmpty ? rawId : (name.isNotEmpty ? name : '$index');
+      result.add({
+        'key': 'nst_$id',
+        'name': name.isNotEmpty ? name : id,
+        'type': 3,
+        'api': 'csp_$id',
+        'ext': _relocateNowShowTime(jsUrl),
+      });
+    }
+    return result;
+  }
+
+  /// WayneDuan/nowshowtimejs 已把根目录脚本整体迁入 `v1/`，旧订阅里的根路径全部 404。
+  static final RegExp _nowShowTimeRoot = RegExp(
+    r'^(https://raw\.githubusercontent\.com/WayneDuan/nowshowtimejs/(?:refs/heads/)?main/)([^/]+\.js)$',
+  );
+
+  static String _relocateNowShowTime(String url) {
+    final match = _nowShowTimeRoot.firstMatch(url);
+    return match == null ? url : '${match[1]}v1/${match[2]}';
   }
 
   static List<Live> _parseLives(List<dynamic> list) {

@@ -8,9 +8,9 @@
          MSVCP140 / VCRUNTIME140 / VCRUNTIME140_1，旧包只在 runtime\jre\bin 下有一份，
          主程序目录没有；本门禁做 PE 导入闭包检查，并在启动后核对运行库从包内目录加载；
       2) 窗口开在屏幕外（§47，desktop_window.json 被写成 -32000 / 158×26）——启动冒烟
-         用临时 APPDATA 预置事故配置，要求窗口可见、落在显示器工作区内且尺寸正常。
+         用临时应用目录的 user_data/desktop_window.json 预置事故配置，核对实际配置已修复。
 
-    检查项：产物与 SHA256SUMS 自检、版本资源、zip 条目分隔符、必需文件清单、与构建目录
+    检查项：产物与 SHA256SUMS 自检、版本资源、zip 条目分隔符、必需文件清单、与干净暂存目录
     逐文件一致、PE 依赖闭包、内置 JRE 可运行、zip 解压 / 安装包静默安装到临时目录后
     分别启动（存活、可见、有内容、运行库来源、正常关闭退出码 0、无 hs_err / 崩溃转储）。
 
@@ -20,8 +20,9 @@
 .PARAMETER ArtifactDir
     存放 portable.zip / setup.exe / SHA256SUMS 的目录。
 
-.PARAMETER BuildOutputDir
-    Flutter Release 输出目录（用于逐文件对照）；缺省为 build\windows\x64\runner\Release。
+.PARAMETER StagedAppDir
+    打包时使用的干净应用暂存目录（旧参数名 BuildOutputDir 仍可作为别名）。
+    独立运行时缺省从 Release 安全筛选到新的临时参照目录，不读取或遍历 user_data。
 
 .PARAMETER LaunchSeconds
     窗口出现后要求进程持续存活的秒数（默认 8）。
@@ -36,26 +37,35 @@
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [Parameter(Mandatory = $true)][string]$ArtifactDir,
-    [string]$BuildOutputDir = "",
+    [Alias('BuildOutputDir')][string]$StagedAppDir = "",
     [int]$LaunchSeconds = 8,
     [switch]$SkipZip,
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+    [switch]$AllowMachineInstallCoexistence
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path "$ScriptDir/..").Path
-if (-not $BuildOutputDir) { $BuildOutputDir = Join-Path $ProjectRoot "build/windows/x64/runner/Release" }
+. (Join-Path $ScriptDir 'package_tree.ps1')
+. (Join-Path $ScriptDir 'release_test_helpers.ps1')
+if ($SkipZip -and $SkipInstaller) { throw 'At least one package must be verified.' }
+# /CURRENTUSER uses a separate HKCU registration; opt-in coexistence additionally
+# fingerprints and preserves the existing HKLM registration at every boundary.
+$ProtectedMachineRegistrations = @()
+if (-not $SkipInstaller) {
+    $registrations = @(Get-ReleaseInstallRegistrations)
+    Assert-NoReleaseInstallConflict $registrations -AllowMachineInstall:$AllowMachineInstallCoexistence
+    $ProtectedMachineRegistrations = @($registrations | Where-Object { $_.Hive -eq 'LocalMachine' })
+}
 $ArtifactDir = (Resolve-Path -LiteralPath $ArtifactDir).Path
-$BuildOutputDir = [System.IO.Path]::GetFullPath($BuildOutputDir)
 
 $ZipName = "xiugou-tv-windows-x64-v$Version-portable.zip"
 $SetupName = "xiugou-tv-windows-x64-v$Version-setup.exe"
 $ZipPath = Join-Path $ArtifactDir $ZipName
 $SetupPath = Join-Path $ArtifactDir $SetupName
 $SumsPath = Join-Path $ArtifactDir "SHA256SUMS"
-# 与 scripts/installer.iss 的 AppId 一致；Inno 在注册表里的键名是 "{AppId}_is1"。
-$InnoUninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{E88D6F21-6A2F-4E8C-B8FB-5A86FA8F0C42}_is1"
+# Registration discovery/ownership checks live in release_test_helpers.ps1.
 
 # 主程序目录里必须自带的 VC++ 运行库（应用本地部署；用户机未装 vc_redist 时也能启动）。
 $VcCrtFiles = @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
@@ -140,7 +150,7 @@ public static class XgWin {
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
-    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder sb, int max);
 
     // 找指定进程的 Flutter 顶层窗口（类名见 windows/runner/win32_window.cpp）。
@@ -161,8 +171,13 @@ public static class XgWin {
 "@
 [void][XgWin]::SetProcessDPIAware()
 
-$SmokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("xiugou-tv-smoke-" + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $SmokeRoot -Force | Out-Null
+# Keep the isolated install path short enough for native installers and Python's
+# deeply nested modules; do not reuse a caller's already deeply nested TEMP.
+$smokeBase = if ($env:PI_SCRATCH_DIR) { $env:PI_SCRATCH_DIR } else { [System.IO.Path]::GetTempPath() }
+$SmokeRoot = Join-Path $smokeBase ('s-' + [Guid]::NewGuid().ToString('N').Substring(0, 12))
+Assert-PackagePathIsNotLinked $SmokeRoot
+if (Test-Path -LiteralPath $SmokeRoot) { throw 'Smoke directory must be new.' }
+New-Item -ItemType Directory -Path $SmokeRoot | Out-Null
 
 Write-Host "======================================================" -ForegroundColor Cyan
 Write-Host "  发布产物冒烟门禁  v$Version" -ForegroundColor Cyan
@@ -177,26 +192,17 @@ function Get-NormalizedVersion([string]$Raw) {
     return $v
 }
 
-# 包内必需文件清单（相对路径）。插件 DLL 另按构建目录全量对照，这里列的是「缺了必然打不开 / 必然降级」的项。
-function Get-RequiredEntries {
-    $list = @(
-        "xiugou_tv.exe", "flutter_windows.dll",
-        "libmpv-2.dll", "libEGL.dll", "libGLESv2.dll", "d3dcompiler_47.dll",
-        "data/app.so", "data/icudtl.dat",
-        "data/flutter_assets/AssetManifest.bin", "data/flutter_assets/FontManifest.json",
-        "data/flutter_assets/fonts/MaterialIcons-Regular.otf",
-        "runtime/jre/bin/java.exe", "runtime/jre/bin/server/jvm.dll", "runtime/jre/lib/modules",
-        "companion/dist/companion-service.jar",
-        "companion/dist/pyshell/runner.py"
-    ) + $VcCrtFiles
-    if (Test-Path -LiteralPath (Join-Path $ProjectRoot "companion/pyruntime/python.exe")) {
-        $list += "companion/dist/pyruntime/python.exe"
-    }
-    foreach ($plugin in (Get-ChildItem -LiteralPath $BuildOutputDir -Filter "*_plugin.dll" -File)) { $list += $plugin.Name }
-    return $list
-}
+# Required entries are shared with the staging seam, including bundled Python and licenses.
+function Get-RequiredEntries { Get-PackageRequiredEntries }
 
-function Test-PackageLayout([string]$Scope, [string]$Root) {
+function Test-PackageLayout([string]$Scope, [string]$Root, [switch]$Installed) {
+    try {
+        $count = Assert-PackageMatchesStage -StageDir $StagedAppDir -PackageDir $Root -Installed:$Installed
+        Add-Result $Scope 'Clean stage file set and SHA256' $true "$count application files match; no packaged profile/cache/log"
+    } catch {
+        Add-Result $Scope 'Clean stage file set and SHA256' $false $_.Exception.Message
+        return $false
+    }
     Invoke-Check $Scope "必需文件清单" {
         $missing = @()
         foreach ($rel in (Get-RequiredEntries)) {
@@ -212,22 +218,34 @@ function Test-PackageLayout([string]$Scope, [string]$Root) {
         "$(@(Get-RequiredEntries).Count + 2) 项齐全"
     }
 
-    Invoke-Check $Scope "与构建目录逐文件一致" {
-        $buildFiles = @(Get-ChildItem -LiteralPath $BuildOutputDir -Recurse -File)
-        $bad = @()
-        foreach ($f in $buildFiles) {
-            $rel = $f.FullName.Substring($BuildOutputDir.Length).TrimStart('\', '/')
-            $peer = Join-Path $Root $rel
-            if (-not (Test-Path -LiteralPath $peer -PathType Leaf)) { $bad += "缺 $rel"; continue }
-            if ((Get-Item -LiteralPath $peer).Length -ne $f.Length) { $bad += "大小不同 $rel" }
+    Invoke-Check $Scope "猫源 Node 运行时" {
+        $nodePath = Join-Path $Root "companion/dist/noderuntime/node.exe"
+        $nodeVersion = [string](& $nodePath --version)
+        if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v(\d+)\.\d+\.\d+$' -or
+            [int]$Matches[1] -lt 22) {
+            throw "猫源需要随包 Node 22+：$nodeVersion"
         }
-        foreach ($rel in @("data/app.so", "xiugou_tv.exe")) {
-            $a = (Get-FileHash -LiteralPath (Join-Path $BuildOutputDir $rel) -Algorithm SHA256).Hash
-            $b = (Get-FileHash -LiteralPath (Join-Path $Root $rel) -Algorithm SHA256).Hash
-            if ($a -ne $b) { $bad += "哈希不同 $rel" }
+        $nodeVersion
+    }
+
+    Invoke-Check $Scope "PHP 运行时与核心扩展" {
+        $phpRoot = Join-Path $Root 'companion/dist/phpruntime'
+        $phpOptions = @('-n', '-d', ('extension_dir=' + (Join-Path $phpRoot 'ext')))
+        foreach ($extension in @('curl', 'mbstring', 'openssl', 'sockets', 'sqlite3', 'pdo_sqlite', 'pdo_mysql', 'mysqli')) { $phpOptions += @('-d', "extension=$extension") }
+        $modules = @(& (Join-Path $phpRoot 'php.exe') @phpOptions -m)
+        if ($LASTEXITCODE -ne 0) { throw 'PHP module check failed' }
+        foreach ($module in @('curl', 'mbstring', 'openssl', 'dom', 'sqlite3', 'sockets')) {
+            if ($modules -notcontains $module) { throw "PHP extension unavailable: $module" }
         }
-        if ($bad.Count -gt 0) { throw ("{0} 处不一致：{1}" -f $bad.Count, (($bad | Select-Object -First 8) -join '; ')) }
-        "$($buildFiles.Count) 个文件一致，app.so / exe 哈希相同"
+        $phpVersion = & (Join-Path $phpRoot 'php.exe') -n -r 'echo PHP_VERSION_ID;'
+        if ($LASTEXITCODE -ne 0 -or [int]$phpVersion -lt 80300) { throw 'PHP 8.3+ required' }
+        "PHP_VERSION_ID=$phpVersion; curl/mbstring/openssl/dom/sqlite3/sockets available"
+    }
+
+    Invoke-Check $Scope 'Bundled Python and dependencies' {
+        $python = Join-Path $Root 'companion/dist/pyruntime/python.exe'
+        & $python -I -B -c 'import sys, ssl, sqlite3, charset_normalizer, requests, lxml.etree, Crypto, numpy; assert requests.compat.chardet is not None; print(sys.version)'
+        if ($LASTEXITCODE -ne 0) { throw 'Bundled Python dependency check failed.' }
     }
 
     Invoke-Check $Scope "残留检查（hs_err / 崩溃转储）" {
@@ -242,6 +260,7 @@ function Test-PackageLayout([string]$Scope, [string]$Root) {
         $queue = New-Object System.Collections.Generic.Queue[string]
         $seen = @{}
         $queue.Enqueue("xiugou_tv.exe")
+        foreach ($dll in (Get-ChildItem -LiteralPath $Root -Filter '*.dll' -File)) { $queue.Enqueue($dll.Name) }
         $problems = @()
         while ($queue.Count -gt 0) {
             $name = $queue.Dequeue()
@@ -262,6 +281,7 @@ function Test-PackageLayout([string]$Scope, [string]$Root) {
         if ($problems.Count -gt 0) { throw ($problems -join '; ') }
         "$($seen.Count) 个模块的静态依赖均可解析，VC++ 运行库随包"
     }
+    return $true
 }
 
 function Test-BundledJre([string]$Scope, [string]$Root) {
@@ -288,27 +308,16 @@ function Test-VersionResource([string]$Scope, [string]$Path, [string[]]$Fields) 
     }
 }
 
-# 启动冒烟：临时 APPDATA + 事故窗口配置 → 窗口可见且在屏内 → 运行库来源 → 正常关闭。
+# Launch only disposable package copies; the shipped stage is never started.
 function Test-Launch([string]$Scope, [string]$Root) {
     $exe = Join-Path $Root "xiugou_tv.exe"
-    $appData = Join-Path $SmokeRoot ("appdata-" + $Scope)
     $workDir = Join-Path $SmokeRoot ("cwd-" + $Scope)
-    New-Item -ItemType Directory -Path (Join-Path $appData "XiugouTV"), $workDir -Force | Out-Null
-    # §47 事故现场：最小化关闭后写下的占位几何。
-    $poison = '{"width":158.0,"height":26.0,"posX":-32000.0,"posY":-32000.0,"isMaximized":false,"isFullScreen":false,"alwaysOnTop":false}'
-    [System.IO.File]::WriteAllText((Join-Path $appData "XiugouTV/desktop_window.json"), $poison, (New-Object System.Text.UTF8Encoding($false)))
+    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+    $windowConfig = New-ReleaseWindowFixture -Root $Root -SmokeRoot $SmokeRoot
     $dumpDir = Join-Path $env:LOCALAPPDATA "CrashDumps"
     $startedAt = Get-Date
-
-    $savedAppData = $env:APPDATA
-    $proc = $null
-    try {
-        $env:APPDATA = $appData
-        $proc = Start-Process -FilePath $exe -WorkingDirectory $workDir -PassThru
-        $null = $proc.Handle  # 保持句柄，进程退出后仍可读 ExitCode
-    } finally {
-        $env:APPDATA = $savedAppData
-    }
+    $proc = Start-Process -FilePath $exe -WorkingDirectory $workDir -WindowStyle Normal -PassThru
+    $null = $proc.Handle  # Keep the process handle to read ExitCode after exit.
 
     try {
         $hwnd = [IntPtr]::Zero
@@ -413,35 +422,54 @@ function Test-Launch([string]$Scope, [string]$Root) {
         Invoke-Check $Scope "正常关闭（退出码 0）" {
             if ($proc.HasExited) { throw ("进程已退出，退出码 0x{0:X8}" -f $proc.ExitCode) }
             # WM_CLOSE，走与点关闭按钮相同的退出路径（§48 关闭崩溃即发生在这里）。
-            [void][XgWin]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
-            if (-not $proc.WaitForExit(20000)) { throw "20 秒内未退出" }
+            if (-not $hwnd -or [XgWin]::FindTopLevel($proc.Id, "FLUTTER_RUNNER_WIN32_WINDOW") -ne $hwnd) { throw "关闭前主窗口句柄已失效" }
+            if (-not [XgWin]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) {
+                throw "WM_CLOSE 投递失败，Win32=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+            }
+            if (-not $proc.WaitForExit(20000)) {
+                throw "WM_CLOSE 已投递但 20 秒内未退出；visible=$([XgWin]::IsWindowVisible($hwnd)) iconic=$([XgWin]::IsIconic($hwnd)) responding=$($proc.Responding)"
+            }
             if ($proc.ExitCode -ne 0) { throw ("退出码 0x{0:X8}" -f $proc.ExitCode) }
             "退出码 0"
         }
 
         Invoke-Check $Scope "无 hs_err / 新崩溃转储" {
-            $junk = @(Get-ChildItem -LiteralPath $workDir, $Root -Filter "hs_err_pid*.log" -File -ErrorAction SilentlyContinue)
+            $junk = @(Get-ChildItem -LiteralPath $workDir, $Root -Recurse -Filter "hs_err_pid*.log" -File -ErrorAction SilentlyContinue)
             $dumps = @(Get-ChildItem -LiteralPath $dumpDir -Filter "xiugou_tv.exe*.dmp" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $startedAt })
             if ($junk.Count -gt 0 -or $dumps.Count -gt 0) { throw "hs_err $($junk.Count) 个、崩溃转储 $($dumps.Count) 个" }
             "无"
         }
 
         Invoke-Check $Scope "窗口几何已自愈" {
-            $saved = Get-Content -LiteralPath (Join-Path $appData "XiugouTV/desktop_window.json") -Raw | ConvertFrom-Json
-            if (($saved.posX -ne $null -and $saved.posX -le -10000) -or $saved.width -lt 320) { throw "关闭后仍为事故值：$($saved | ConvertTo-Json -Compress)" }
-            "width=$($saved.width) height=$($saved.height) posX=$($saved.posX) posY=$($saved.posY)"
+            Assert-ReleaseWindowRecovered -ConfigPath $windowConfig
         }
     } finally {
         if ($proc -and -not $proc.HasExited) { try { $proc.Kill() } catch { } }
         # 兜底：清掉从该目录启动的残留进程（主程序或伴随 JVM）。
-        $rootFull = [System.IO.Path]::GetFullPath($Root)
+        $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + '\'
         Get-Process -ErrorAction SilentlyContinue | Where-Object {
             try { $_.Path -and $_.Path.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false }
         } | ForEach-Object { try { $_.Kill() } catch { } }
     }
 }
 
+$savedEnvironment = @{}
+$locationPushed = $false
 try {
+    if (-not $StagedAppDir) {
+        $reference = New-StagedApplicationTree -SourceDir (Join-Path $ProjectRoot 'build/windows/x64/runner/Release') -StageDir (Join-Path $SmokeRoot 'reference')
+        $StagedAppDir = $reference.Root
+    }
+    $cleanReference = Get-PackageSelection -SourceDir $StagedAppDir -RejectExcluded
+    Assert-PackageRuntimeFiles $cleanReference
+    $StagedAppDir = $cleanReference.Root
+    $testEnvironment = New-ReleaseTestEnvironment -TestRoot (Join-Path $SmokeRoot 'environment')
+    foreach ($name in $testEnvironment.Keys) {
+        $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        [Environment]::SetEnvironmentVariable($name, $testEnvironment[$name], 'Process')
+    }
+    Push-Location $SmokeRoot
+    $locationPushed = $true
     # 1. 产物与 SHA256SUMS
     $expectFiles = @()
     if (-not $SkipZip) { $expectFiles += $ZipName }
@@ -487,9 +515,10 @@ try {
         }
         if (Test-Path -LiteralPath (Join-Path $zipRoot "xiugou_tv.exe")) {
             Test-VersionResource "便携包" (Join-Path $zipRoot "xiugou_tv.exe") @("FileVersion", "ProductVersion")
-            Test-PackageLayout "便携包" $zipRoot
-            Test-BundledJre "便携包" $zipRoot
-            Test-Launch "便携包" $zipRoot
+            if (Test-PackageLayout "便携包" $zipRoot) {
+                Test-BundledJre "便携包" $zipRoot
+                Test-Launch "便携包" $zipRoot
+            }
         } else {
             Add-Result "便携包" "启动冒烟" $false "解压目录里没有 xiugou_tv.exe"
         }
@@ -499,49 +528,70 @@ try {
     if (-not $SkipInstaller) {
         Test-VersionResource "安装包" $SetupPath @("FileVersion", "ProductVersion")
         $installRoot = Join-Path $SmokeRoot "installed"
-        $installed = $false
-        Invoke-Check "安装包" "静默安装到临时目录" {
-            if (Test-Path -LiteralPath $InnoUninstallKey) {
-                $loc = (Get-ItemProperty -LiteralPath $InnoUninstallKey).InstallLocation
-                throw "当前用户已有一份按用户安装的修狗TV（$loc），为避免覆盖 / 卸载它，门禁不执行安装；请先卸载或在其他账户运行"
+        $script:installedFlag = $false
+        $script:installAttempted = $false
+        try {
+            Invoke-Check "安装包" "静默安装到临时目录" {
+                $registrations = @(Get-ReleaseInstallRegistrations)
+                Assert-NoReleaseInstallConflict $registrations -AllowMachineInstall:$AllowMachineInstallCoexistence
+                Assert-ReleaseMachineInstallPreserved $registrations $ProtectedMachineRegistrations $installRoot
+                $log = Join-Path $SmokeRoot "install.log"
+                $script:installAttempted = $true
+                $p = Start-Process -FilePath $SetupPath -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
+                    "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/NOICONS", "/TASKS=`"`"",
+                    "/DIR=`"$installRoot`"", "/LOG=`"$log`"")
+                if ($p.ExitCode -ne 0) { throw "安装程序退出码 $($p.ExitCode)（日志 $log）" }
+                Assert-ReleaseTestInstallOwner @(Get-ReleaseInstallRegistrations) $installRoot $ProtectedMachineRegistrations
+                if (-not (Test-Path -LiteralPath (Join-Path $installRoot "xiugou_tv.exe"))) { throw "安装后没有 xiugou_tv.exe（日志 $log）" }
+                $script:installedFlag = $true
+                "已安装到 $installRoot"
             }
-            $log = Join-Path $SmokeRoot "install.log"
-            $p = Start-Process -FilePath $SetupPath -PassThru -Wait -ArgumentList @(
-                "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/NOICONS", "/TASKS=`"`"",
-                "/DIR=`"$installRoot`"", "/LOG=`"$log`"")
-            if ($p.ExitCode -ne 0) { throw "安装程序退出码 $($p.ExitCode)（日志 $log）" }
-            if (-not (Test-Path -LiteralPath (Join-Path $installRoot "xiugou_tv.exe"))) { throw "安装后没有 xiugou_tv.exe（日志 $log）" }
-            $script:installedFlag = $true
-            "已安装到 $installRoot"
-        }
-        $installed = [bool]$script:installedFlag
-        if ($installed) {
-            try {
+            if ($script:installedFlag) {
                 Test-VersionResource "安装包" (Join-Path $installRoot "xiugou_tv.exe") @("FileVersion", "ProductVersion")
-                Test-PackageLayout "安装包" $installRoot
-                Test-BundledJre "安装包" $installRoot
-                Test-Launch "安装包" $installRoot
-            } finally {
-                Invoke-Check "安装包" "静默卸载与清理" {
-                    $uninstaller = Join-Path $installRoot "unins000.exe"
-                    if (Test-Path -LiteralPath $uninstaller) {
-                        $u = Start-Process -FilePath $uninstaller -PassThru -Wait -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
-                        if ($u.ExitCode -ne 0) { throw "卸载程序退出码 $($u.ExitCode)" }
-                    }
-                    # 卸载器会把自身复制到临时目录再执行，注册表键与文件稍后才消失。
-                    $deadline = (Get-Date).AddSeconds(30)
-                    while ((Test-Path -LiteralPath $InnoUninstallKey) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
-                    if (Test-Path -LiteralPath $InnoUninstallKey) { throw "卸载后注册表仍有 $InnoUninstallKey" }
-                    "已卸载，注册表项已清除"
+                if (Test-PackageLayout "安装包" $installRoot -Installed) {
+                    Test-BundledJre "安装包" $installRoot
+                    Test-Launch "安装包" $installRoot
                 }
+            }
+        } finally {
+            if ($script:installAttempted) {
+                Invoke-Check "安装包" "静默卸载与清理" {
+                    # Recheck ownership immediately before cleanup, even after a partial install.
+                    Assert-ReleaseTestInstallOwner @(Get-ReleaseInstallRegistrations) $installRoot $ProtectedMachineRegistrations
+                    $uninstaller = Join-Path $installRoot "unins000.exe"
+                    Assert-PackagePathIsNotLinked $uninstaller
+                    if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw 'Temporary uninstaller missing; refusing cleanup.' }
+                    $u = Start-Process -FilePath $uninstaller -WindowStyle Hidden -PassThru -Wait -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+                    if ($u.ExitCode -ne 0) { throw "卸载程序退出码 $($u.ExitCode)" }
+                    $deadline = (Get-Date).AddSeconds(30)
+                    while (@(Get-ReleaseInstallRegistrations | Where-Object { $_.Hive -eq 'CurrentUser' }).Count -gt 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+                    $registrations = @(Get-ReleaseInstallRegistrations)
+                    if (@($registrations | Where-Object { $_.Hive -eq 'CurrentUser' }).Count -gt 0) { throw 'Temporary uninstall registration remains.' }
+                    Assert-ReleaseMachineInstallPreserved $registrations $ProtectedMachineRegistrations
+                    "临时用户级安装已卸载，原机器级登记未改变"
+                }
+            }
+            Invoke-Check '安装包' '原机器级安装登记保持不变' {
+                Assert-ReleaseMachineInstallPreserved @(Get-ReleaseInstallRegistrations) $ProtectedMachineRegistrations
+                '注册表内容指纹与安装前一致'
             }
         }
     }
+} catch {
+    Add-Result 'Gate' 'Unhandled failure' $false $_.Exception.Message
 } finally {
+    if ($locationPushed) { Pop-Location }
+    foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }
     Start-Sleep -Seconds 1
     # 全部通过才清理；有失败时保留临时目录（截图、安装日志、解压内容）供排查。
     if (@($Results | Where-Object { -not $_.Ok }).Count -eq 0) {
-        Remove-Item -LiteralPath $SmokeRoot -Recurse -Force -ErrorAction SilentlyContinue
+        $cleanupRoot = [System.IO.Path]::GetFullPath($SmokeRoot)
+        $cleanupBase = [System.IO.Path]::GetFullPath($smokeBase).TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $cleanupRoot.StartsWith($cleanupBase, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Smoke cleanup target is outside the test directory: $cleanupRoot"
+        }
+        Assert-PackagePathIsNotLinked $cleanupRoot
+        Remove-Item -LiteralPath $cleanupRoot -Recurse -Force -ErrorAction SilentlyContinue
     } else {
         Write-Host "  [*] 有失败项，保留临时目录供排查：$SmokeRoot" -ForegroundColor Yellow
     }

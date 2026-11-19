@@ -5,7 +5,7 @@
 /// 先在这里登记，再决定是否进入备份。
 library;
 
-/// 数据文件类别。备份默认排除 [AppDataCategory.window]。
+/// 数据文件类别；备份排除窗口状态、外观偏好和本机凭据。
 enum AppDataCategory {
   configSnapshot,
   configSource,
@@ -18,6 +18,8 @@ enum AppDataCategory {
   /// 外观（SET-08）：偏好文件进备份没有意义——壁纸图片本体不在白名单里，
   /// 恢复后只会得到悬空引用；因此与窗口状态一样排除在备份之外。
   appearance,
+  /// 仅当前系统用户可解密，不随普通数据备份导出。
+  credentials,
 }
 
 class AppDataFile {
@@ -30,11 +32,11 @@ class AppDataFile {
   const AppDataFile(this.name, this.category, {this.sensitive = false});
 }
 
-/// 应用数据目录中的 20 个持久化文件（2026-10-26 增补 §33 直播收藏；2026-10-31 增补 §14 网络偏好；
-/// 2026-11-04 补登直播仓库写的「上次频道」与「直链播放方式主机记忆」；2026-11-05 增补独立直播源）。
+/// 应用数据目录中的持久化文件；新增文件须在此登记。
 const List<AppDataFile> appDataFiles = [
   AppDataFile('appearance_preferences.json', AppDataCategory.appearance),
   AppDataFile('cached_vod_config.json', AppDataCategory.configSnapshot, sensitive: true),
+  // 配置源目录 v1：entries + 独立 categories（含空分类）；兼容旧版数组。
   AppDataFile('config_sources.json', AppDataCategory.configSource, sensitive: true),
   AppDataFile('current_config.json', AppDataCategory.configSnapshot, sensitive: true),
   AppDataFile('desktop_window.json', AppDataCategory.window, sensitive: true),
@@ -49,7 +51,7 @@ const List<AppDataFile> appDataFiles = [
   AppDataFile('live_favorites.json', AppDataCategory.favorite),
   // 上次直播频道：频道键里含播放地址，按敏感处理。
   AppDataFile('live_last.json', AppDataCategory.live, sensitive: true),
-  // 独立直播源（当前项 + 历史）：含订阅地址，按敏感处理。
+  // 独立直播源（当前项 + 历史 + 独立分类目录）：含订阅地址，按敏感处理。
   AppDataFile('live_source_history.json', AppDataCategory.live,
       sensitive: true),
   AppDataFile('live_sources.json', AppDataCategory.live, sensitive: true),
@@ -60,6 +62,8 @@ const List<AppDataFile> appDataFiles = [
   AppDataFile('search_preferences.json', AppDataCategory.preference),
   AppDataFile('self_check_preferences.json', AppDataCategory.preference),
   AppDataFile('startup_preferences.json', AppDataCategory.preference),
+  AppDataFile('webdav_connections.bin', AppDataCategory.credentials, sensitive: true),
+  AppDataFile('webdav_connections.lock', AppDataCategory.credentials),
 ];
 
 /// 文件名集合，供临时文件基名白名单使用。
@@ -67,11 +71,12 @@ final Set<String> appDataFileNames =
     Set<String>.unmodifiable(appDataFiles.map((file) => file.name));
 
 /// 备份白名单：排除窗口状态（恢复其他机器的位置可能把窗口放到不可见区域）
-/// 与外观偏好（壁纸图片不在备份内，恢复只会得到失效引用）。
+/// 、外观偏好（壁纸图片不在备份内）与仅本机可解密的连接凭据。
 List<AppDataFile> get backupAppDataFiles => appDataFiles
     .where((file) =>
         file.category != AppDataCategory.window &&
-        file.category != AppDataCategory.appearance)
+        file.category != AppDataCategory.appearance &&
+        file.category != AppDataCategory.credentials)
     .toList(growable: false);
 
 /// 备份白名单文件名集合。

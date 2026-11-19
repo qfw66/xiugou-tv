@@ -7,7 +7,8 @@ import '../net/http_client_factory.dart';
 import '../player/models/player_state.dart';
 import 'push_input_resolver.dart';
 
-/// 连接凭据只保存在内存，输出的目录与媒体地址须位于同源的选定根目录内。
+/// 单次浏览使用的内存凭据；连接记录由独立加密存储负责。
+/// 输出的目录与媒体地址须位于同源的选定根目录内。
 class WebDavConnection {
   final Uri root;
   final Map<String, String> headers;

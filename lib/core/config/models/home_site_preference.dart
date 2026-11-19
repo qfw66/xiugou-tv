@@ -8,7 +8,9 @@ import 'config_snapshot.dart';
 import 'builtin_sites.dart';
 import 'vod_config.dart';
 
-/// 首页默认站源的稳定引用；名称只用于失效提示，不参与匹配。
+/// 首页默认站源的稳定引用；按 [siteKey] 匹配，名称只用于失效提示。
+///
+/// [siteIdentity] 仅保留以兼容既有文件格式，不再参与默认站匹配。
 class HomeSitePreference {
   final String siteKey;
   final String siteIdentity;

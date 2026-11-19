@@ -50,7 +50,8 @@ class AppPalette extends ThemeExtension<AppPalette> {
   /// 说明文字
   final Color textSub;
 
-  /// 弱提示
+  /// 弱提示（v1.0.6 起与其它文字色一样在 background/panel/card/raised 上 ≥4.5:1，
+  /// 由 test/palette_contrast_test.dart 守门）
   final Color textDim;
 
   /// 品牌色（**填充**用）：主按钮底、选中胶囊底、播放按钮底
@@ -64,6 +65,11 @@ class AppPalette extends ThemeExtension<AppPalette> {
 
   /// 品牌底色纹（选中行背景 / 图标块）
   final Color accentWash;
+
+  /// 持久选中态，与中性悬停底色区分。
+  final Color selectionFill;
+  final Color selectionInk;
+  final Color onSelectionInk;
 
   /// 危险 / 错误
   final Color danger;
@@ -105,6 +111,9 @@ class AppPalette extends ThemeExtension<AppPalette> {
     required this.accent,
     required this.accentInk,
     required this.accentWash,
+    required this.selectionFill,
+    required this.selectionInk,
+    required this.onSelectionInk,
     required this.danger,
     required this.success,
     required this.warning,
@@ -125,13 +134,16 @@ class AppPalette extends ThemeExtension<AppPalette> {
     divider: Color(0xFF242430),
     textTitle: Color(0xFFFFFFFF),
     textMain: Color(0xFFE6E6F0),
-    textBody: Color(0xFFB0B0C0),
-    textSub: Color(0xFF888898),
-    textDim: Color(0xFF66667A),
+    textBody: Color(0xFFBCBCCA),
+    textSub: Color(0xFFA2A2B0),
+    textDim: Color(0xFF9292A0),
     accent: Color(0xFF414A5B),
     accentInk: Color(0xFF94A3B8),
     accentWash: Color(0xFF232632),
-    danger: Color(0xFFEF4444),
+    selectionFill: Color(0xFF163A60),
+    selectionInk: Color(0xFF83C4FF),
+    onSelectionInk: Color(0xFF101014),
+    danger: Color(0xFFF05252),
     success: Color(0xFF4CAF50),
     warning: Color(0xFFFFB300),
     hover: Color(0xFF2A2A38),
@@ -153,13 +165,16 @@ class AppPalette extends ThemeExtension<AppPalette> {
     textMain: Color(0xFF1B1B22),
     textBody: Color(0xFF3A3A46),
     textSub: Color(0xFF5B5B6C),
-    textDim: Color(0xFF8A8A9A),
+    textDim: Color(0xFF6A6A7C),
     accent: Color(0xFFD8E3F8),
     accentInk: Color(0xFF334155),
     accentWash: Color(0xFFE4EBFA),
+    selectionFill: Color(0xFFC5D9F8),
+    selectionInk: Color(0xFF1D4ED8),
+    onSelectionInk: Color(0xFFFFFFFF),
     danger: Color(0xFFC62828),
     success: Color(0xFF2E7D32),
-    warning: Color(0xFFB26A00),
+    warning: Color(0xFF925800),
     hover: Color(0xFFEDEDF3),
     pressed: Color(0xFFE3E3EC),
     scrim: Color(0x8CFFFFFF),
@@ -194,6 +209,9 @@ class AppPalette extends ThemeExtension<AppPalette> {
       accent: mix(accent, other.accent),
       accentInk: mix(accentInk, other.accentInk),
       accentWash: mix(accentWash, other.accentWash),
+      selectionFill: mix(selectionFill, other.selectionFill),
+      selectionInk: mix(selectionInk, other.selectionInk),
+      onSelectionInk: mix(onSelectionInk, other.onSelectionInk),
       danger: mix(danger, other.danger),
       success: mix(success, other.success),
       warning: mix(warning, other.warning),

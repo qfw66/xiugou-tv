@@ -178,6 +178,33 @@ public class Context {
         return persistentDir("files", "xiugou_tv_files");
     }
 
+    /** Android 私有命名目录与 files 同根持久保存，目录名不得变成路径。 */
+    public java.io.File getDir(String name, int mode) {
+        if (name == null || name.isEmpty() || name.equals(".") || name.equals("..")
+                || name.endsWith(".") || name.endsWith(" ")) {
+            throw new IllegalArgumentException("无效的私有目录名称");
+        }
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (c < 32 || "<>:\"/\\|?*".indexOf(c) >= 0) {
+                throw new IllegalArgumentException("私有目录名称不能包含路径或保留字符");
+            }
+        }
+        try {
+            java.io.File root = getFilesDir().getParentFile().getCanonicalFile();
+            java.io.File directory = new java.io.File(root, "app_" + name).getCanonicalFile();
+            if (!root.equals(directory.getParentFile())) {
+                throw new IllegalArgumentException("私有目录不能离开应用数据目录");
+            }
+            if (!directory.isDirectory() && !directory.mkdirs() && !directory.isDirectory()) {
+                throw new IllegalStateException("无法创建应用私有目录");
+            }
+            return directory;
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException("无法定位应用私有目录", failure);
+        }
+    }
+
     /**
      * files / cache 放在 {@code user.home/.xiugou_tv_companion} 下：载荷把网盘 cookie、配置中心设置存在这里，
      * 放系统临时目录会被清理，用户就得反复扫码登录。旧版本用的临时目录在首次访问时整体复制过来（不删除原目录）。

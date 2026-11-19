@@ -2,11 +2,13 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../../core/api/models/vod_models.dart';
+import '../../../core/config/models/history_record.dart';
 import '../../../core/api/netdisk_share_links.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../widgets/app_message.dart';
 import '../widgets/focus_ring.dart';
+import '../dialogs/history_sections.dart';
 import '../widgets/horizontal_scroll_area.dart';
 import 'poster_image.dart';
 
@@ -66,7 +68,7 @@ class CurrentEpisode {
 }
 
 final _localConfigCenterUrl =
-    RegExp(r'http://127\.0\.0\.1:\d{2,5}/proxy\?do=pan&action=config');
+    RegExp(r'http://127\.0\.0\.1:\d{2,5}/(?:proxy\?do=pan&action=config|config\b)');
 
 /// 简介里的本机配置中心地址；没有返回 null。
 ///
@@ -74,6 +76,16 @@ final _localConfigCenterUrl =
 /// 那个入口会跳到只绑本机的代理端口，桌面上打不开；companion 已把它换成本机代理地址（issue #6）。
 String? localConfigCenterUrlOf(String? content) =>
     content == null ? null : _localConfigCenterUrl.firstMatch(content)?.group(0);
+
+/// 详情左栏「上次播放」文案：集名 · 线路 · 进度（播完显示「已看完」）。
+String lastWatchedLabel(HistoryRecord record) {
+  final progress = record.isFinished
+      ? '已看完'
+      : record.hasResumePosition
+          ? formatPlaybackTime(record.positionMs)
+          : '未开始';
+  return '上次播放：${record.episodeName} · ${record.sourceName} · $progress';
+}
 
 /// 桌面端影视详情与多源选集弹窗（Infuse × Netflix 沉浸大画幅风格）。
 class VodDetailDialog extends StatefulWidget {
@@ -88,6 +100,9 @@ class VodDetailDialog extends StatefulWidget {
   /// 用系统浏览器打开地址；简介里有本机配置中心地址时据此显示「在本机打开配置页」。
   final Future<bool> Function(String url)? onOpenUrl;
 
+  /// 本片在当前站最近一条播放历史；为 `null` 时不显示「上次播放」。
+  final HistoryRecord? lastWatched;
+
   const VodDetailDialog({
     super.key,
     required this.detail,
@@ -96,6 +111,7 @@ class VodDetailDialog extends StatefulWidget {
     this.onToggleFavorite,
     this.currentEpisode,
     this.onOpenUrl,
+    this.lastWatched,
   });
 
   @override
@@ -220,6 +236,11 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
         (sources.isNotEmpty && _selectedSourceIndex < sources.length)
             ? sources[_selectedSourceIndex].episodes
             : <VodEpisode>[];
+    final metaLine = [item.year, item.area, item.typeName]
+        .whereType<String>()
+        .map((part) => part.trim())
+        .where((part) => part.isNotEmpty)
+        .join(' · ');
 
     return Dialog(
       backgroundColor: palette.panel,
@@ -246,23 +267,17 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // 第一层：看的是什么（海报 + 片名 + 元数据 + 更新状态）
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // 大画幅景深海报
                       Container(
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(AppRadii.md),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.35),
-                              blurRadius: 14,
-                              offset: const Offset(0, 5),
-                            ),
-                          ],
+                          border: Border.all(color: palette.borderStrong),
                         ),
                         child: ClipRRect(
-                          borderRadius: BorderRadius.circular(AppRadii.md),
+                          borderRadius: BorderRadius.circular(AppRadii.md - 1),
                           child: Image(
                             image: posterImageProvider(item.pic,
                                     targetWidth: 320) ??
@@ -281,8 +296,6 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                         ),
                       ),
                       const SizedBox(width: 14),
-
-                      // 右侧标题与元数据胶囊
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -295,81 +308,98 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                                 color: palette.textTitle,
                                 height: 1.25,
                               ),
-                              maxLines: 2,
+                              maxLines: 3,
                               overflow: TextOverflow.ellipsis,
                             ),
-                            const SizedBox(height: 10),
-
-                            // 年份与地区磨砂标签
-                            if (item.year != null || item.area != null) ...[
-                              Wrap(
-                                spacing: 6,
-                                runSpacing: 4,
-                                children: [
-                                  if (item.year != null &&
-                                      item.year!.isNotEmpty)
-                                    _MetaBadge(text: item.year!),
-                                  if (item.area != null &&
-                                      item.area!.isNotEmpty)
-                                    _MetaBadge(text: item.area!),
-                                ],
-                              ),
+                            if (metaLine.isNotEmpty) ...[
                               const SizedBox(height: 8),
-                            ],
-
-                            // 分类标签
-                            if (item.typeName != null &&
-                                item.typeName!.isNotEmpty)
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 3),
-                                decoration: BoxDecoration(
-                                  color: palette.accentWash,
-                                  borderRadius:
-                                      BorderRadius.circular(AppRadii.xs),
-                                  border: Border.all(
-                                    color: palette.accentInk
-                                        .withValues(alpha: 0.3),
-                                    width: 0.8,
-                                  ),
+                              Text(
+                                metaLine,
+                                key: const ValueKey('detail-meta'),
+                                style: TextStyle(
+                                  fontSize: AppType.body,
+                                  color: palette.textSub,
+                                  height: 1.35,
                                 ),
-                                child: Text(
-                                  item.typeName!,
-                                  style: TextStyle(
-                                    fontSize: AppType.caption,
-                                    fontWeight: FontWeight.w600,
-                                    color: palette.accentInk,
-                                  ),
-                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
                               ),
+                            ],
+                            // 更新状态（站源 vod_remarks，如「更新至12集」）
+                            if (item.remarks?.trim().isNotEmpty ?? false) ...[
+                              const SizedBox(height: 8),
+                              Text(
+                                item.remarks!.trim(),
+                                key: const ValueKey('detail-remarks'),
+                                style: TextStyle(
+                                  fontSize: AppType.body,
+                                  fontWeight: FontWeight.w600,
+                                  color: palette.accentInk,
+                                  height: 1.3,
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
                           ],
                         ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 16),
 
-                  // 主演信息
-                  if (item.actor != null && item.actor!.isNotEmpty) ...[
-                    Text(
-                      '主演: ${item.actor}',
-                      style: TextStyle(
-                        fontSize: AppType.caption,
-                        color: palette.textSub,
-                        height: 1.3,
+                  // 第二层：我看到哪了——信息用一块平面托起，只做提示，不伪装成正在播放
+                  if (widget.lastWatched case final last?) ...[
+                    const SizedBox(height: 14),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: palette.raised,
+                        borderRadius: BorderRadius.circular(AppRadii.sm),
                       ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.only(top: 1),
+                            child: Icon(Icons.history_rounded,
+                                size: 14, color: palette.textSub),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              lastWatchedLabel(last),
+                              key: const ValueKey('detail-last-watched'),
+                              style: TextStyle(
+                                fontSize: AppType.body,
+                                color: palette.textMain,
+                                height: 1.35,
+                              ),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: 10),
                   ],
+                  const SizedBox(height: 14),
 
-                  // 剧情简介
+                  // 第三层：演职员与简介
+                  if (item.director?.trim().isNotEmpty ?? false) ...[
+                    _CreditLine(label: '导演', value: item.director!.trim()),
+                    const SizedBox(height: 6),
+                  ],
+                  if (item.actor?.trim().isNotEmpty ?? false) ...[
+                    _CreditLine(label: '主演', value: item.actor!.trim()),
+                    const SizedBox(height: 12),
+                  ],
                   Text(
                     '剧情简介',
                     style: TextStyle(
-                      fontSize: AppType.body,
-                      fontWeight: FontWeight.bold,
+                      fontSize: AppType.label,
+                      fontWeight: FontWeight.w600,
                       color: palette.textTitle,
                     ),
                   ),
@@ -381,9 +411,9 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                             ? item.content!
                             : '暂无详细简介。',
                         style: TextStyle(
-                          fontSize: AppType.caption,
+                          fontSize: AppType.body,
                           color: palette.textBody,
-                          height: 1.5,
+                          height: 1.6,
                         ),
                       ),
                     ),
@@ -418,21 +448,8 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                 children: [
                   // 顶部导航栏：图标 + 标题 + 收藏 + 关闭
                   Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      Container(
-                        padding: const EdgeInsets.all(7),
-                        decoration: BoxDecoration(
-                          color: palette.accentWash,
-                          borderRadius: BorderRadius.circular(AppRadii.sm),
-                          border: Border.all(
-                            color: palette.accentInk.withValues(alpha: 0.3),
-                            width: 0.8,
-                          ),
-                        ),
-                        child: Icon(Icons.play_circle_fill_rounded,
-                            color: palette.accentInk, size: 18),
-                      ),
-                      const SizedBox(width: 10),
                       Text(
                         '选集播放',
                         style: TextStyle(
@@ -441,6 +458,17 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                           color: palette.textTitle,
                         ),
                       ),
+                      if (currentEpisodes.isNotEmpty) ...[
+                        const SizedBox(width: 8),
+                        Text(
+                          '共 ${currentEpisodes.length} 集',
+                          key: const ValueKey('detail-episode-count'),
+                          style: TextStyle(
+                            fontSize: AppType.body,
+                            color: palette.textSub,
+                          ),
+                        ),
+                      ],
                       const Spacer(),
 
                       // §49 复制网盘分享链接（详情里有链接才显示）
@@ -449,11 +477,8 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
 
                       // 收藏按钮
                       if (widget.onToggleFavorite != null)
-                        FocusRing(
-                          onTap: () {},
-                          semanticLabel: '收藏',
-                          borderRadius: const BorderRadius.all(
-                              Radius.circular(AppRadii.pill)),
+                        FocusOutline(
+                          radius: AppRadii.pill,
                           child: IconButton(
                             icon: Icon(
                               _favorited
@@ -490,11 +515,8 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                       const SizedBox(width: 4),
 
                       // 关闭按钮
-                      FocusRing(
-                        onTap: () => Navigator.of(context).pop(),
-                        semanticLabel: '关闭',
-                        borderRadius: const BorderRadius.all(
-                            Radius.circular(AppRadii.pill)),
+                      FocusOutline(
+                        radius: AppRadii.pill,
                         child: IconButton(
                           icon: Icon(Icons.close_rounded,
                               color: palette.textSub, size: 20),
@@ -610,29 +632,24 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
   }
 }
 
-/// 元数据磨砂小标签（如年份、地区）
-class _MetaBadge extends StatelessWidget {
-  final String text;
+/// 演职员一行：弱化的栏目名 + 正文色内容。
+class _CreditLine extends StatelessWidget {
+  final String label;
+  final String value;
 
-  const _MetaBadge({required this.text});
+  const _CreditLine({required this.label, required this.value});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
-      decoration: BoxDecoration(
-        color: context.palette.raised,
-        borderRadius: BorderRadius.circular(AppRadii.xs),
-        border: Border.all(color: context.glassBorder, width: 0.8),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: AppType.caption,
-          color: context.palette.textSub,
-          fontWeight: FontWeight.w500,
-        ),
-      ),
+    final palette = context.palette;
+    return Text.rich(
+      TextSpan(children: [
+        TextSpan(text: '$label  ', style: TextStyle(color: palette.textSub)),
+        TextSpan(text: value, style: TextStyle(color: palette.textBody)),
+      ]),
+      style: const TextStyle(fontSize: AppType.body, height: 1.4),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
     );
   }
 }
@@ -691,15 +708,6 @@ class _SourcePillState extends State<_SourcePill> {
                         : context.glassBorder,
                 width: 1.0,
               ),
-              boxShadow: isSelected
-                  ? [
-                      BoxShadow(
-                        color: palette.accentInk.withValues(alpha: 0.20),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      ),
-                    ]
-                  : null,
             ),
             alignment: Alignment.center,
             child: ConstrainedBox(
@@ -753,7 +761,7 @@ class _EpisodeButton extends StatelessWidget {
         ? Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.play_arrow_rounded, size: 12, color: onAccent),
+              Icon(Icons.play_arrow_rounded, size: 14, color: onAccent),
               const SizedBox(width: 2),
               Flexible(
                 child: Text(

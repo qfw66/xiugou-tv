@@ -15,6 +15,9 @@ import 'data_restore_guard.dart';
 /// 2. 下次启动、创建任何存储**之前**（[applyPendingAtStartup]）：把数据目录（默认目录，
 ///    以及当时在用的自定义目录）里的内容全部删掉——含自定义目录指针，回到全新安装状态。
 ///
+/// 默认目录可能随安装位置变化（便携版在 exe 旁的 `user_data`），所以 [applyPendingAtStartup]
+/// 必须在 [DataDirectoryManager.initialize] **之后**调用：标记文件写在解析出的默认目录里。
+///
 /// 只删修狗TV 自己的数据目录内容；自定义目录本身保留（可能是用户建的文件夹），只清里面的东西。
 /// 站源服务目录里的网盘登录态一并清掉（2026-11-02 用户口径），下载缓存保留。
 abstract final class AppDataReset {
@@ -38,7 +41,7 @@ abstract final class AppDataReset {
     dataRestorePendingRestart = true;
   }
 
-  /// 第 2 步：启动时执行（必须在 [DataDirectoryManager.initialize] 之前）。
+  /// 第 2 步：启动时执行（必须在 [DataDirectoryManager.initialize] 之后、创建任何存储之前）。
   /// 返回是否执行了清空。任何失败都不阻断启动。
   ///
   /// 站源服务（companion）里的网盘登录态（Cookie / token / 偏好）也一并清掉：

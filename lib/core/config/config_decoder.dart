@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'config_cipher.dart';
 import 'lenient_json.dart';
 
 /// 配置原文解码：对齐手机端 `api/Decoder.java` 的 `verify` 流程。
@@ -9,6 +10,7 @@ import 'lenient_json.dart';
 /// 2. 标准 JSON（含宽松写法：注释、无引号 key/值、尾随逗号）
 /// 3. `XXXXXXXX**<Base64>` 私有编码（手机端 `Decoder.base64`）
 /// 4. 整体 Base64（PC 端既有能力，保留）
+/// 5. `2423` 十六进制 AES/CBC 外壳（手机端 `Decoder.cbc`），解密后再按上述流程识别
 ///
 /// 返回解析后的 JSON 树（Map / List）；全部路径失败时返回 null。
 class ConfigDecoder {
@@ -29,6 +31,14 @@ class ConfigDecoder {
     if (pre != null) {
       final inner = pre.group(1)?.trim();
       if (inner != null && inner.isNotEmpty) text = inner;
+    }
+
+    if (ConfigCipher.looksEncrypted(text)) {
+      final plain = ConfigCipher.tryDecryptCbc(text);
+      if (plain != null && !ConfigCipher.looksEncrypted(plain.trim())) {
+        final inner = decode(plain);
+        if (inner != null) return inner;
+      }
     }
 
     return _structure(_tryStrict(text)) ??

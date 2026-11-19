@@ -7,6 +7,13 @@ package android.view;
  */
 public class KeyEvent {
 
+    public interface Callback {
+        boolean onKeyDown(int keyCode, KeyEvent event);
+        boolean onKeyLongPress(int keyCode, KeyEvent event);
+        boolean onKeyUp(int keyCode, KeyEvent event);
+        boolean onKeyMultiple(int keyCode, int count, KeyEvent event);
+    }
+
     public static final int ACTION_DOWN = 0;
     public static final int ACTION_UP = 1;
     public static final int ACTION_MULTIPLE = 2;

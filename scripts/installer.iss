@@ -1,9 +1,12 @@
 ; Script generated for XiugouTV Windows x64 Installer
 #ifndef AppVersion
-  #define AppVersion "1.0.5"
+  #define AppVersion "1.1.0"
 #endif
 #ifndef SourceDir
-  #define SourceDir "..\build\windows\x64\runner\Release"
+  #error SourceDir must be the clean application stage created by scripts/package_tree.ps1
+#endif
+#ifndef PackageFilesInclude
+  #error PackageFilesInclude must be the explicit file list generated from that stage
 #endif
 #ifndef OutputDir
   #define OutputDir "..\dist"
@@ -46,7 +49,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Exact staged files only: no recursive wildcard over a developer's Release tree.
+#include PackageFilesInclude
 
 [Icons]
 Name: "{group}\XiugouTV"; Filename: "{app}\xiugou_tv.exe"

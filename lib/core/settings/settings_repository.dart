@@ -2,6 +2,8 @@ import 'dart:async';
 import '../config/config_repository.dart';
 import '../player/models/player_settings.dart';
 import 'models/config_source_entry.dart';
+import 'models/config_source_catalog.dart';
+import 'models/source_categories.dart';
 import 'models/appearance_preferences.dart';
 import 'models/history_preferences.dart';
 import 'models/network_preferences.dart';
@@ -32,6 +34,8 @@ class SettingsRepository {
 
   PlayerSettings _playerSettings = PlayerSettings.defaults;
   List<ConfigSourceEntry> _configSources = const [];
+  SourceCategories _configSourceCategories = SourceCategories();
+  bool _sourcesReadFailed = false;
   StartupPreferences _startupPreferences = const StartupPreferences();
   bool _startupReadFailed = false;
   SearchPreferences _searchPreferences = const SearchPreferences();
@@ -127,6 +131,8 @@ class SettingsRepository {
 
   PlayerSettings get playerSettings => _playerSettings;
   List<ConfigSourceEntry> get configSources => _configSources;
+  List<String> get configSourceCategories => _configSourceCategories.names;
+  bool get sourcesReadFailed => _sourcesReadFailed;
 
   Stream<PlayerSettings> get playerSettingsStream => Stream.multi((events) {
         // Subscribe before replaying the snapshot so an immediate edit is kept.
@@ -228,7 +234,21 @@ class SettingsRepository {
         PlayerSettings.defaults.copyWith(hwdec: PlayerSettings.normalizeHwdec(legacyHwdec));
     _playerSettingsController.add(_playerSettings);
 
-    final storedSources = await _storage.readConfigSources();
+    List<ConfigSourceEntry>? storedSources;
+    try {
+      final storage = _storage;
+      if (storage is ConfigSourceCatalogStorage) {
+        final catalog = await (storage as ConfigSourceCatalogStorage).readConfigSourceCatalog();
+        storedSources = catalog?.entries;
+        _configSourceCategories = catalog?.categories ?? SourceCategories();
+      } else {
+        storedSources = await storage.readConfigSources();
+        _configSourceCategories = SourceCategories(storedSources?.map((e) => e.category) ?? []);
+      }
+    } catch (_) {
+      _sourcesReadFailed = true;
+      storedSources = const [];
+    }
     if (storedSources != null) {
       _configSources = List.unmodifiable(
           _dedupe(storedSources).take(maxConfigSources));
@@ -350,55 +370,99 @@ class SettingsRepository {
 
   // ---------------- 配置源历史 ----------------
 
-  /// 记录一次成功加载：同地址条目更新并置顶（保留自定义名称），超出上限淘汰最旧条目
-  Future<void> recordConfigLoad(ConfigLoadEvent event) async {
+  /// 所有源历史变更在同一队列中读取最新快照，保存成功后才发布。
+  Future<void> recordConfigLoad(ConfigLoadEvent event) {
     final location = event.location.trim();
-    if (location.isEmpty) return;
-
-    ConfigSourceEntry? existing;
-    for (final e in _configSources) {
-      if (e.location == location) existing = e;
-    }
-    final updated = (existing ?? ConfigSourceEntry(kind: event.kind, location: location)).copyWith(
-      lastUsedAt: _now(),
-      siteCount: event.siteCount,
-      liveCount: event.liveCount,
-    );
-    _publishSources([
-      updated,
-      ..._configSources.where((e) => e.location != location),
-    ].take(maxConfigSources).toList());
-    await _persistSources();
+    if (location.isEmpty) return Future.value();
+    final usedAt = _now();
+    return _commitSources((current) {
+      final existing = current.entries.where((e) => e.location == location).firstOrNull;
+      final updated = (existing ?? ConfigSourceEntry(kind: event.kind, location: location)).copyWith(
+        lastUsedAt: usedAt, siteCount: event.siteCount, liveCount: event.liveCount,
+      );
+      return ConfigSourceCatalog([
+        updated, ...current.entries.where((e) => e.location != location),
+      ].take(maxConfigSources), current.categories);
+    });
   }
 
-  Future<void> renameConfigSource(String location, String name) async {
-    final index = _configSources.indexWhere((e) => e.location == location);
-    if (index < 0) return;
-    final list = List<ConfigSourceEntry>.from(_configSources);
-    list[index] = list[index].copyWith(name: name.trim());
-    _publishSources(list);
-    await _persistSources();
+  Future<void> renameConfigSource(String location, String name) =>
+      _changeSource(location, (entry) => entry.copyWith(name: name.trim()));
+
+  Future<void> updateConfigSourceNote(String location, String note) =>
+      _changeSource(location, (entry) => entry.copyWith(note: note.trim()));
+
+  Future<void> _changeSource(String location, ConfigSourceEntry Function(ConfigSourceEntry) change) =>
+      _commitSources((current) => ConfigSourceCatalog(current.entries.map((entry) =>
+          entry.location == location ? change(entry) : entry), current.categories));
+
+  Future<void> createConfigSourceCategory(String name) =>
+      _commitSources((current) => ConfigSourceCatalog(
+          current.entries, current.categories.create(name)));
+
+  /// 重命名分类：目录与全部条目归属在同一次写入内完成。
+  Future<void> renameConfigSourceCategory(String from, String name) =>
+      _commitSources((current) {
+        final value = SourceCategories.validate(name);
+        final categories = current.categories.rename(from, value);
+        return ConfigSourceCatalog(
+            current.entries.map((entry) => entry.category == from
+                ? entry.copyWith(category: value) : entry),
+            categories);
+      });
+
+  /// 删除分类：其下条目回到「未分类」，源本身保留，目录项移除。
+  Future<void> deleteConfigSourceCategory(String name) =>
+      _commitSources((current) {
+        final value = SourceCategories.validate(name);
+        return ConfigSourceCatalog(
+            current.entries.map((entry) => entry.category == value
+                ? entry.copyWith(category: '') : entry),
+            current.categories.remove(value));
+      });
+
+  /// 批量分配只产生一次原子写入，不参与当前配置或播放状态。
+  Future<void> assignConfigSourceCategory(Iterable<String> locations, String category) {
+    final ids = locations.toSet();
+    return _commitSources((current) {
+      final value = SourceCategories.validate(category, allowEmpty: true);
+      if (ids.isEmpty || !ids.every((id) => current.entries.any((e) => e.location == id))) {
+        throw StateError('所选源已变化，请重新选择后再分配');
+      }
+      return ConfigSourceCatalog(current.entries.map((entry) => ids.contains(entry.location)
+          ? entry.copyWith(category: value) : entry), current.categories.include([value]));
+    });
   }
 
-  /// 从历史中移除（不影响当前已加载的配置，也不删除本地文件）
-  Future<void> removeConfigSource(String location) async {
-    if (!_configSources.any((e) => e.location == location)) return;
-    _publishSources(_configSources.where((e) => e.location != location).toList());
-    await _persistSources();
-  }
+  Future<void> updateConfigSourceCategory(String location, String category) =>
+      assignConfigSourceCategory([location], category);
 
-  void _publishSources(List<ConfigSourceEntry> list) {
-    _configSources = List.unmodifiable(list);
-    _configSourcesController.add(_configSources);
-  }
+  /// 从历史中移除（不影响当前配置）；空分类仍保留在独立目录中。
+  Future<void> removeConfigSource(String location) =>
+      _commitSources((current) => ConfigSourceCatalog(
+          current.entries.where((entry) => entry.location != location), current.categories));
 
-  Future<void> _persistSources() {
-    final snapshot = _configSources;
-    final next = _enqueueSave(SettingsSaveTarget.sources, _sourcesSaveChain,
-        () => _storage.saveConfigSources(snapshot));
+  Future<void> _commitSources(ConfigSourceCatalog Function(ConfigSourceCatalog) change) {
+    if (_disposed) return Future.error(StateError('设置仓库已关闭'));
+    final next = _enqueueSave(SettingsSaveTarget.sources, _sourcesSaveChain, () async {
+      if (_sourcesReadFailed) throw StateError('配置源目录读取失败，请修复文件后重启再保存');
+      final candidate = change(ConfigSourceCatalog(_configSources, _configSourceCategories));
+      final storage = _storage;
+      if (storage is ConfigSourceCatalogStorage) {
+        await (storage as ConfigSourceCatalogStorage).saveConfigSourceCatalog(candidate);
+      } else {
+        // 兼容只实现旧条目接口的注入存储；正式文件存储使用上面的目录事务。
+        await storage.saveConfigSources(candidate.entries);
+      }
+      _configSources = candidate.entries;
+      _configSourceCategories = candidate.categories;
+      _configSourcesController.add(_configSources);
+    });
     _sourcesSaveChain = next;
     return next;
   }
+
+  Future<void> _persistSources() => _commitSources((current) => current);
 
   // ---------------- 启动偏好（下次进入页面 / 上次入口） ----------------
 
@@ -478,6 +542,19 @@ class SettingsRepository {
     _searchPreferences = preferences;
     _searchPreferencesController.add(preferences);
     await _persistSearchPreferences();
+  }
+
+  /// 配置刷新只清理自身已保存的范围，写入失败仍由设置页的重试入口处理。
+  Future<void> reconcileSearchSites(String? configId, Iterable<String> validKeys) async {
+    final selected = _searchPreferences.aggregateSitesFor(configId);
+    if (_searchReadFailed || configId == null || selected == null || selected.isEmpty) return;
+    final remaining = selected.intersection(validKeys.toSet());
+    if (remaining.length == selected.length) return;
+    try {
+      await updateSearchPreferences(_searchPreferences.withAggregateSites(configId, remaining));
+    } catch (_) {
+      // _queueSave 已记录失败目标，重试时会写入最新内存快照。
+    }
   }
 
   /// 重新读取搜索偏好（读取失败修复后的恢复入口）。

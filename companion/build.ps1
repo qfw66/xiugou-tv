@@ -1,4 +1,5 @@
 ﻿# Build script for Companion Service Jar
+param([string]$StagingDirectory)
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -7,8 +8,20 @@ $libDir = Join-Path $scriptDir "lib"
 # 加固壳自动解密用的 unidbg 依赖：只进编译期 classpath，不进主 jar（27 MB + 原生库），
 # 运行时由 GuardPayloadProvisioner 以子进程方式使用 dist/lib-unidbg。
 $unidbgDir = Join-Path $scriptDir "lib-unidbg"
-$outDir = Join-Path $scriptDir "build"
-$distDir = Join-Path $scriptDir "dist"
+if ($StagingDirectory) {
+    $stagingRoot = [System.IO.Path]::GetFullPath($StagingDirectory)
+    if (Test-Path -LiteralPath $stagingRoot) {
+        if (-not (Test-Path -LiteralPath $stagingRoot -PathType Container) -or
+            @(Get-ChildItem -LiteralPath $stagingRoot -Force).Count -ne 0) {
+            throw "StagingDirectory must be new or empty: $stagingRoot"
+        }
+    }
+    $outDir = Join-Path $stagingRoot "build"
+    $distDir = Join-Path $stagingRoot "dist"
+} else {
+    $outDir = Join-Path $scriptDir "build"
+    $distDir = Join-Path $scriptDir "dist"
+}
 $jarPath = Join-Path $distDir "companion-service.jar"
 
 if (Test-Path $outDir) {
@@ -209,4 +222,30 @@ if (Test-Path $pyRuntimeDir) {
     Write-Host "Copied portable python runtime -> $pyRuntimeDist"
 } else {
     Write-Host "WARN: 缺少 $pyRuntimeDir，py 源将退回系统 python（仅开发环境可用）"
+}
+
+# CatVod Open bundles execute in their own Node process; preserve the runtime license.
+$nodeRuntimeDir = Join-Path $scriptDir "noderuntime"
+if (Test-Path (Join-Path $nodeRuntimeDir 'node.exe')) {
+    if (-not (Test-Path (Join-Path $nodeRuntimeDir 'LICENSE'))) { throw 'Node runtime LICENSE missing' }
+    $nodeDist = Join-Path $distDir 'noderuntime'
+    New-Item -ItemType Directory -Force $nodeDist | Out-Null
+    Copy-Item (Join-Path $nodeRuntimeDir '*') $nodeDist -Force
+    Write-Host "Copied Node runtime -> $nodeDist"
+} else {
+    Write-Host 'WARN: Node runtime missing; cat sources require Node 22+ on PATH'
+}
+
+# DZ PHP scripts execute in the portable CLI; keep upstream redistribution notices.
+$phpRuntimeDir = Join-Path $scriptDir 'phpruntime'
+if (Test-Path (Join-Path $phpRuntimeDir 'php.exe')) {
+    foreach ($required in @('php8.dll', 'license.txt', 'readme-redist-bins.txt', 'cacert.pem', 'ext/php_curl.dll', 'ext/php_mbstring.dll', 'ext/php_openssl.dll', 'ext/php_sqlite3.dll')) {
+        if (-not (Test-Path (Join-Path $phpRuntimeDir $required))) { throw "PHP runtime file missing: $required" }
+    }
+    $phpDist = Join-Path $distDir 'phpruntime'
+    if (Test-Path $phpDist) { Remove-Item -LiteralPath $phpDist -Recurse -Force }
+    Copy-Item -LiteralPath $phpRuntimeDir -Destination $phpDist -Recurse
+    Write-Host "Copied portable PHP runtime -> $phpDist"
+} else {
+    Write-Host 'WARN: PHP runtime missing; local PHP sources require PHP 8.3+ on PATH'
 }

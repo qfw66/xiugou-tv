@@ -966,6 +966,9 @@ class MpvPlayerEngine
   @override
   Future<void> setRate(double rate) async {
     final clamped = rate.clamp(0.25, 4.0);
+    // 立刻更新缓存而不等播放器事件回传：长按松开后紧接着切集时，
+    // 起播链路要读到恢复后的倍速，不能读到回传前的临时倍率。
+    _rate = clamped;
     await _player.setRate(clamped);
   }
 

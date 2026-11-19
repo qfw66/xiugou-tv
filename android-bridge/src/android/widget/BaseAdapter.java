@@ -5,7 +5,7 @@ import android.app.DialogHost;
 /**
  * android.widget.BaseAdapter：数据变化时通知宿主刷新正在显示的下拉框。
  */
-public abstract class BaseAdapter implements SpinnerAdapter {
+public abstract class BaseAdapter implements SpinnerAdapter, ListAdapter {
 
     private AdapterView<?> owner;
 

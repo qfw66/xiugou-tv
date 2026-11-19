@@ -5,6 +5,7 @@ import android.content.DialogInterface;
 import android.graphics.drawable.Drawable;
 import android.view.View;
 import android.widget.Button;
+import android.widget.ListAdapter;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -40,6 +41,7 @@ public class AlertDialog extends Dialog {
     private volatile CharSequence message;
     private final Map<Integer, ButtonSpec> buttons = new ConcurrentHashMap<>();
     private volatile CharSequence[] items;
+    private ListAdapter adapter;
     private volatile int itemMode = ITEMS_NONE;
     private volatile int checkedItem = -1;
     private volatile boolean[] checkedItems;
@@ -132,7 +134,10 @@ public class AlertDialog extends Dialog {
     }
 
     public CharSequence[] getHostItems() {
-        return items;
+        if (adapter == null) return items;
+        CharSequence[] labels = new CharSequence[adapter.getCount()];
+        for (int i = 0; i < labels.length; i++) labels[i] = java.util.Objects.toString(adapter.getItem(i), "");
+        return labels;
     }
 
     public int getHostItemMode() {
@@ -162,8 +167,8 @@ public class AlertDialog extends Dialog {
 
     /** 用户点了列表第 {@code index} 项。 */
     public void hostPerformItem(int index) {
-        CharSequence[] list = items;
-        if (list == null || index < 0 || index >= list.length) return;
+        CharSequence[] list = getHostItems();
+        if (list == null || index < 0 || index >= list.length || (adapter != null && !adapter.isEnabled(index))) return;
         switch (itemMode) {
             case ITEMS_SINGLE:
                 checkedItem = index;
@@ -194,6 +199,7 @@ public class AlertDialog extends Dialog {
         private boolean cancelable = true;
         private final Map<Integer, ButtonSpec> buttons = new java.util.LinkedHashMap<>();
         private CharSequence[] items;
+        private ListAdapter adapter;
         private int itemMode = ITEMS_NONE;
         private int checkedItem = -1;
         private boolean[] checkedItems;
@@ -277,6 +283,7 @@ public class AlertDialog extends Dialog {
         }
 
         public Builder setItems(CharSequence[] items, DialogInterface.OnClickListener listener) {
+            this.adapter = null;
             this.items = items;
             this.itemMode = ITEMS_LIST;
             this.itemListener = listener;
@@ -290,6 +297,7 @@ public class AlertDialog extends Dialog {
         public Builder setSingleChoiceItems(CharSequence[] items, int checkedItem,
                                             DialogInterface.OnClickListener listener) {
             this.items = items;
+            this.adapter = null;
             this.itemMode = ITEMS_SINGLE;
             this.checkedItem = checkedItem;
             this.itemListener = listener;
@@ -299,10 +307,27 @@ public class AlertDialog extends Dialog {
         public Builder setMultiChoiceItems(CharSequence[] items, boolean[] checkedItems,
                                            DialogInterface.OnMultiChoiceClickListener listener) {
             this.items = items;
+            this.adapter = null;
             this.itemMode = ITEMS_MULTI;
             this.checkedItems = checkedItems != null ? checkedItems
                     : new boolean[items == null ? 0 : items.length];
             this.multiChoiceListener = listener;
+            return this;
+        }
+
+        public Builder setAdapter(ListAdapter adapter, DialogInterface.OnClickListener listener) {
+            this.adapter = adapter;
+            this.items = null;
+            this.itemMode = ITEMS_LIST;
+            this.itemListener = listener;
+            return this;
+        }
+
+        public Builder setSingleChoiceItems(ListAdapter adapter, int checkedItem,
+                                            DialogInterface.OnClickListener listener) {
+            setAdapter(adapter, listener);
+            this.itemMode = ITEMS_SINGLE;
+            this.checkedItem = checkedItem;
             return this;
         }
 
@@ -341,6 +366,7 @@ public class AlertDialog extends Dialog {
             dialog.message = message;
             dialog.buttons.putAll(buttons);
             dialog.items = items;
+            dialog.adapter = adapter;
             dialog.itemMode = itemMode;
             dialog.checkedItem = checkedItem;
             dialog.checkedItems = checkedItems;

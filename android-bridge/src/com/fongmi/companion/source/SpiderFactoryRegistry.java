@@ -47,12 +47,12 @@ public final class SpiderFactoryRegistry {
             try {
                 Spider spider = entry.factory().tryCreate(request);
                 if (spider != null) {
-                    System.out.println("[SpiderFactory] " + entry.id() + " 命中: api=" + request.api()
+                    System.out.println("[SpiderFactory] " + entry.id() + " 命中: api=" + com.fongmi.companion.PhpSpider.diagnosticApi(request.api())
                             + " site=" + request.siteKey());
                     return spider;
                 }
             } catch (Throwable t) {
-                System.err.println("[SpiderFactory] " + entry.id() + " 失败，继续下一个: api=" + request.api()
+                System.err.println("[SpiderFactory] " + entry.id() + " 失败，继续下一个: api=" + com.fongmi.companion.PhpSpider.diagnosticApi(request.api())
                         + " " + t);
             }
         }

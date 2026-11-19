@@ -88,7 +88,7 @@ class _SearchSiteBarState extends State<SearchSiteBar> {
                         borderRadius: BorderRadius.circular(AppRadii.sm),
                       ),
                     ),
-                    icon: Icon(_expanded ? Icons.expand_less : Icons.expand_more),
+                    icon: Icon(_expanded ? Icons.expand_less_rounded : Icons.expand_more_rounded),
                   ),
                 ),
               ),

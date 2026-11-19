@@ -7,32 +7,44 @@ class DesktopWindowFrame extends StatelessWidget {
   final DesktopWindowManager windowManager;
   final Widget child;
   final String? activeSiteName;
+  final String? activeSiteIcon;
+  final Map<String, String>? activeSiteHeaders;
   final VoidCallback? onSettingsPressed;
   final VoidCallback? onSiteSelectorPressed;
   final Widget? searchBar;
   final VoidCallback? onRefresh;
   final bool refreshBusy;
+  final bool sidebarCollapsed;
+  final VoidCallback? onSidebarToggle;
 
   const DesktopWindowFrame({
     super.key,
     required this.windowManager,
     required this.child,
     this.activeSiteName,
+    this.activeSiteIcon,
+    this.activeSiteHeaders,
     this.onSettingsPressed,
     this.onSiteSelectorPressed,
     this.searchBar,
     this.onRefresh,
     this.refreshBusy = false,
+    this.sidebarCollapsed = false,
+    this.onSidebarToggle,
   });
 
   Widget _titleBar() => DesktopTitleBar(
         windowManager: windowManager,
         activeSiteName: activeSiteName,
+        activeSiteIcon: activeSiteIcon,
+        activeSiteHeaders: activeSiteHeaders,
         onSettingsPressed: onSettingsPressed,
         onSiteSelectorPressed: onSiteSelectorPressed,
         searchBar: searchBar,
         onRefresh: onRefresh,
         refreshBusy: refreshBusy,
+        sidebarCollapsed: sidebarCollapsed,
+        onSidebarToggle: onSidebarToggle,
       );
 
   @override

@@ -4,6 +4,7 @@ import '../../theme/app_icon_assets.dart';
 import '../../theme/app_palette.dart';
 import 'focus_ring.dart';
 import '../../theme/app_tokens.dart';
+import 'site_source_icon.dart';
 
 /// 标题栏高度：DesktopWindowFrame 顶部栏实高（窗口控制按钮与全局消息浮层定位共用）。
 const double kDesktopTitleBarHeight = 44;
@@ -18,21 +19,29 @@ const double kDesktopTitleBarHeight = 44;
 class DesktopTitleBar extends StatelessWidget {
   final DesktopWindowManager windowManager;
   final String? activeSiteName;
+  final String? activeSiteIcon;
+  final Map<String, String>? activeSiteHeaders;
   final VoidCallback? onSettingsPressed;
   final VoidCallback? onSiteSelectorPressed;
   final Widget? searchBar;
   final VoidCallback? onRefresh;
   final bool refreshBusy;
+  final bool sidebarCollapsed;
+  final VoidCallback? onSidebarToggle;
 
   const DesktopTitleBar({
     super.key,
     required this.windowManager,
     this.activeSiteName,
+    this.activeSiteIcon,
+    this.activeSiteHeaders,
     this.onSettingsPressed,
     this.onSiteSelectorPressed,
     this.searchBar,
     this.onRefresh,
     this.refreshBusy = false,
+    this.sidebarCollapsed = false,
+    this.onSidebarToggle,
   });
 
   @override
@@ -59,9 +68,20 @@ class DesktopTitleBar extends StatelessWidget {
           ),
           const SizedBox(width: 10),
 
+          // 左侧 1.5：侧栏开关（点击或键盘展开/收起）
+          if (onSidebarToggle != null) ...[
+            SidebarTitleBarToggle(
+              collapsed: sidebarCollapsed,
+              onPressed: onSidebarToggle!,
+            ),
+            const SizedBox(width: 4),
+          ],
+
           // 左侧 2：站源切换按钮（直接展示当前站源名称，无多余前缀）
           _SiteSourcePill(
             siteName: activeSiteName ?? '选择站源',
+            iconUrl: activeSiteIcon,
+            headers: activeSiteHeaders,
             onTap: onSiteSelectorPressed,
           ),
 
@@ -95,7 +115,7 @@ class DesktopTitleBar extends StatelessWidget {
           // 右侧 3：设置按钮 [ ⚙ ] 与窗口控制按钮组
           if (onSettingsPressed != null)
             _WindowButton(
-              icon: Icons.settings_suggest_outlined,
+              icon: Icons.settings_suggest_rounded,
               tooltip: '配置与设置',
               onPressed: onSettingsPressed!,
             ),
@@ -104,7 +124,8 @@ class DesktopTitleBar extends StatelessWidget {
             valueListenable: windowManager.isAlwaysOnTopNotifier,
             builder: (context, isPinned, _) {
               return _WindowButton(
-                icon: isPinned ? Icons.push_pin : Icons.push_pin_outlined,
+                icon:
+                    isPinned ? Icons.push_pin_rounded : Icons.push_pin_outlined,
                 iconColor: isPinned ? palette.accentInk : null,
                 tooltip: isPinned ? '取消置顶' : '窗口置顶',
                 onPressed: () => windowManager.toggleAlwaysOnTop(),
@@ -141,6 +162,43 @@ class DesktopTitleBar extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 标题栏内的侧栏开关：收起时提供展开入口，展开时可收起。
+class SidebarTitleBarToggle extends StatefulWidget {
+  const SidebarTitleBarToggle({
+    super.key,
+    required this.collapsed,
+    required this.onPressed,
+  });
+
+  final bool collapsed;
+  final VoidCallback onPressed;
+
+  @override
+  State<SidebarTitleBarToggle> createState() => _SidebarTitleBarToggleState();
+}
+
+class _SidebarTitleBarToggleState extends State<SidebarTitleBarToggle> {
+  final FocusNode _focusNode = FocusNode(debugLabel: 'sidebar-toggle');
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Listener(
+        // 指针操作不保留键盘焦点环；Tab / Enter / Space 仍由 FocusRing 处理。
+        onPointerDown: (_) => _focusNode.unfocus(),
+        child: _WindowButton(
+          icon: widget.collapsed ? Icons.menu_rounded : Icons.menu_open_rounded,
+          tooltip: widget.collapsed ? '展开侧栏' : '收起侧栏',
+          focusNode: _focusNode,
+          onPressed: widget.onPressed,
+        ),
+      );
 }
 
 /// 顶栏微透图标按钮（用于刷新等轻量操作）
@@ -193,9 +251,7 @@ class _TitleBarIconButtonState extends State<_TitleBarIconButton> {
                     ? palette.hover
                     : Colors.white.withValues(alpha: 0.05),
                 border: Border.all(
-                  color: _isHovered
-                      ? palette.accentInk
-                      : context.glassBorder,
+                  color: _isHovered ? palette.accentInk : context.glassBorder,
                   width: 0.8,
                 ),
               ),
@@ -213,9 +269,7 @@ class _TitleBarIconButtonState extends State<_TitleBarIconButton> {
                     : Icon(
                         widget.icon,
                         size: 16,
-                        color: _isHovered
-                            ? palette.accentInk
-                            : palette.textSub,
+                        color: _isHovered ? palette.accentInk : palette.textSub,
                       ),
               ),
             ),
@@ -229,10 +283,14 @@ class _TitleBarIconButtonState extends State<_TitleBarIconButton> {
 /// 首页站源胶囊按钮（直接显示站源名称）
 class _SiteSourcePill extends StatefulWidget {
   final String siteName;
+  final String? iconUrl;
+  final Map<String, String>? headers;
   final VoidCallback? onTap;
 
   const _SiteSourcePill({
     required this.siteName,
+    this.iconUrl,
+    this.headers,
     this.onTap,
   });
 
@@ -268,7 +326,7 @@ class _SiteSourcePillState extends State<_SiteSourcePill> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.source_rounded, size: 14, color: palette.accentInk),
+              SiteSourceIcon(iconUrl: widget.iconUrl, headers: widget.headers),
               const SizedBox(width: 6),
               ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 160),
@@ -304,6 +362,7 @@ class _WindowButton extends StatefulWidget {
   final VoidCallback onPressed;
   final bool isCloseButton;
   final Color? iconColor;
+  final FocusNode? focusNode;
 
   const _WindowButton({
     required this.icon,
@@ -311,6 +370,7 @@ class _WindowButton extends StatefulWidget {
     required this.onPressed,
     this.isCloseButton = false,
     this.iconColor,
+    this.focusNode,
   });
 
   @override
@@ -338,6 +398,7 @@ class _WindowButtonState extends State<_WindowButton> {
 
     return FocusRing(
       onTap: widget.onPressed,
+      focusNode: widget.focusNode,
       semanticLabel: widget.tooltip,
       borderRadius: const BorderRadius.all(Radius.circular(AppRadii.xs)),
       child: Tooltip(

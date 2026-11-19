@@ -8,6 +8,10 @@ FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
 
 FlutterWindow::~FlutterWindow() {
+  if (webdav_secrets_channel_) {
+    webdav_secrets_channel_->SetMethodCallHandler(nullptr);
+    webdav_secrets_channel_.reset();
+  }
   // S48: safety net. ~unique_ptr does not null the pointer before deleting,
   // so messages arriving during teardown would reach a half-destroyed
   // controller; reset() nulls first, so MessageHandler sees nullptr.
@@ -32,6 +36,8 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   process_job_channel_ =
       RegisterProcessJobChannel(flutter_controller_->engine()->messenger());
+  webdav_secrets_channel_ =
+      RegisterWebDavSecretsChannel(flutter_controller_->engine()->messenger());
   fullscreen_ = std::make_unique<WindowFullscreen>(GetHandle());
   fullscreen_channel_ = RegisterWindowFullscreenChannel(
       flutter_controller_->engine()->messenger(), fullscreen_.get());
@@ -51,6 +57,10 @@ bool FlutterWindow::OnCreate() {
 
 void FlutterWindow::OnDestroy() {
   // Drop the channel before the engine it is bound to.
+  if (webdav_secrets_channel_) {
+    webdav_secrets_channel_->SetMethodCallHandler(nullptr);
+    webdav_secrets_channel_.reset();
+  }
   process_job_channel_ = nullptr;
   fullscreen_channel_ = nullptr;
   if (flutter_controller_) {

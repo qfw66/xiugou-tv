@@ -8,7 +8,9 @@ import '../app_info.dart';
 import 'installer_launcher.dart';
 import 'update_downloader.dart';
 import 'update_mirror_health.dart';
+import 'update_mirror_catalog.dart';
 import 'update_mirrors.dart';
+import 'update_preferences.dart';
 import 'update_preferences_notifier.dart';
 import 'update_service.dart';
 
@@ -59,6 +61,9 @@ class UpdateController extends StateNotifier<UpdateUiState> {
   final InstallerLauncher _launcher;
   final UpdatePreferencesNotifier _preferences;
   final UpdateMirrorHealthStore _mirrorHealth;
+  final UpdateMirrorCatalog _mirrorCatalog;
+  final bool _ownsMirrorCatalog;
+  CancelToken? _checkToken;
   final Future<void> Function() _closeApp;
   final String? Function() _versionLabel;
   final Future<void> Function() _beforeInstall;
@@ -75,11 +80,14 @@ class UpdateController extends StateNotifier<UpdateUiState> {
     String? Function()? versionLabel,
     Future<void> Function()? beforeInstall,
     UpdateMirrorHealthStore? mirrorHealth,
+    UpdateMirrorCatalog? mirrorCatalog,
   })  : _service = service,
         _downloader = downloader,
         _launcher = launcher,
         _preferences = preferences,
         _mirrorHealth = mirrorHealth ?? UpdateMirrorHealthStore(),
+        _mirrorCatalog = mirrorCatalog ?? UpdateMirrorCatalog(),
+        _ownsMirrorCatalog = mirrorCatalog == null,
         _closeApp = closeApp,
         _versionLabel = versionLabel ?? (() => appVersionLabel),
         _beforeInstall = beforeInstall ?? _defaultBeforeInstall,
@@ -90,23 +98,59 @@ class UpdateController extends StateNotifier<UpdateUiState> {
 
   bool get isPortable => !_launcher.isInstalledBuild;
 
+  // Only routing changes invalidate work already requested by the user.
+  // Auto-check and skipped-version preferences do not alter its transport.
+  bool _hasCurrentRouting(UpdatePreferences captured) {
+    final current = _preferences.state;
+    return current.source == captured.source &&
+        current.useMirror == captured.useMirror &&
+        current.mirrorsUrl == captured.mirrorsUrl;
+  }
+
   Future<UpdateCheckResult?> check() async {
-    if (_checking) return null;
+    if (_checking || state.busy) return null;
     _checking = true;
+    final token = CancelToken();
+    _checkToken = token;
+    final preferences = _preferences.state;
     state = UpdateUiState(phase: UpdatePhase.checking, result: state.result);
     try {
+      final mirrors = await _mirrorCatalog.resolve(
+        endpoint: preferences.mirrorsUrl,
+        enabled: preferences.useMirror,
+        cancelToken: token,
+      );
+      if (!mounted || token.isCancelled || !_hasCurrentRouting(preferences)) {
+        return null;
+      }
       final health = await _mirrorHealth.load();
+      if (!mounted || token.isCancelled || !_hasCurrentRouting(preferences)) {
+        return null;
+      }
       final result = await _service.check(
         localVersion: _versionLabel() ?? '',
-        preferences: _preferences.state,
+        preferences: preferences,
+        cancelToken: token,
+        mirrors: mirrors,
         coolingDownMirrors: health.coolingDownIds(),
         onMirrorResult: _recordMirrorCheck,
       );
-      if (!mounted) return null;
+      if (!mounted || token.isCancelled || !_hasCurrentRouting(preferences)) {
+        return null;
+      }
       state = UpdateUiState(phase: UpdatePhase.idle, result: result);
       return result;
+    } on DioException catch (error) {
+      if (!CancelToken.isCancel(error)) rethrow;
+      return null;
     } finally {
       _checking = false;
+      if (_checkToken == token) {
+        _checkToken = null;
+        if (mounted && state.phase == UpdatePhase.checking) {
+          state = UpdateUiState(phase: UpdatePhase.idle, result: state.result);
+        }
+      }
     }
   }
 
@@ -122,11 +166,9 @@ class UpdateController extends StateNotifier<UpdateUiState> {
     final manifest = result?.manifest;
     final asset = result?.installer;
     if (manifest == null || asset == null) return;
-    if (state.phase == UpdatePhase.downloading ||
-        state.phase == UpdatePhase.verifying) {
-      return;
-    }
+    if (state.busy) return;
 
+    final preferences = _preferences.state;
     final token = CancelToken();
     _downloadToken = token;
     state = UpdateUiState(phase: UpdatePhase.downloading, result: result);
@@ -152,22 +194,53 @@ class UpdateController extends StateNotifier<UpdateUiState> {
       );
     }
 
+    bool isCurrent() =>
+        mounted &&
+        _downloadToken == token &&
+        !token.isCancelled &&
+        _hasCurrentRouting(preferences);
+    late final List<UpdateMirror> mirrors;
+    try {
+      mirrors = await _mirrorCatalog.resolve(
+        endpoint: preferences.mirrorsUrl,
+        enabled: preferences.useMirror,
+        cancelToken: token,
+      );
+    } on DioException catch (error) {
+      if (!CancelToken.isCancel(error)) rethrow;
+      if (mounted && _downloadToken == token) cancelDownload();
+      return;
+    }
+    if (!isCurrent()) {
+      if (mounted && _downloadToken == token) cancelDownload();
+      return;
+    }
     final health = await _mirrorHealth.load();
+    if (!isCurrent()) {
+      if (mounted && _downloadToken == token) cancelDownload();
+      return;
+    }
     final outcome = await _downloader.download(
       manifest: manifest,
       asset: asset,
       cancelToken: token,
       onProgress: onProgress,
       onVerifying: onVerifying,
+      mirrors: mirrors,
       candidates: downloadCandidates(
         assetUrl: asset.url,
-        useMirror: _preferences.state.useMirror,
+        useMirror: preferences.useMirror,
+        mirrors: mirrors,
         lastGoodMirrorId: health.lastGoodDownloadSource,
         coolingDown: health.coolingDownIds(),
       ),
     );
 
     if (!mounted || _downloadToken != token) return;
+    if (!_hasCurrentRouting(preferences)) {
+      cancelDownload();
+      return;
+    }
     _downloadToken = null;
 
     if (outcome.ok) {
@@ -249,7 +322,9 @@ class UpdateController extends StateNotifier<UpdateUiState> {
 
   @override
   void dispose() {
+    _checkToken?.cancel('控制器销毁');
     _downloadToken?.cancel('控制器销毁');
+    if (_ownsMirrorCatalog) _mirrorCatalog.dispose();
     super.dispose();
   }
 }

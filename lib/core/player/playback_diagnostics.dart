@@ -11,7 +11,7 @@ import 'models/player_state.dart';
 
 /// 敏感字段名：命中（不区分大小写）的 query 参数 / 请求头，其值整体打码。
 final RegExp sensitiveFieldPattern = RegExp(
-  r'(token|auth|key|sign|secret|pwd|password|credential|expire)',
+  r'(token|auth|key|sign|secret|pwd|password|credential|expire|cookie)',
   caseSensitive: false,
 );
 
@@ -25,7 +25,7 @@ String maskSensitiveUrl(String url) {
   // 敏感 query 值：键名与 [sensitiveFieldPattern] 同源，值整体打码。
   result = result.replaceAllMapped(
     RegExp(
-      r'([?&](?:token|auth|key|sign|secret|pwd|password|credential|expire)[^=&#]*=)[^&#]*',
+      r'([?&](?:token|auth|key|sign|secret|pwd|password|credential|expire|cookie)[^=&#]*=)[^&#]*',
       caseSensitive: false,
     ),
     (match) => '${match.group(1)}***',

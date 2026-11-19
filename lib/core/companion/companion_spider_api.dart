@@ -6,17 +6,32 @@ import '../api/models/vod_models.dart';
 import '../api/search_cancel_token.dart';
 import '../config/models/vod_config.dart';
 import '../net/http_client_factory.dart';
+import '../net/site_icon_url.dart';
 import '../player/models/player_state.dart';
 import 'companion_process_manager.dart';
+import 'companion_recovery.dart';
+import 'browser_verification_controller.dart';
 import 'site_self_check_report.dart';
 
 /// 通过本地 Java 伴随服务执行 CatVod Spider 的 API 适配层
 class CompanionSpiderApi {
   final CompanionProcessManager processManager;
   final Dio _dio;
+  late final browserVerification =
+      BrowserVerificationController(processManager: processManager, dio: _dio);
+
+  /// transport / service 失败后的自愈（健康探测 → 必要时重启 → 重放一次）。
+  late final CompanionRecovery _recovery =
+      CompanionRecovery(host: processManager);
 
   static const rpcReceiveTimeout = Duration(seconds: 75);
   static const rpcServerTimeout = Duration(seconds: 60);
+
+  // 首次准备还包含脚本下载、运行时启动和插件初始化，独立于普通 RPC 预算。
+  static const initializationServerTimeout = Duration(seconds: 90);
+  static const initializationReceiveTimeout = Duration(seconds: 105);
+  static const _maxInitializationServerTimeout = Duration(seconds: 120);
+  static const _initializationResponseMargin = Duration(seconds: 5);
 
   CompanionSpiderApi({
     CompanionProcessManager? processManager,
@@ -28,6 +43,30 @@ class CompanionSpiderApi {
               receiveTimeout: const Duration(seconds: 20),
             ));
 
+  /// 导入猫源校验入口，返回可持久化的站点描述（不含临时Node端口）。
+  Future<String> importCatSource(String url, String md5) async {
+    if (!await processManager.start()) {
+      throw StateError('猫源运行服务启动失败：${processManager.lastError}');
+    }
+    processManager.notifyActivity();
+    final response = await _dio.post<dynamic>(
+      '${processManager.baseUrl}/cat/import',
+      data: {'url': url, 'md5': md5},
+      options: Options(
+        receiveTimeout: const Duration(minutes: 3),
+        validateStatus: (status) => status != null && status < 600,
+      ),
+    );
+    final body = response.data is String
+        ? jsonDecode(response.data as String)
+        : response.data;
+    if (body is! Map || body['code'] != 0 || body['data'] is! Map) {
+      throw StateError(
+          body is Map ? '${body['error'] ?? '猫源导入失败'}' : '猫源返回无效清单');
+    }
+    return jsonEncode(body['data']);
+  }
+
   /// ext 已在模型层规范化为 JSON 字符串（对象形态会被序列化），可直接下发。
   String _extensionJson(Site site) => site.ext ?? '';
 
@@ -36,6 +75,12 @@ class CompanionSpiderApi {
     processManager.notifyActivity();
 
     try {
+      final clientTimeout = receiveTimeout ?? initializationReceiveTimeout;
+      final serverBudgetMs = receiveTimeout == null
+          ? initializationServerTimeout.inMilliseconds
+          : (receiveTimeout - _initializationResponseMargin).inMilliseconds;
+      // 非正值会使服务端回落到默认 60 秒，无法留足响应时间时不发请求。
+      if (serverBudgetMs <= 0) return false;
       final res = await _dio.post<dynamic>(
         '${processManager.baseUrl}/spider/load',
         data: {
@@ -45,10 +90,10 @@ class CompanionSpiderApi {
           'jar': site.jar ?? '',
           // 唯一取消标签：同站并发加载时，先结束的那次收尾不会误取消另一次的在途请求。
           'rpcId': 'load@${site.key}#${++_rpcSeq}',
+          'timeoutMs':
+              '${serverBudgetMs.clamp(1, _maxInitializationServerTimeout.inMilliseconds)}',
         },
-        // 冷启动首次要为加固载荷做「下载 → 解密 → dex2jar」，实测 10~20 秒，
-        // 默认 20 秒的接收超时会把「正在正常加载」误判成失败（预热横幅一直红）。
-        options: receiveTimeout == null ? null : Options(receiveTimeout: receiveTimeout),
+        options: Options(receiveTimeout: clientTimeout),
       );
       if (res.statusCode == 200) {
         final dynamic data =
@@ -68,6 +113,7 @@ class CompanionSpiderApi {
   /// 伴随服务未运行时直接返回（下次懒启动的进程本来就是干净的）；失败静默，
   /// 最坏情况只是旧资源要等空闲停机或退出时才释放，不影响新配置使用。
   Future<void> resetSpiders() async {
+    browserVerification.reset();
     if (!processManager.isRunning) return;
     try {
       await _dio.post<dynamic>(
@@ -157,8 +203,11 @@ class CompanionSpiderApi {
       site: site,
       method: 'homeContent',
       params: {'filter': filter.toString()},
+      // homeContent 内也会懒初始化 spider，无需另发一次 load。
+      serverTimeout: initializationServerTimeout,
+      receiveTimeout: initializationReceiveTimeout,
     );
-    return _parseVodPageResult(rawJson, site: site);
+    return _parseVodPageResult(rawJson, site: site, isHome: true);
   }
 
   /// 获取分类视频列表
@@ -212,7 +261,8 @@ class CompanionSpiderApi {
   }
 
   /// 保留直播目录的原始 JSON / M3U / TXT，由直播仓库解析频道。
-  Future<String> fetchLiveContent(Site site, {
+  Future<String> fetchLiveContent(
+    Site site, {
     required String url,
     Duration? timeout,
   }) {
@@ -254,7 +304,8 @@ class CompanionSpiderApi {
       params: {'flag': flag, 'id': id},
     );
     if (raw.trim().isEmpty) {
-      debugPrint('--> [播放地址为空] ${describeEmptyPlayResult(site.key, flag, id, raw)}');
+      debugPrint(
+          '--> [播放地址为空] ${describeEmptyPlayResult(site.key, flag, id, raw)}');
       throw const FormatException('Spider 未返回播放地址');
     }
     dynamic decoded;
@@ -268,55 +319,21 @@ class CompanionSpiderApi {
     final selection = _readSpiderQualities(decoded['url']);
     final qualities = selection.qualities;
     if (qualities.isEmpty) {
-      debugPrint('--> [播放地址为空] ${describeEmptyPlayResult(site.key, flag, id, raw)}');
+      debugPrint(
+          '--> [播放地址为空] ${describeEmptyPlayResult(site.key, flag, id, raw)}');
       // 网盘载荷没给地址时常在 msg 里说明原因（如「还没有配置百度网盘 Cookie」），
       // 原样交给用户，比笼统的「站源没有返回播放地址」更能指明下一步。
       final hint = playResultHint(decoded);
       if (hint != null) {
-        throw SpiderCallException(hint, stage: 'player', siteKey: site.key, method: 'playerContent');
+        throw SpiderCallException(hint,
+            stage: 'player', siteKey: site.key, method: 'playerContent');
       }
       throw const FormatException('Spider 未返回播放地址');
     }
-    final parse = int.tryParse('${decoded['parse'] ?? 0}');
-    final jx = int.tryParse('${decoded['jx'] ?? 0}');
-    if (parse == null ||
-        jx == null ||
-        ![0, 1].contains(parse) ||
-        ![0, 1].contains(jx)) {
-      throw const FormatException('不支持的 Spider 解析类型');
-    }
-    if ('${decoded['playUrl'] ?? ''}'.trim().isNotEmpty) {
-      throw const FormatException('暂不支持 Spider 网页解析前缀');
-    }
-    dynamic header = decoded['header'];
-    if (header is String && header.trim().isNotEmpty) {
-      header = jsonDecode(header);
-    }
-    if (header != null && header != '' && header is! Map) {
-      throw const FormatException('Spider 请求头格式无效');
-    }
-    final needsParse = parse == 1 || jx == 1;
-    final headers = Map<String, String>.unmodifiable(header is Map
-        ? header.map((k, v) => MapEntry(k.toString(), v.toString()))
-        : const <String, String>{});
-    return SpiderPlayResult(
-      url: qualities[selection.index].url,
-      needsParse: needsParse,
-      headers: headers,
-      qualityIndex: selection.index,
+    return SpiderPlayResult.fromJson(
+      decoded,
       liveDanmakuSources: _readLiveDanmakuSources(
           decoded['danmaku'], processManager.baseUrl, site.key),
-      qualities: qualities.length < 2
-          ? const []
-          : List<PlaybackQuality>.unmodifiable([
-              for (final quality in qualities)
-                PlaybackQuality(
-                  name: quality.name,
-                  url: quality.url,
-                  headers: headers,
-                  needsParse: needsParse,
-                ),
-            ]),
     );
   }
 
@@ -324,12 +341,40 @@ class CompanionSpiderApi {
   ///
   /// 配置中心的设置项在这里弹出扫码 / 输入窗口，窗口经 [CompanionUiChannel] 呈现；
   /// 返回值是载荷的原始结果（通常为空或带 msg 的 JSON），失败返回空串。
-  Future<String> performAction(Site site, String action) {
-    return _callSpider(
-      site: site,
-      method: 'action',
-      params: {'action': action},
-    );
+  Future<String> performAction(Site site, String action) async {
+    final interactiveLogin = site.api == 'csp_PanConfig' &&
+        (action.endsWith('_scan') || action.endsWith('_import'));
+    if (!interactiveLogin) {
+      return _callSpider(
+        site: site,
+        method: 'action',
+        params: {'action': action},
+      );
+    }
+    // 扫码 / 导入可能挂几分钟：持租约期间不因空闲停用而重启 companion，
+    // 否则登录态还没写回就被杀进程，用户看到的就是「扫完了但没保存」。
+    // 测试替身没实现租约时按「无租约」处理，不影响主流程。
+    final lease = _tryAcquireLease('pan-login:$action');
+    try {
+      return await _callSpider(
+        site: site,
+        method: 'action',
+        params: {'action': action},
+        serverTimeout: const Duration(minutes: 5),
+        receiveTimeout: const Duration(seconds: 315),
+      );
+    } finally {
+      lease?.release();
+    }
+  }
+
+  /// 取一次活动租约；替身 manager 未实现租约时返回 null（不影响主流程）。
+  CompanionLease? _tryAcquireLease(String reason) {
+    try {
+      return processManager.acquireLease(reason);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// 仅获取地址的兼容入口；播放调用应使用完整结果以保留解析标志与请求头。
@@ -347,12 +392,16 @@ class CompanionSpiderApi {
   }) async {
     for (var attempt = 0; attempt < 2; attempt++) {
       try {
-        final raw = await _callSpider(site: site, method: method, params: params);
+        final raw =
+            await _callSpider(site: site, method: method, params: params);
         if (raw.trim().isNotEmpty || attempt == 1) return raw;
       } on SpiderCallException catch (error) {
         // Only transient service faults are worth a second attempt; timeouts and payload/upstream
-        // failures would just double the user's wait.
-        final retryable = const {'empty', 'service', 'transport'}.contains(error.stage) || error.httpStatus == 503;
+        // failures would just double the user's wait. transport / service 已经在
+        // `_callSpider` 里走过「健康探测 + 重启一次 + 重放一次」，这里不再重来，
+        // 否则一次点击会连续拉起两次进程。
+        final retryable =
+            error.stage == 'empty' || error.httpStatus == 503;
         if (attempt == 1 || !retryable) rethrow;
       }
       await Future<void>.delayed(const Duration(milliseconds: 800));
@@ -360,6 +409,12 @@ class CompanionSpiderApi {
     return '';
   }
 
+  /// 一次站源 RPC 的对外入口：transport / service 级失败先自愈，再重放一次。
+  ///
+  /// 自愈口径（见 [CompanionRecovery]）：先 `/health` 探测；进程确实死了（或卡死）
+  /// 就重启一次，然后重放同一 RPC。只重放一次：仍然失败时抛「已自动重启但仍失败」并
+  /// 带上诊断日志路径。用户取消（[cancelToken]）既不算失败也不触发重启；超时
+  /// （服务还活着，只是慢）同样不触发重启。
   Future<String> _callSpider({
     required Site site,
     required String method,
@@ -369,8 +424,78 @@ class CompanionSpiderApi {
     Duration? serverTimeout,
   }) async {
     if (cancelToken?.isCancelled ?? false) return '';
-    if (!processManager.isRunning) throw const SpiderCallException('站源服务尚未就绪，请重试', stage: 'service');
+    CompanionRecoveryOutcome? recovery;
+    while (true) {
+      try {
+        return await _callSpiderOnce(
+          site: site,
+          method: method,
+          params: params,
+          cancelToken: cancelToken,
+          receiveTimeout: receiveTimeout,
+          serverTimeout: serverTimeout,
+        );
+      } on SpiderCallException catch (error) {
+        if (cancelToken?.isCancelled ?? false) return '';
+        if (!_isRecoverableStage(error.stage)) rethrow;
+        _logCompanion(
+            '[rpc] ${error.stage} 失败：$method@${site.key} ${error.message}');
+        final previous = recovery;
+        if (previous != null) throw _recoveryFailure(error, previous);
+        final outcome = await _recovery.recover();
+        recovery = outcome;
+        _logCompanion('[rpc] 自愈结论：${outcome.kind.name}');
+        if (cancelToken?.isCancelled ?? false) return '';
+        if (!outcome.canRetry) throw _recoveryFailure(error, outcome);
+      }
+    }
+  }
+
+  /// 诊断日志；测试替身没有实现 companionLog 时静默跳过。
+  void _logCompanion(String line) {
+    try {
+      processManager.companionLog.write(line);
+    } catch (_) {}
+  }
+
+  /// transport（连不上）与 service（进程已退出）值得自愈；其余是站点 / 载荷自己的问题。
+  static bool _isRecoverableStage(String? stage) =>
+      stage == 'transport' || stage == 'service';
+
+  SpiderCallException _recoveryFailure(
+    SpiderCallException error,
+    CompanionRecoveryOutcome outcome,
+  ) {
+    final message = outcome.canRetry
+        ? (error.stage == 'service'
+            ? '站源服务已自动重启，但站点仍未就绪，请稍后重试'
+            : '站源服务在本次动作中退出了，已自动重启；该动作仍未完成（原因见日志）')
+        : outcome.failureMessage;
+    return SpiderCallException(
+      withCompanionLogPath(message, outcome.logPath),
+      stage: error.stage,
+      detail: error.detail,
+      httpStatus: error.httpStatus,
+      siteKey: error.siteKey,
+      method: error.method,
+      rpcId: error.rpcId,
+    );
+  }
+
+  Future<String> _callSpiderOnce({
+    required Site site,
+    required String method,
+    required Map<String, String> params,
+    SearchCancelToken? cancelToken,
+    Duration? receiveTimeout,
+    Duration? serverTimeout,
+  }) async {
+    if (cancelToken?.isCancelled ?? false) return '';
+    if (!processManager.isRunning) {
+      throw const SpiderCallException('站源服务尚未就绪，请重试', stage: 'service');
+    }
     processManager.notifyActivity();
+    final verificationGeneration = browserVerification.generation;
 
     // 点叉后立即放弃这次 RPC：Dio 中止连接，Dart 侧不再等满 20 秒。
     final dioCancelToken = CancelToken();
@@ -408,34 +533,94 @@ class CompanionSpiderApi {
       );
 
       if (cancelToken?.isCancelled ?? false) return '';
-      final dynamic data = res.data is String ? jsonDecode(res.data as String) : res.data;
+      final dynamic data =
+          res.data is String ? jsonDecode(res.data as String) : res.data;
       if (data is! Map) throw const FormatException('站源服务响应格式无效');
       if (res.statusCode != 200 || data['code'] != 0) {
-        final stage = data['stage']?.toString() ?? (res.statusCode == 504 ? 'timeout' : null);
+        final stage = data['stage']?.toString() ??
+            (res.statusCode == 504 ? 'timeout' : null);
+        if (stage == 'browser' && res.statusCode == 428) {
+          browserVerification.record(
+              site, method, data['browserChallenge'], verificationGeneration);
+        }
         final message = switch (stage) {
+          'browser' =>
+            res.statusCode == 503 ? '站源服务繁忙，请稍后重试' : '站点需要网页验证，请打开验证网页后重试',
           'download' || 'resolve' || 'md5' => '站点资源加载失败，请稍后重试',
-          'decrypt' || 'dex2jar' || 'init' || 'instantiate' || 'class' => '站点插件加载失败，请重试或更换站源',
+          'decrypt' ||
+          'dex2jar' ||
+          'init' ||
+          'instantiate' ||
+          'class' =>
+            '站点插件加载失败，请重试或更换站源',
           'timeout' => '站源请求超时，请稍后重试',
-          'empty' || 'upstream' || 'interaction' => data['detail']?.toString() ?? '站源未返回内容',
-          _ => res.statusCode == 503 ? '站源服务繁忙，请稍后重试' : data['error']?.toString() ?? '站源请求失败',
+          'empty' ||
+          'upstream' ||
+          'interaction' =>
+            data['detail']?.toString() ?? '站源未返回内容',
+          'call' => res.statusCode == 503
+              ? '站源服务繁忙，请稍后重试'
+              : _gmPlaybackMessage(site, method, data['detail']?.toString()) ??
+                  data['error']?.toString() ??
+                  '站源请求失败',
+          _ => res.statusCode == 503
+              ? '站源服务繁忙，请稍后重试'
+              : data['error']?.toString() ?? '站源请求失败',
         };
-        throw SpiderCallException(message, stage: stage, detail: data['detail']?.toString(),
-            httpStatus: res.statusCode, siteKey: site.key, method: method, rpcId: rpcId);
+        throw SpiderCallException(message,
+            stage: stage,
+            detail: data['detail']?.toString(),
+            httpStatus: res.statusCode,
+            siteKey: site.key,
+            method: method,
+            rpcId: rpcId);
       }
       final dynamic rawData = data['data'];
       if (rawData is String) return rawData;
       if (rawData is Map || rawData is List) return jsonEncode(rawData);
       throw const FormatException('站源服务未返回有效数据');
     } on DioException catch (error) {
-      if (CancelToken.isCancel(error) || (cancelToken?.isCancelled ?? false)) return '';
-      final timeout = [DioExceptionType.receiveTimeout, DioExceptionType.sendTimeout, DioExceptionType.connectionTimeout].contains(error.type);
+      if (CancelToken.isCancel(error) || (cancelToken?.isCancelled ?? false)) {
+        return '';
+      }
+      final timeout = [
+        DioExceptionType.receiveTimeout,
+        DioExceptionType.sendTimeout,
+        DioExceptionType.connectionTimeout
+      ].contains(error.type);
       if (timeout) unawaited(_cancelRemote(rpcId));
       throw SpiderCallException(timeout ? '站源请求超时，请稍后重试' : '无法连接站源服务，请重试',
-          stage: timeout ? 'timeout' : 'transport', httpStatus: error.response?.statusCode,
-          siteKey: site.key, method: method, rpcId: rpcId);
+          stage: timeout ? 'timeout' : 'transport',
+          httpStatus: error.response?.statusCode,
+          siteKey: site.key,
+          method: method,
+          rpcId: rpcId);
     } finally {
       finished = true;
     }
+  }
+
+  String? _gmPlaybackMessage(Site site, String method, String? detail) {
+    if (method != 'playerContent' ||
+        !const ['csp_GM', 'GM'].contains(site.api) ||
+        detail == null) {
+      return null;
+    }
+    if (detail.contains('GM playback reference expired; reload detail')) {
+      return 'GM 播放引用已过期，请重新打开详情后重试';
+    }
+    if (detail.contains('GM desktop: netflav main source unavailable;') ||
+        detail.contains(
+            'GM playback API returned no main stream (preview excluded);')) {
+      return '该 GM 站点未返回正片播放来源，请更换线路或站点';
+    }
+    if ((detail.contains('GM desktop:') ||
+            detail.contains('GM original playerContent failed;')) &&
+        detail.contains('browser') &&
+        detail.contains('unsupported')) {
+      return '该 GM 播放方式依赖浏览器，桌面暂不支持，请更换线路或站点';
+    }
+    return null;
   }
 
   /// 通知 companion 中止一次在途 RPC。尽力而为：这里失败不影响调用方，
@@ -456,7 +641,8 @@ class CompanionSpiderApi {
     }
   }
 
-  VodPageResult _parseVodPageResult(String rawJson, {Site? site}) {
+  VodPageResult _parseVodPageResult(String rawJson,
+      {Site? site, bool isHome = false}) {
     if (rawJson.isEmpty) {
       return const VodPageResult.empty();
     }
@@ -500,6 +686,11 @@ class CompanionSpiderApi {
           categories: categories,
           list: items,
           filters: parseVodFilters(decoded['filters']),
+          siteIcon: isHome
+              ? parseHomeSiteIcon(decoded,
+                  baseUrl:
+                      site != null && !site.usesCompanion ? site.api : null)
+              : null,
         );
       }
     } on FormatException {
@@ -517,10 +708,15 @@ String? selectSpiderPlayUrl(Object? raw) {
       : selection.qualities[selection.index].url;
 }
 
-({List<PlaybackQuality> qualities, int index}) _readSpiderQualities(Object? raw) {
+({List<PlaybackQuality> qualities, int index}) _readSpiderQualities(
+    Object? raw) {
   if (raw is String) {
     final url = raw.trim();
-    return (qualities: url.isEmpty ? const [] : [PlaybackQuality(name: '默认', url: url)], index: 0);
+    return (
+      qualities:
+          url.isEmpty ? const [] : [PlaybackQuality(name: '默认', url: url)],
+      index: 0
+    );
   }
   bool looksLikeUrl(String value) => value.contains('://');
   final qualities = <PlaybackQuality>[];
@@ -529,13 +725,17 @@ String? selectSpiderPlayUrl(Object? raw) {
     if (values is! List) return (qualities: qualities, index: 0);
     final position = raw['position'];
     var selected = 0;
-    for (var originalIndex = 0; originalIndex < values.length; originalIndex++) {
+    for (var originalIndex = 0;
+        originalIndex < values.length;
+        originalIndex++) {
       final item = values[originalIndex];
       if (item is! Map || item['v'] is! String) continue;
       final url = (item['v'] as String).trim();
       if (!looksLikeUrl(url)) continue;
       final name = item['n'] is String ? (item['n'] as String).trim() : '';
-      if (position is int && position == originalIndex) selected = qualities.length;
+      if (position is int && position == originalIndex) {
+        selected = qualities.length;
+      }
       qualities.add(PlaybackQuality(
         name: name.isEmpty ? '线路 ${qualities.length + 1}' : name,
         url: url,
@@ -561,7 +761,8 @@ List<LiveDanmakuSource> _readLiveDanmakuSources(
     Object? raw, String companionBase, String siteKey) {
   if (raw is! List) return const [];
   final base = Uri.tryParse(companionBase);
-  if (base == null || base.scheme != 'http' ||
+  if (base == null ||
+      base.scheme != 'http' ||
       !const {'127.0.0.1', 'localhost', '::1'}.contains(base.host)) {
     return const [];
   }
@@ -571,8 +772,12 @@ List<LiveDanmakuSource> _readLiveDanmakuSources(
     if (item is! Map || item['url'] is! String) continue;
     final url = (item['url'] as String).trim();
     final uri = Uri.tryParse(url);
-    if (uri == null || uri.scheme != base.scheme || uri.host != base.host ||
-        uri.port != base.port || uri.userInfo.isNotEmpty || uri.hasFragment ||
+    if (uri == null ||
+        uri.scheme != base.scheme ||
+        uri.host != base.host ||
+        uri.port != base.port ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasFragment ||
         uri.path != '/script-danmaku/start') {
       continue;
     }
@@ -582,14 +787,17 @@ List<LiveDanmakuSource> _readLiveDanmakuSources(
     } on FormatException {
       continue;
     }
-    bool single(String key) => query[key]?.length == 1 && query[key]!.single.isNotEmpty;
+    bool single(String key) =>
+        query[key]?.length == 1 && query[key]!.single.isNotEmpty;
     if (!['token', 'do', 'siteKey', 'id'].every(single) ||
-        query['do']!.single != 'py' || query['siteKey']!.single != siteKey ||
+        query['do']!.single != 'py' ||
+        query['siteKey']!.single != siteKey ||
         !seen.add(url)) {
       continue;
     }
     final name = item['name'] is String ? (item['name'] as String).trim() : '';
-    sources.add(LiveDanmakuSource(name: name.isEmpty ? '实时弹幕' : name, url: url));
+    sources
+        .add(LiveDanmakuSource(name: name.isEmpty ? '实时弹幕' : name, url: url));
     if (sources.length == 16) break;
   }
   return List<LiveDanmakuSource>.unmodifiable(sources);
@@ -611,9 +819,11 @@ String? playResultHint(Map<dynamic, dynamic> decoded) {
 ///
 /// 只列字段名和长度，提示类字段（msg/error/tip 等）给前 200 字；不输出 header、cookie、token
 /// 之类的值，避免网盘凭据进日志。
-String describeEmptyPlayResult(String siteKey, String flag, String id, String raw) {
+String describeEmptyPlayResult(
+    String siteKey, String flag, String id, String raw) {
   String clip(String s, int n) => s.length <= n ? s : '${s.substring(0, n)}…';
-  final head = 'site=$siteKey flag=$flag id=${clip(id, 120)} rawLen=${raw.length}';
+  final head =
+      'site=$siteKey flag=$flag id=${clip(id, 120)} rawLen=${raw.length}';
   dynamic decoded;
   try {
     decoded = jsonDecode(raw);
@@ -621,7 +831,16 @@ String describeEmptyPlayResult(String siteKey, String flag, String id, String ra
     return '$head (非 JSON)';
   }
   if (decoded is! Map) return '$head type=${decoded.runtimeType}';
-  const hintKeys = {'msg', 'message', 'error', 'err', 'tip', 'tips', 'toast', 'desc'};
+  const hintKeys = {
+    'msg',
+    'message',
+    'error',
+    'err',
+    'tip',
+    'tips',
+    'toast',
+    'desc'
+  };
   final fields = <String>[];
   for (final entry in decoded.entries) {
     final key = '${entry.key}';
@@ -658,12 +877,75 @@ class SpiderPlayResult {
     this.qualityIndex = 0,
     this.liveDanmakuSources = const [],
   });
+
+  /// 纯播放载荷解析，HTTP type:4 与 Spider 共用，不访问伴随服务状态。
+  factory SpiderPlayResult.fromJson(Map<dynamic, dynamic> decoded, {
+    String sourceLabel = 'Spider',
+    List<LiveDanmakuSource> liveDanmakuSources = const [],
+  }) {
+    final selection = _readSpiderQualities(decoded['url']);
+    final qualities = selection.qualities;
+    if (qualities.isEmpty) {
+      final hint = playResultHint(decoded);
+      throw FormatException('$sourceLabel 未返回播放地址${hint == null ? '' : '：$hint'}');
+    }
+    final parse = int.tryParse('${decoded['parse'] ?? 0}');
+    final jx = int.tryParse('${decoded['jx'] ?? 0}');
+    if (parse == null || jx == null ||
+        ![0, 1].contains(parse) || ![0, 1].contains(jx)) {
+      throw FormatException('不支持的 $sourceLabel 解析类型');
+    }
+    if ('${decoded['playUrl'] ?? ''}'.trim().isNotEmpty) {
+      throw FormatException('暂不支持 $sourceLabel 网页解析前缀');
+    }
+    dynamic header = decoded['header'] ?? decoded['headers'];
+    if (header is String && header.trim().isNotEmpty) {
+      try {
+        header = jsonDecode(header);
+      } on FormatException {
+        throw FormatException('$sourceLabel 请求头格式无效');
+      }
+    }
+    // PHP 的空关联数组会编码成 []，语义仍是没有请求头。
+    if (header is List && header.isEmpty) header = null;
+    if (header != null && header != '' && header is! Map) {
+      throw FormatException('$sourceLabel 请求头格式无效');
+    }
+    final headers = Map<String, String>.unmodifiable(header is Map
+        ? header.map((k, v) => MapEntry(k.toString(), v.toString()))
+        : const <String, String>{});
+    final needsParse = parse == 1 || jx == 1;
+    return SpiderPlayResult(
+      url: qualities[selection.index].url,
+      needsParse: needsParse,
+      headers: headers,
+      qualityIndex: selection.index,
+      liveDanmakuSources: liveDanmakuSources,
+      qualities: qualities.length < 2
+          ? const []
+          : List<PlaybackQuality>.unmodifiable([
+              for (final quality in qualities)
+                PlaybackQuality(
+                  name: quality.name,
+                  url: quality.url,
+                  headers: headers,
+                  needsParse: needsParse,
+                ),
+            ]),
+    );
+  }
 }
 
 /// 伴随服务给出的明确失败原因（SpiderServer 的 code/stage/detail 契约）。
 /// toString 直接返回原因，便于上层 `'$e'` 拼出可读提示。
 class SpiderCallException implements Exception {
-  const SpiderCallException(this.message, {this.stage, this.detail, this.httpStatus, this.siteKey, this.method, this.rpcId});
+  const SpiderCallException(this.message,
+      {this.stage,
+      this.detail,
+      this.httpStatus,
+      this.siteKey,
+      this.method,
+      this.rpcId});
 
   final String message;
   final String? stage;
@@ -679,10 +961,12 @@ class SpiderCallException implements Exception {
     final parts = <String>[
       message,
       if (stage != null) 'stage=$stage',
-      if (method != null || siteKey != null) 'call=${method ?? '?'}@${siteKey ?? '?'}',
+      if (method != null || siteKey != null)
+        'call=${method ?? '?'}@${siteKey ?? '?'}',
       if (httpStatus != null) 'http=$httpStatus',
       if (rpcId != null) 'rpc=$rpcId',
-      if (detail != null && detail!.trim().isNotEmpty) 'detail=${detail!.trim()}',
+      if (detail != null && detail!.trim().isNotEmpty)
+        'detail=${detail!.trim()}',
     ];
     return parts.join(' | ');
   }

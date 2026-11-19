@@ -69,7 +69,10 @@ public class SpiderServer {
         server.createContext("/spider/call", guarded(new CallHandler()));
         server.createContext("/spider/cancel", guarded(new CancelHandler()));
         server.createContext("/spider/reset", guarded(new ResetHandler()));
+        server.createContext("/cat/import", guarded(new CatImportHandler()));
         this.boundPort = server.getAddress().getPort();
+        loader.javaProxies().setBase("http://127.0.0.1:" + boundPort + JavaProxyHandler.PREFIX);
+        server.createContext(JavaProxyHandler.PREFIX, new JavaProxyHandler(loader.javaProxies(), callPool));
         loader.setScriptProxyBase("http://127.0.0.1:" + boundPort + "/script-proxy");
         server.createContext("/script-proxy", new ScriptProxyHandler(loader, callPool));
         String danmakuBase = "http://127.0.0.1:" + boundPort + "/script-danmaku";
@@ -187,6 +190,26 @@ public class SpiderServer {
         }
     }
 
+    private class CatImportHandler implements HttpHandler {
+        @Override public void handle(HttpExchange exchange) throws IOException {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJsonResponse(exchange, 405, "{\"code\":-1,\"error\":\"Method Not Allowed\"}");
+                return;
+            }
+            if (exchange.getRequestHeaders().getFirst("Origin") != null) {
+                sendJsonResponse(exchange, 403, "{\"code\":-1,\"error\":\"Cross-origin import denied\"}");
+                return;
+            }
+            Map<String,Object> input = JsonCodec.parseObject(readBody(exchange));
+            String url = CatNodeRuntime.text(input.get("url"));
+            String md5 = CatNodeRuntime.text(input.get("md5"));
+            String result = runWithWatchdog(exchange, "cat-import", rpcTagOf("cat-import", null), 150_000,
+                    () -> CatNodeRuntime.importConfig(url, md5,
+                            new java.io.File(android.content.Context.get().getFilesDir(), "catnode")));
+            if (result != null) sendJsonResponse(exchange, 200, "{\"code\":0,\"data\":" + result + "}");
+        }
+    }
+
     /**
      * 换配置时由客户端调用：释放旧配置的全部 spider、类加载器、代理端口与密码服务子进程。
      * 不重置的话这些只增不减（元空间、python 子进程、9978-10000 端口池都会被耗尽）。
@@ -203,6 +226,7 @@ public class SpiderServer {
                 cancelAllWorkers();
                 return loader.clear();
             });
+            com.fongmi.companion.ui.UiBridge.get().reset();
             com.fongmi.companion.hardshell.PayloadCryptoService.reset();
             com.fongmi.companion.guard.GuardCryptoService.reset();
             System.out.println("[SpiderServer] 配置已切换，释放 spider " + released + " 个");
@@ -327,14 +351,16 @@ public class SpiderServer {
             long timeoutMs = resolveTimeoutMs(map);
             final String callTag = method + "@" + siteKey;
             long dbg = DebugLog.rpcEnabled() ? DebugLog.nextId() : 0;
-            DebugLog.rpcStart(dbg, method, siteKey, api, ext, jar, map);
+            if (!"action".equals(method)) DebugLog.rpcStart(dbg, method, siteKey, api, ext, jar, map);
             long dialogsBefore = com.fongmi.companion.ui.UiBridge.shownCount();
             String result = runWithWatchdog(exchange, callTag, rpcTagOf(callTag, map.get("rpcId")), timeoutMs,
                     () -> invokeSpiderCall(siteKey, api, ext, jar, method, map, callTag));
             if (result == null) {
                 return;
             }
-            DebugLog.rpcResult(dbg, method, result);
+            // Action forms, GM page metadata and player capabilities are not debug-log payloads.
+            if (!"action".equals(method)) DebugLog.rpcResult(dbg, method, result,
+                    "csp_GM".equals(api) || "GM".equals(api));
 
             // 空结果不等于成功：detail/player 必须返回内容，空串代表源方没有下发
             // （典型：上游 panonline=false，网盘在线模式被关掉）。以前包装成 code:0 + data:""，
@@ -490,6 +516,12 @@ public class SpiderServer {
             ParseStage.Failure failure = worker instanceof SpiderWorkerFailure
                     ? ((SpiderWorkerFailure) worker).failure : null;
             Throwable cause = worker instanceof SpiderWorkerFailure ? worker.getCause() : worker;
+            BrowserChallenge challenge = BrowserChallenge.find(cause);
+            if (challenge != null) {
+                sendJsonResponse(exchange, 428, JsonCodec.stringify(Map.of("code", -1, "stage", "browser",
+                        "error", "站点需要网页验证，请完成验证后重试", "browserChallenge", challenge.descriptor())));
+                return null;
+            }
             cause.printStackTrace();
             DebugLog.line("RPC", "error " + tag + ": " + cause);
             // 响应分三层：error=面向用户的人话；stage=内部阶段；detail=技术细节（只在日志/探针用）
@@ -611,6 +643,12 @@ public class SpiderServer {
         ParseStage.clearFailure();
         String result;
         switch (method) {
+            case "browserVerification": {
+                if (!(spider instanceof GmSpider gm)) throw new IllegalArgumentException("Browser verification is unavailable for this source");
+                result = JsonCodec.stringify(gm.browserVerification(map.getOrDefault("challengeId", ""),
+                        map.getOrDefault("operation", ""), map.getOrDefault("proxy", "")));
+                break;
+            }
             case "homeContent": {
                 boolean filter = Boolean.parseBoolean(map.getOrDefault("filter", "true"));
                 result = spider.homeContent(filter);
@@ -629,7 +667,8 @@ public class SpiderServer {
             }
             case "detailContent": {
                 String id = map.getOrDefault("id", "");
-                List<String> ids = Collections.singletonList(id);
+                // Payloads such as AListSh normalize IDs in place; each call owns its list.
+                List<String> ids = new ArrayList<>(Collections.singletonList(id));
                 result = spider.detailContent(ids);
                 break;
             }
@@ -660,6 +699,11 @@ public class SpiderServer {
                 result = "{}";
                 break;
         }
+        if (isPendingCatalog(method, result)) {
+            String detail = "站点组件尚未就绪，请稍后重试";
+            ParseStage.fail(ParseStage.INIT, detail);
+            throw new IllegalStateException(detail);
+        }
         // invariant: an upstream error page swallowed by the payload must not become a valid empty listing.
         ParseStage.Failure upstream = ParseStage.current();
         if (upstream != null && ParseStage.UPSTREAM.equals(upstream.stage) && isEmptyListing(method, result)) {
@@ -677,6 +721,20 @@ public class SpiderServer {
         return result != null
                 ? GuardProxyServer.rewriteLocalProxyUrls(result, spider.getClass().getClassLoader())
                 : "";
+    }
+
+    private static boolean isPendingCatalog(String method, String result) {
+        if (!"homeContent".equals(method) && !"homeVideoContent".equals(method)
+                && !"categoryContent".equals(method) && !"searchContent".equals(method)) return false;
+        if (result == null || result.isBlank()) return false;
+        try {
+            org.json.JSONArray list = new org.json.JSONObject(result).optJSONArray("list");
+            if (list == null || list.length() != 1) return false;
+            org.json.JSONObject item = list.optJSONObject(0);
+            return item != null && "__host_pending__".equals(item.optString("vod_id"));
+        } catch (org.json.JSONException ignored) {
+            return false;
+        }
     }
 
     private static boolean isEmptyListing(String method, String result) {

@@ -36,6 +36,15 @@ public class Process {
         return 10000;
     }
 
+    /** 载荷按当前 JVM 位数选择原生库；不能用操作系统位数代替进程位数。 */
+    public static boolean is64Bit() {
+        String model = System.getProperty("sun.arch.data.model");
+        if ("64".equals(model)) return true;
+        if ("32".equals(model)) return false;
+        String architecture = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT);
+        return architecture.contains("64") || architecture.equals("s390x") || architecture.equals("sparcv9");
+    }
+
     public static void setThreadPriority(int priority) {
     }
 

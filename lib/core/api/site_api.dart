@@ -130,9 +130,8 @@ class SiteApi {
           _writePrewarmLog(why);
         } else {
           startFailed = false;
-          // 加固源首载 10~20 秒很常见，给足 90 秒；超时只当「还没好」，不算失败。
-          anyOk = await companionSpiderApi.loadSpider(site,
-              receiveTimeout: const Duration(seconds: 90));
+          // 使用对齐的初始化预算：服务端 90 秒，客户端 105 秒，超时仍按未完成处理。
+          anyOk = await companionSpiderApi.loadSpider(site);
           if (!anyOk) {
             ErrorLog.instance.record('预热',
                 '加载未完成（site=${site.key}, api=${site.api}, jar=${site.jar}）');
@@ -223,7 +222,9 @@ class SiteApi {
         return companionSpiderApi.fetchHome(site, filter: filter);
       }
     }
-    return _cmsFallback(site, () => cmsApi.fetchHome(site.api, site: site));
+    return _cmsFallback(site, () => site.type == 4
+        ? cmsApi.fetchType4Home(site, filter: filter)
+        : cmsApi.fetchHome(site.api, site: site));
   }
 
   /// 爬虫类站源在伴随服务没就绪时会退到 CMS 通道（个别站的 ext 里带 HTTP 端点，CMS 能直连）。
@@ -297,8 +298,11 @@ class SiteApi {
         );
       }
     }
-    return _cmsFallback(site, () => cmsApi.search(site.api, keyword, page: page, site: site,
-        cancelToken: cancelToken));
+    return _cmsFallback(site, () => site.type == 4
+        ? cmsApi.searchType4(site, keyword, page: page, quick: quick,
+            cancelToken: cancelToken)
+        : cmsApi.search(site.api, keyword, page: page, site: site,
+            cancelToken: cancelToken));
   }
 
   /// parse=1 时判断地址本身是否已是媒体直链：
@@ -325,14 +329,27 @@ class SiteApi {
     List<Parse> parses = const [],
     String? preferredQualityName,
   }) async {
-    if (site == null || !site.usesCompanion) {
+    if (site == null || (site.type != 4 && !site.usesCompanion)) {
+      final prefix = site?.playUrl?.trim() ?? '';
+      if (prefix.startsWith('json:')) {
+        final resolved = await parseEngine.parseSiteJson(prefix, id, requestHeaders: site?.header);
+        return MediaPlaySpec(
+          url: resolved.url,
+          headers: _mergePlaybackHeaders([site?.header, resolved.headers]),
+        );
+      }
       final resolved = await parseEngine.parse(id, flag: flag, parses: parses);
       return MediaPlaySpec(url: resolved.url, headers: resolved.headers ?? site?.header);
     }
-    if (!await _ensureCompanionReady(site)) {
-      throw const FormatException('Companion 服务不可用');
+    final SpiderPlayResult result;
+    if (site.type == 4) {
+      result = await cmsApi.fetchPlayResult(site, flag: flag, id: id);
+    } else {
+      if (!await _ensureCompanionReady(site)) {
+        throw const FormatException('Companion 服务不可用');
+      }
+      result = await companionSpiderApi.fetchPlayResult(site, flag: flag, id: id);
     }
-    final result = await companionSpiderApi.fetchPlayResult(site, flag: flag, id: id);
     final hasQualities = result.qualities.length > 1;
     final sourceQualities = hasQualities
         ? result.qualities
@@ -445,6 +462,9 @@ class SiteApi {
 
   /// 仅获取地址的兼容入口，不用于应用选集播放。
   Future<String> fetchPlayUrl(Site site, {required String flag, required String id}) async {
+    if (site.type == 4) {
+      return (await cmsApi.fetchPlayResult(site, flag: flag, id: id)).url;
+    }
     if (!site.usesCompanion) return id;
     if (!await _ensureCompanionReady(site)) {
       throw const FormatException('Companion 服务不可用');

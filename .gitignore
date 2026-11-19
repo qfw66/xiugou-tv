@@ -168,9 +168,7 @@ $RECYCLE.BIN/
 # ---- 公开发布排除（第三方内容 / 二进制 / 内部记录，2026-10-19）----
 /docs/
 /PROGRESS.md
-/CONTRIBUTING.md
 /SECURITY.md
-/THIRD_PARTY_LICENSES.md
 /test/repro/
 /test/samples/
 /test/_probe_*.txt
@@ -178,6 +176,10 @@ $RECYCLE.BIN/
 # /companion/lib-unidbg/  —— 构建期依赖，随仓库发布（见 companion/deps.manifest.json）
 # /companion/pyruntime/  —— 便携 CPython + wheel，体积大且可由 scripts 重新生成，不进仓库
 /companion/pyruntime/
+# Windows 完整包自带两种解释器，源码保留 Node 版本摘要、许可和 PHP 恢复脚本。
+/companion/noderuntime/node.exe
+/companion/phpruntime/
+!/tools/update-mirrors-worker/README.md
 /xiugou-tv-backup-*.json
 # /companion/libs/      —— 同上
 # /test/lib/*.jar        —— test/ 已不在仓库内
@@ -186,6 +188,7 @@ $RECYCLE.BIN/
 /scripts/measure_memory_idle.ps1
 /companion/test_service.ps1
 /test/
+/android-bridge/test/
 /web/
 /scripts/tests/
 /scripts/js_bridge_regression.py

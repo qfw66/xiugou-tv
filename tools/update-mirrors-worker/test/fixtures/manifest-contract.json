@@ -1,0 +1,343 @@
+[
+  {
+    "name": "seed",
+    "workerStatus": 200,
+    "document": {
+      "version": 1,
+      "revision": 9,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "down-mxw-xx-kg",
+          "label": "down.mxw.xx.kg",
+          "prefix": "https://down.mxw.xx.kg/",
+          "proxiesApi": false
+        },
+        {
+          "id": "gh-proxy-com",
+          "label": "gh-proxy.com",
+          "prefix": "https://gh-proxy.com/",
+          "proxiesApi": true
+        },
+        {
+          "id": "tvv-tw",
+          "label": "tvv.tw",
+          "prefix": "https://tvv.tw/",
+          "proxiesApi": false
+        },
+        {
+          "id": "fastgit-cc",
+          "label": "fastgit.cc",
+          "prefix": "https://fastgit.cc/",
+          "proxiesApi": false
+        },
+        {
+          "id": "ghproxy-imciel-com",
+          "label": "ghproxy.imciel.com",
+          "prefix": "https://ghproxy.imciel.com/",
+          "proxiesApi": false
+        },
+        {
+          "id": "ghproxy-felicity-land",
+          "label": "ghproxy.felicity.land",
+          "prefix": "https://ghproxy.felicity.land/",
+          "proxiesApi": false
+        },
+        {
+          "id": "gg-z321-cc-cd",
+          "label": "gg.z321.cc.cd",
+          "prefix": "https://gg.z321.cc.cd/",
+          "proxiesApi": false
+        },
+        {
+          "id": "xsadwsd-kdns-fr",
+          "label": "xsadwsd.kdns.fr",
+          "prefix": "https://xsadwsd.kdns.fr/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "empty",
+    "workerStatus": 200,
+    "document": {
+      "version": 1,
+      "revision": 1,
+      "ttlSeconds": 3600,
+      "mirrors": []
+    }
+  },
+  {
+    "name": "unicode-label-uppercase-prefix",
+    "workerStatus": 200,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬🎬",
+          "prefix": "HTTPS://Mirror.Example.COM:443/path/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-prefix-0",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "Example",
+          "prefix": "https://127.0.0.1/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-prefix-1",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "Example",
+          "prefix": "https://x.local/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-prefix-2",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "Example",
+          "prefix": "https://x.localdomain/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-prefix-3",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "Example",
+          "prefix": "https://x.home.arpa/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-prefix-4",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "Example",
+          "prefix": "https://x.123/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-prefix-5",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "Example",
+          "prefix": "https://user@mirror.example.com/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-prefix-6",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "Example",
+          "prefix": "https://mirror.example.com/%2e%2e/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-prefix-7",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "Example",
+          "prefix": "https://mirror.example.com/../",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-prefix-8",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "Example",
+          "prefix": "https://mirror.example.com/中文/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-prefix-9",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "Example",
+          "prefix": "https://mirror.example.com/?q=1",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-label-0",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": " ",
+          "prefix": "https://mirror.example.com/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-label-1",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "a\u0000b",
+          "prefix": "https://mirror.example.com/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-label-2",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "ab",
+          "prefix": "https://mirror.example.com/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-label-3",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "a​b",
+          "prefix": "https://mirror.example.com/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "unsafe-label-4",
+    "workerStatus": 503,
+    "document": {
+      "version": 1,
+      "revision": 2,
+      "ttlSeconds": 3600,
+      "mirrors": [
+        {
+          "id": "example",
+          "label": "a‮b",
+          "prefix": "https://mirror.example.com/",
+          "proxiesApi": false
+        }
+      ]
+    }
+  }
+]

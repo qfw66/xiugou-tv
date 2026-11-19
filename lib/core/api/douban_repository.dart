@@ -28,6 +28,8 @@ const List<DoubanCategory> doubanCategories = <DoubanCategory>[
   DoubanCategory(id: 'movie_top250', name: 'Top250'),
 ];
 
+const String doubanCinemaMovieCollection = 'movie_showing';
+
 /// 豆瓣条目。
 ///
 /// 只承担「导航」：点卡片不会取豆瓣详情，而是拿 [title] 去已启用站源里搜索
@@ -181,11 +183,16 @@ class DoubanRepository {
       <String, Future<DoubanPage>>{};
 
   /// subject id → 剧照地址（null 表示确认没有横图，避免反复重试）；按 [_maxStills] 淘汰。
-  final Map<String, _StillEntry> _stills = <String, _StillEntry>{};
+  final Map<String, _OptionalEntry> _stills = <String, _OptionalEntry>{};
   static const int _maxStills = 128;
 
   /// 同一部片的剧照请求只发一次（hero 轮播会反复问同一批 id）。
   final Map<String, Future<String?>> _stillInflight =
+      <String, Future<String?>>{};
+
+  /// subject id → 剧情简介（null 表示确认没有）；与剧照同上限、同时长。
+  final Map<String, _OptionalEntry> _intros = <String, _OptionalEntry>{};
+  final Map<String, Future<String?>> _introInflight =
       <String, Future<String?>>{};
 
   DoubanRepository({
@@ -233,6 +240,7 @@ class DoubanRepository {
   void clearCache() {
     _cache.clear();
     _stills.clear();
+    _intros.clear();
   }
 
   /// 取一部片的**横版剧照**（16:9）；拉不到返回 null，由调用方回落竖版海报。
@@ -248,7 +256,7 @@ class DoubanRepository {
     if (id.isEmpty) return Future<String?>.value(null);
     final cached = _stills[id];
     if (!forceRefresh && cached != null && !cached.isExpired) {
-      return Future<String?>.value(cached.url);
+      return Future<String?>.value(cached.value);
     }
     final pending = _stillInflight[id];
     if (pending != null) return pending;
@@ -265,14 +273,67 @@ class DoubanRepository {
         final body = await _httpGet(uri);
         final url = pickLandscapeStill(body);
         // 解析成功就落缓存（含 null），免得每次都重打接口。
-        _stills.putBounded(
-            id, _StillEntry(url, DateTime.now().add(stillCacheTtl)), _maxStills);
+        _stills.putBounded(id,
+            _OptionalEntry(url, DateTime.now().add(stillCacheTtl)), _maxStills);
         return url;
       } catch (_) {
         // 该 id 不属于这个类型 / 重定向没被跟随：换下一条路径再试
       }
     }
     return null; // 全失败不缓存，下次进首页再试
+  }
+
+  /// 取一部片的剧情简介（巨幅位用）：豆瓣合集接口不带简介，要问 subject 详情。
+  ///
+  /// 与 [stillUrlFor] 同口径：先 `/movie/`（剧集会 301 到 `/tv/`），不通再退 `/tv/`；
+  /// 解析成功即缓存（含「确认没有」的 null），并发单飞；全失败不缓存。
+  Future<String?> introFor(String id) {
+    if (id.isEmpty) return Future<String?>.value(null);
+    final cached = _intros[id];
+    if (cached != null && !cached.isExpired) {
+      return Future<String?>.value(cached.value);
+    }
+    final pending = _introInflight[id];
+    if (pending != null) return pending;
+    final future = _fetchIntro(id);
+    _introInflight[id] = future;
+    return future.whenComplete(() => _introInflight.remove(id));
+  }
+
+  Future<String?> _fetchIntro(String id) async {
+    for (final kind in const <String>['movie', 'tv']) {
+      try {
+        final body = await _httpGet(Uri.parse('$subjectBase/$kind/$id'));
+        final subject = jsonDecode(body);
+        if (subject is! Map || subject['id'] == null) {
+          throw const FormatException('豆瓣详情响应缺少 subject id');
+        }
+        final intro = pickIntro(body);
+        _intros.putBounded(
+            id,
+            _OptionalEntry(intro, DateTime.now().add(stillCacheTtl)),
+            _maxStills);
+        return intro;
+      } catch (_) {
+        // 该 id 不属于这个类型：换下一条路径再试
+      }
+    }
+    return null;
+  }
+
+  /// 从 subject 详情里取 `intro`：段落换行与全角缩进压成单个空格（巨幅位只排两三行）。
+  static String? pickIntro(String body) {
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(body);
+    } on FormatException {
+      return null;
+    }
+    if (decoded is! Map) return null;
+    final intro = decoded['intro'];
+    if (intro is! String) return null;
+    final text = intro.replaceAll(RegExp(r'[\s\u3000]+'), ' ').trim();
+    return text.isEmpty ? null : text;
   }
 
   /// 从 `photos` 响应里挑一张横图：宽 > 高，取宽度最大者；没有则返回 null。
@@ -454,12 +515,12 @@ class DoubanRepository {
   }
 }
 
-/// 剧照缓存条目：`url == null` 也缓存，表示「确认这部剧没有横图」。
-class _StillEntry {
-  final String? url;
+/// 剧照 / 简介缓存条目：`value == null` 也缓存，表示「确认没有」（横图 / 简介）。
+class _OptionalEntry {
+  final String? value;
   final DateTime expiresAt;
 
-  const _StillEntry(this.url, this.expiresAt);
+  const _OptionalEntry(this.value, this.expiresAt);
 
   bool get isExpired => DateTime.now().isAfter(expiresAt);
 }

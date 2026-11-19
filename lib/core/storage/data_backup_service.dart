@@ -9,6 +9,8 @@ import '../config/windows_config_storage.dart';
 import '../live/live_direct_mode_memory.dart';
 import '../live/live_source_history.dart';
 import '../player/models/player_settings.dart';
+import '../settings/models/config_source_catalog.dart';
+import '../settings/models/source_categories.dart';
 import '../settings/models/history_preferences.dart';
 import '../settings/models/network_preferences.dart';
 import '../settings/models/play_skip_preferences.dart';
@@ -463,6 +465,7 @@ class DataBackupService {
               (active != null && active is! String)) {
             throw const FormatException('直播源历史格式无效');
           }
+          SourceCategories.fromJson(history['categories']);
           break;
         case 'live_direct_modes.json':
           final hosts = _map(content, name)['hosts'];
@@ -473,7 +476,15 @@ class DataBackupService {
           }
           break;
         case 'config_sources.json':
-          _validateList(content, name, maxItems: 500);
+          final raw = jsonDecode(content);
+          if (raw is List) {
+            _validateList(content, name, maxItems: 500);
+          } else {
+            final catalog = ConfigSourceCatalog.fromJson(raw);
+            if (catalog.entries.length > 500) {
+              throw const FormatException('配置源历史条目过多');
+            }
+          }
           break;
         case 'current_config.json':
           final map = _map(content, name);

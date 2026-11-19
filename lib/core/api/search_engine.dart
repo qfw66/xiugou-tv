@@ -68,7 +68,7 @@ class SearchEngine {
 
   /// 可检索站源：`searchable != 0` 且 api 非空（与 [searchAll] 同一判据）
   List<Site> _searchableSites(List<Site> sites) =>
-      sites.where((s) => s.searchable != 0 && s.api.isNotEmpty).toList();
+      sites.where(supportsSearch).toList();
 
   /// 逐站增量检索：**任一站点完成即发一批**，不等待最慢站点。
   ///
@@ -210,8 +210,7 @@ class SearchEngine {
   ///
   /// 具体能否返回结果由 [SiteApi] 在运行时决定；此处不做端点预判，避免把
   /// 走 Companion 的 Spider 站源误判为不可搜索。
-  bool supportsSearch(Site site) =>
-      site.searchable != 0 && site.api.isNotEmpty;
+  bool supportsSearch(Site site) => site.supportsSearch;
 
   /// 仅检索单个站源（聚合关闭时使用）
   Future<List<VodItem>> searchSite(Site site, String keyword,

@@ -21,8 +21,16 @@ class SiteSelectorDialog extends StatefulWidget {
 }
 
 class _SiteSelectorDialogState extends State<SiteSelectorDialog> {
+  static const _gridDelegate = SliverGridDelegateWithFixedCrossAxisCount(
+    crossAxisCount: 3,
+    childAspectRatio: 2.5,
+    crossAxisSpacing: 12,
+    mainAxisSpacing: 12,
+  );
+  final _scrollController = ScrollController(keepScrollOffset: false);
   late final TextEditingController _searchController;
   String _filterKeyword = '';
+  bool _needsScrollToSelection = true;
 
   @override
   void initState() {
@@ -33,7 +41,38 @@ class _SiteSelectorDialogState extends State<SiteSelectorDialog> {
   @override
   void dispose() {
     _searchController.dispose();
+    _scrollController.dispose();
     super.dispose();
+  }
+
+  void _updateFilter(String value) {
+    setState(() {
+      _filterKeyword = value.trim();
+      _needsScrollToSelection = true;
+    });
+  }
+
+  void _revealCurrentSite(List<Site> sites, double width) {
+    if (!_needsScrollToSelection) return;
+    _needsScrollToSelection = false;
+    final index = sites.indexWhere((site) => site.key == widget.currentSite?.key);
+    final tileWidth = (width -
+            _gridDelegate.crossAxisSpacing * (_gridDelegate.crossAxisCount - 1)) /
+        _gridDelegate.crossAxisCount;
+    final rowExtent =
+        tileWidth / _gridDelegate.childAspectRatio + _gridDelegate.mainAxisSpacing;
+    final offset = index < 0 ? 0.0 : (index ~/ _gridDelegate.crossAxisCount) * rowExtent;
+
+    // 远处卡片尚未构建，按实际列宽计算行位置，布局后再限制到底部边界。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final position = _scrollController.position;
+      if (!position.hasContentDimensions) return;
+      final target = offset
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble();
+      if (position.pixels != target) _scrollController.jumpTo(target);
+    });
   }
 
   @override
@@ -103,7 +142,7 @@ class _SiteSelectorDialogState extends State<SiteSelectorDialog> {
             TextField(
               controller: _searchController,
               style: TextStyle(fontSize: AppType.label, color: palette.textMain),
-              onChanged: (val) => setState(() => _filterKeyword = val.trim()),
+              onChanged: _updateFilter,
               decoration: InputDecoration(
                 hintText: '搜索站源名称或关键字...',
                 hintStyle: TextStyle(fontSize: AppType.label, color: palette.textDim),
@@ -111,11 +150,12 @@ class _SiteSelectorDialogState extends State<SiteSelectorDialog> {
                     size: 20, color: palette.textSub),
                 suffixIcon: _filterKeyword.isNotEmpty
                     ? IconButton(
+                        tooltip: '清空搜索',
                         icon: Icon(Icons.clear_rounded,
                             size: 18, color: palette.textSub),
                         onPressed: () {
                           _searchController.clear();
-                          setState(() => _filterKeyword = '');
+                          _updateFilter('');
                         },
                       )
                     : null,
@@ -148,24 +188,24 @@ class _SiteSelectorDialogState extends State<SiteSelectorDialog> {
                         style: TextStyle(color: palette.textDim, fontSize: AppType.title),
                       ),
                     )
-                  : GridView.builder(
-                      gridDelegate:
-                          const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 3,
-                        childAspectRatio: 2.5,
-                        crossAxisSpacing: 12,
-                        mainAxisSpacing: 12,
-                      ),
-                      itemCount: filteredSites.length,
-                      itemBuilder: (context, index) {
-                        final site = filteredSites[index];
-                        final isSelected = site.key == widget.currentSite?.key;
-                        return _SiteCard(
-                          site: site,
-                          isSelected: isSelected,
-                          onTap: () {
-                            Navigator.of(context).pop();
-                            widget.onSiteSelected(site);
+                  : LayoutBuilder(
+                      builder: (context, constraints) {
+                        _revealCurrentSite(filteredSites, constraints.maxWidth);
+                        return GridView.builder(
+                          controller: _scrollController,
+                          gridDelegate: _gridDelegate,
+                          itemCount: filteredSites.length,
+                          itemBuilder: (context, index) {
+                            final site = filteredSites[index];
+                            final isSelected = site.key == widget.currentSite?.key;
+                            return _SiteCard(
+                              site: site,
+                              isSelected: isSelected,
+                              onTap: () {
+                                Navigator.of(context).pop();
+                                widget.onSiteSelected(site);
+                              },
+                            );
                           },
                         );
                       },
@@ -247,8 +287,8 @@ class _SiteCardState extends State<_SiteCard> {
             children: [
               Icon(
                 isSelected
-                    ? Icons.radio_button_checked
-                    : Icons.radio_button_unchecked,
+                    ? Icons.radio_button_checked_rounded
+                    : Icons.radio_button_unchecked_rounded,
                 size: 16,
                 color: isSelected ? palette.accentInk : palette.textDim,
               ),

@@ -52,7 +52,9 @@ class PosterSource {
         final decoded = jsonDecode(json);
         if (decoded is Map) {
           decoded.forEach((k, v) {
-            if (k != null && v != null) headers[_fixHeader(k.toString())] = v.toString().trim();
+            if (k != null && v != null) {
+              headers[_fixHeader(k.toString())] = v.toString().trim();
+            }
           });
         }
       } catch (_) {
@@ -74,7 +76,9 @@ class PosterSource {
   /// `ua` / 任意大小写的 user-agent 统一成 `User-Agent`（对齐 FongMi `UrlUtil.fixHeader`）。
   static String _fixHeader(String key) {
     final k = key.trim();
-    if (k.toLowerCase() == 'ua' || k.toLowerCase() == 'user-agent') return 'User-Agent';
+    if (k.toLowerCase() == 'ua' || k.toLowerCase() == 'user-agent') {
+      return 'User-Agent';
+    }
     if (k.toLowerCase() == 'referer') return 'Referer';
     if (k.toLowerCase() == 'cookie') return 'Cookie';
     return k;
@@ -112,6 +116,12 @@ ImageProvider? posterImageProvider(String pic, {int? targetWidth}) {
   if (pic.trim().isEmpty) return null;
   final source = PosterSource.parse(pic);
   if (source.url.isEmpty) return null;
+  if (source.url.toLowerCase().startsWith('data:')) {
+    final bytes = _inlinePosterBytes(source.url);
+    if (bytes == null) return null;
+    final image = MemoryImage(bytes);
+    return targetWidth == null ? image : ResizeImage(image, width: targetWidth);
+  }
   if (DoubanRepository.isDoubanPoster(source.url)) {
     return DoubanPosterImage(source.url, targetWidth: targetWidth);
   }
@@ -119,7 +129,44 @@ ImageProvider? posterImageProvider(String pic, {int? targetWidth}) {
     return SitePosterImage(source, targetWidth: targetWidth);
   }
   final network = NetworkImage(source.url);
-  return targetWidth == null ? network : ResizeImage(network, width: targetWidth);
+  return targetWidth == null
+      ? network
+      : ResizeImage(network, width: targetWidth);
+}
+
+final _inlinePosters = <String, Uint8List>{};
+int _inlinePosterSize = 0;
+
+Uint8List? _inlinePosterBytes(String uri) {
+  if (uri.length > 8 * 1024 * 1024) return null;
+  final cached = _inlinePosters.remove(uri);
+  if (cached != null) {
+    _inlinePosters[uri] = cached;
+    return cached;
+  }
+  final comma = uri.indexOf(',');
+  if (comma < 0 ||
+      !RegExp(r'^data:image/[a-z0-9.+-]+(?:;[^,;]+)*;base64$',
+              caseSensitive: false)
+          .hasMatch(uri.substring(0, comma))) {
+    return null;
+  }
+  try {
+    final bytes =
+        base64Decode(uri.substring(comma + 1).replaceAll(RegExp(r'\s'), ''));
+    if (bytes.isEmpty || bytes.length > 6 * 1024 * 1024) return null;
+    while (_inlinePosters.isNotEmpty &&
+        (_inlinePosters.length >= 32 ||
+            _inlinePosterSize + bytes.length > 16 * 1024 * 1024)) {
+      _inlinePosterSize -=
+          _inlinePosters.remove(_inlinePosters.keys.first)!.length;
+    }
+    _inlinePosters[uri] = bytes;
+    _inlinePosterSize += bytes.length;
+    return bytes;
+  } on FormatException {
+    return null;
+  }
 }
 
 /// 带自定义请求头 / 回落地址的站源海报。
@@ -141,7 +188,8 @@ class SitePosterImage extends ImageProvider<SitePosterImage> {
       SynchronousFuture<SitePosterImage>(this);
 
   @override
-  ImageStreamCompleter loadImage(SitePosterImage key, ImageDecoderCallback decode) {
+  ImageStreamCompleter loadImage(
+      SitePosterImage key, ImageDecoderCallback decode) {
     final chunkEvents = StreamController<ImageChunkEvent>();
     return MultiFrameImageStreamCompleter(
       codec: _load(decode, chunkEvents),
@@ -163,8 +211,8 @@ class SitePosterImage extends ImageProvider<SitePosterImage> {
           ),
       ];
 
-  Future<ui.Codec> _load(
-      ImageDecoderCallback decode, StreamController<ImageChunkEvent> chunkEvents) async {
+  Future<ui.Codec> _load(ImageDecoderCallback decode,
+      StreamController<ImageChunkEvent> chunkEvents) async {
     try {
       Object? lastError;
       for (final attempt in attempts) {
@@ -188,7 +236,8 @@ class SitePosterImage extends ImageProvider<SitePosterImage> {
     if (target == null || target <= 0 || width <= target) {
       return ui.TargetImageSize(width: width, height: height);
     }
-    return ui.TargetImageSize(width: target, height: (height * target / width).round());
+    return ui.TargetImageSize(
+        width: target, height: (height * target / width).round());
   }
 
   static Future<Uint8List> _get(String url, Map<String, String> headers) async {
@@ -216,10 +265,15 @@ class SitePosterImage extends ImageProvider<SitePosterImage> {
       other.targetWidth == targetWidth;
 
   @override
-  int get hashCode => Object.hash(source.url, source.fallbackUrl,
-      Object.hashAllUnordered(source.headers.entries.map((e) => '${e.key}=${e.value}')), targetWidth);
+  int get hashCode => Object.hash(
+      source.url,
+      source.fallbackUrl,
+      Object.hashAllUnordered(
+          source.headers.entries.map((e) => '${e.key}=${e.value}')),
+      targetWidth);
 
   @override
-  String toString() => 'SitePosterImage("${source.url}", headers: ${source.headers.keys}, '
+  String toString() =>
+      'SitePosterImage("${source.url}", headers: ${source.headers.keys}, '
       'fallback: ${source.fallbackUrl}, targetWidth: $targetWidth)';
 }

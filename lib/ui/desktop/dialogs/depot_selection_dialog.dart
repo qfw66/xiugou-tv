@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../../../core/config/config_repository.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
+import 'escape_closable.dart';
 
 /// 多仓（Depot）订阅选择弹窗：列出仓库清单，返回用户选择的条目下标；取消返回 null
 class DepotSelectionDialog extends StatelessWidget {
@@ -12,7 +13,7 @@ class DepotSelectionDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
-    return Dialog(
+    return EscapeClosable(child: Dialog(
       backgroundColor: palette.panel,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadii.lg),
@@ -87,7 +88,7 @@ class DepotSelectionDialog extends StatelessWidget {
           ],
         ),
       ),
-    );
+    ));
   }
 }
 

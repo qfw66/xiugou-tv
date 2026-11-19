@@ -42,10 +42,12 @@ class AppearancePreferences {
 
   /// 主题模式；默认深色（与改造前一致）。
   final AppThemeMode themeMode;
+  final bool sidebarCollapsed;
 
   const AppearancePreferences({
     this.wallpaperFileName,
     this.themeMode = AppThemeMode.dark,
+    this.sidebarCollapsed = false,
   });
 
   /// 未设置壁纸（默认外观）。
@@ -57,11 +59,19 @@ class AppearancePreferences {
   AppearancePreferences withWallpaper(String? fileName) => AppearancePreferences(
         wallpaperFileName: fileName,
         themeMode: themeMode,
+        sidebarCollapsed: sidebarCollapsed,
       );
 
   AppearancePreferences withThemeMode(AppThemeMode mode) => AppearancePreferences(
         wallpaperFileName: wallpaperFileName,
         themeMode: mode,
+        sidebarCollapsed: sidebarCollapsed,
+      );
+
+  AppearancePreferences withSidebarCollapsed(bool value) => AppearancePreferences(
+        wallpaperFileName: wallpaperFileName,
+        themeMode: themeMode,
+        sidebarCollapsed: value,
       );
 
   static AppearancePreferences fromJson(Map<String, dynamic> json) {
@@ -83,19 +93,25 @@ class AppearancePreferences {
       themeMode = parsed;
     }
 
+    final rawCollapsed = json['sidebarCollapsed'];
+    if (rawCollapsed != null && rawCollapsed is! bool) {
+      throw const FormatException('外观偏好格式无效');
+    }
+    final sidebarCollapsed = rawCollapsed == true;
     final raw = json['wallpaperFileName'];
     if (raw == null) {
-      return AppearancePreferences(themeMode: themeMode);
+      return AppearancePreferences(themeMode: themeMode, sidebarCollapsed: sidebarCollapsed);
     }
     if (raw is! String) throw const FormatException('外观偏好格式无效');
     final name = raw.trim();
-    if (name.isEmpty) return AppearancePreferences(themeMode: themeMode);
+    if (name.isEmpty) return AppearancePreferences(themeMode: themeMode, sidebarCollapsed: sidebarCollapsed);
     if (!fileNamePattern.hasMatch(name)) {
       throw const FormatException('外观偏好格式无效');
     }
     return AppearancePreferences(
       wallpaperFileName: name,
       themeMode: themeMode,
+      sidebarCollapsed: sidebarCollapsed,
     );
   }
 
@@ -103,19 +119,20 @@ class AppearancePreferences {
         'version': formatVersion,
         'wallpaperFileName': wallpaperFileName,
         'themeMode': themeMode.name,
+        'sidebarCollapsed': sidebarCollapsed,
       };
 
   @override
   bool operator ==(Object other) =>
       other is AppearancePreferences &&
       other.wallpaperFileName == wallpaperFileName &&
-      other.themeMode == themeMode;
+      other.themeMode == themeMode && other.sidebarCollapsed == sidebarCollapsed;
 
   @override
-  int get hashCode => Object.hash(wallpaperFileName, themeMode);
+  int get hashCode => Object.hash(wallpaperFileName, themeMode, sidebarCollapsed);
 
   @override
   String toString() =>
       'AppearancePreferences(wallpaperFileName: $wallpaperFileName, '
-      'themeMode: ${themeMode.name})';
+      'themeMode: ${themeMode.name}, sidebarCollapsed: $sidebarCollapsed)';
 }

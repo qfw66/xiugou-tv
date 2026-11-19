@@ -17,9 +17,8 @@ import java.util.concurrent.TimeUnit;
  * <ul>
  *   <li>{@link #post(Runnable)} / {@link #postDelayed(Runnable, long)} 默认**同步**执行
  *       （保持既有行为，避免给载荷引入新的并发时序），但带重入保护；</li>
- *   <li>同一个 runnable 在自己内部再次投递自己时，改为异步执行 —— 否则直接爆栈：
- *       实测 wexguard 载荷的 {@code InitOrigin.post} 在 runnable 里再次 postDelayed 自己，
- *       纯同步实现下 100% {@code StackOverflowError}；</li>
+ *   <li>同一个 runnable 再次 post 自己，或任意回调内部 postDelayed 时，改为异步执行；
+ *       轮询任务可能每次创建新的包装对象，不能仅按 runnable 引用判断延迟重入；</li>
  *   <li>{@link #sendEmptyMessageDelayed(int, long)} 异步投递（消息不构成递归）。</li>
  * </ul>
  *
@@ -104,8 +103,8 @@ public class Handler {
     public boolean postDelayed(Runnable r, long delayMillis) {
         if (r == null) return false;
         Set<Runnable> running = RUNNING.get();
-        if (running.contains(r)) {
-            // 自我重投（实测 wexguard 的 InitOrigin.post 就是这种）：改异步，切断递归
+        if (!running.isEmpty()) {
+            // 回调中的延迟任务必须排队，即使轮询时每次创建了不同包装对象。
             scheduleRunnable(r, Math.max(1, delayMillis));
             return true;
         }

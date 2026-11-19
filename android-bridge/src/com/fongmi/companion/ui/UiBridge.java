@@ -53,9 +53,11 @@ public final class UiBridge extends DialogHost {
     /** 已经向宿主发出过 show 的弹窗。 */
     private final Set<Integer> announced = ConcurrentHashMap.newKeySet();
     private final Set<Integer> dirty = ConcurrentHashMap.newKeySet();
+    private volatile Thread uiThread;
     private final ScheduledExecutorService ui = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "android-ui");
         t.setDaemon(true);
+        uiThread = t;
         return t;
     });
     private volatile boolean flushScheduled;
@@ -76,6 +78,8 @@ public final class UiBridge extends DialogHost {
     public static UiBridge get() {
         return INSTANCE;
     }
+
+    public static boolean isUiThread() { return Thread.currentThread() == INSTANCE.uiThread; }
 
     /** 注册为载荷界面的宿主；可重复调用。 */
     public static void install() {
@@ -266,6 +270,7 @@ public final class UiBridge extends DialogHost {
         String type = String.valueOf(request.getOrDefault("type", ""));
         Object inputs = request.get("inputs");
         ui.execute(guard(() -> {
+            if (showing.get(dialogId) != dialog || !dialog.isShowing()) return;
             if (inputs instanceof Map) applyInputs(dialog, (Map<?, ?>) inputs);
             perform(dialog, type, request);
         }));
@@ -332,9 +337,11 @@ public final class UiBridge extends DialogHost {
 
     /** 关闭所有弹窗记录（服务停止时调用），不回调载荷。 */
     public void reset() {
+        com.github.catvod.utils.Dialog.closeAll();
         showing.clear();
         announced.clear();
         dirty.clear();
+        synchronized (lock) { events.clear(); }
     }
 
     /** 当前正在显示的弹窗标识（诊断 / 测试用）。 */

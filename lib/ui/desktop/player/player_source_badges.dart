@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../../core/settings/models/config_source_entry.dart';
+import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../widgets/focus_ring.dart';
 
@@ -191,7 +192,7 @@ class _PlayerConfigSourceBadgeState extends State<PlayerConfigSourceBadge> {
         height: 44,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 0),
         child: const _FooterRow(
-          icon: Icons.settings_outlined,
+          icon: Icons.settings_rounded,
           label: '管理配置源…',
         ),
       ),
@@ -386,8 +387,22 @@ class _SourceRow extends StatelessWidget {
       enabled: !option.current,
       label: '${option.name}，${option.subtitle}${option.current ? '，当前' : ''}',
       child: ExcludeSemantics(
-        child: Row(
-          children: [
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(
+            color: option.current
+                ? AppPalette.dark.selectionFill
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(AppRadii.sm),
+            border: Border.all(
+              color: option.current
+                  ? AppPalette.dark.selectionInk
+                  : Colors.transparent,
+              width: 2,
+            ),
+          ),
+          child: Row(
+            children: [
             Expanded(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -418,8 +433,8 @@ class _SourceRow extends StatelessWidget {
             ),
             if (option.current) ...[
               const SizedBox(width: 10),
-              const Icon(Icons.check_rounded,
-                  size: 16, color: Color(0xFFFFFFFF)),
+              Icon(Icons.check_rounded,
+                  size: 18, color: AppPalette.dark.selectionInk),
               const SizedBox(width: 4),
               const Text(
                 '当前',
@@ -431,6 +446,7 @@ class _SourceRow extends StatelessWidget {
               ),
             ],
           ],
+          ),
         ),
       ),
     );

@@ -330,7 +330,7 @@ class _ChannelRowState extends State<_ChannelRow> {
                     if (widget.onEpg != null)
                       TextButton.icon(
                         onPressed: widget.onEpg,
-                        icon: const Icon(Icons.event_note, size: 16),
+                        icon: const Icon(Icons.event_note_rounded, size: 16),
                         label: const Text('节目单',
                             style: TextStyle(fontSize: AppType.body)),
                         style: TextButton.styleFrom(
@@ -340,7 +340,7 @@ class _ChannelRowState extends State<_ChannelRow> {
                                 horizontal: 6, vertical: 6)),
                       ),
                     const SizedBox(width: 4),
-                    Icon(Icons.play_circle_outline,
+                    Icon(Icons.play_circle_outline_rounded,
                         size: 20, color: palette.accentInk),
                   ]),
                 ),

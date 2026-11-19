@@ -5,9 +5,10 @@ import '../../../core/diagnostics/error_log.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../widgets/app_message.dart';
+import '../dialogs/app_dialog.dart';
 
 /// 关于页「错误日志」查看器（应用内弹窗；只含本次打开期间的记录，关闭软件即清空）。
-Future<void> showErrorLogDialog(BuildContext context, ErrorLog log) => showDialog<void>(
+Future<void> showErrorLogDialog(BuildContext context, ErrorLog log) => showAppDialog<void>(
       context: context,
       builder: (ctx) => _ErrorLogDialog(log: log),
     );

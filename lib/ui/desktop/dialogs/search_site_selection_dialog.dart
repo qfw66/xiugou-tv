@@ -40,13 +40,16 @@ class _SearchSiteSelectionDialogState extends State<SearchSiteSelectionDialog> {
   @override
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
-    final sites = widget.sites.where((site) {
-      final query = _query.toLowerCase();
-      return query.isEmpty ||
-          site.name.toLowerCase().contains(query) ||
-          site.key.toLowerCase().contains(query);
-    }).toList(growable: false);
-    final allSelected = widget.sites.isNotEmpty &&
+    final sites = widget.sites
+        .where((site) {
+          final query = _query.toLowerCase();
+          return query.isEmpty ||
+              site.name.toLowerCase().contains(query) ||
+              site.key.toLowerCase().contains(query);
+        })
+        .toList(growable: false);
+    final allSelected =
+        widget.sites.isNotEmpty &&
         widget.sites.every((site) => _selected.contains(site.key));
 
     return AlertDialog(
@@ -61,34 +64,36 @@ class _SearchSiteSelectionDialogState extends State<SearchSiteSelectionDialog> {
               onChanged: (value) => setState(() => _query = value.trim()),
               decoration: const InputDecoration(
                 prefixIcon: Icon(Icons.search),
-                hintText: '搜索站点名称',
+                hintText: '搜索站点名称或 key',
               ),
             ),
             Row(
               children: [
-                Text(
-                  '${_selected.length}/${widget.sites.length} 个站点',
-                ),
+                Text('${_selected.length}/${widget.sites.length} 个站点'),
                 const Spacer(),
                 TextButton(
                   onPressed: widget.sites.isEmpty
                       ? null
                       : () => setState(() {
-                            if (allSelected) {
-                              _selected.clear();
-                            } else {
-                              _selected
-                                ..clear()
-                                ..addAll(widget.sites.map((site) => site.key));
-                            }
-                          }),
+                          if (allSelected) {
+                            _selected.clear();
+                          } else {
+                            _selected
+                              ..clear()
+                              ..addAll(widget.sites.map((site) => site.key));
+                          }
+                        }),
                   child: Text(allSelected ? '取消全选' : '全选'),
                 ),
               ],
             ),
             Expanded(
               child: sites.isEmpty
-                  ? const Center(child: Text('没有可搜索的站点'))
+                  ? Center(
+                      child: Text(
+                        widget.sites.isEmpty ? '没有可搜索的站点' : '没有匹配的站点',
+                      ),
+                    )
                   : ListView.builder(
                       itemCount: sites.length,
                       itemBuilder: (context, index) {

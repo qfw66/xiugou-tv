@@ -1,6 +1,7 @@
 import 'package:path/path.dart' as p;
 
 import '../config/models/vod_config.dart';
+import '../settings/models/source_categories.dart';
 
 /// 独立直播源的内容类型：频道清单（txt / m3u / m3u8）或完整配置 JSON（只取 lives）。
 enum LiveSourceKind { playlist, config }
@@ -12,6 +13,10 @@ enum LiveSourceKind { playlist, config }
 class LiveSourceEntry {
   final String location;
   final LiveSourceKind kind;
+  final String note;
+
+  /// 用户分类；空串表示未分类。
+  final String category;
   final int lastUsedAt;
   final int channelCount;
   final List<Live> lives;
@@ -20,6 +25,8 @@ class LiveSourceEntry {
     required this.location,
     required this.kind,
     required this.lastUsedAt,
+    this.note = '',
+    this.category = '',
     this.channelCount = 0,
     this.lives = const [],
   });
@@ -39,6 +46,8 @@ class LiveSourceEntry {
   }
 
   LiveSourceEntry copyWith({
+    String? note,
+    String? category,
     int? lastUsedAt,
     int? channelCount,
     List<Live>? lives,
@@ -46,6 +55,8 @@ class LiveSourceEntry {
       LiveSourceEntry(
         location: location,
         kind: kind,
+        note: note ?? this.note,
+        category: category ?? this.category,
         lastUsedAt: lastUsedAt ?? this.lastUsedAt,
         channelCount: channelCount ?? this.channelCount,
         lives: lives ?? this.lives,
@@ -65,6 +76,8 @@ class LiveSourceEntry {
     return LiveSourceEntry(
       location: location.trim(),
       kind: kind,
+      note: json['note']?.toString() ?? '',
+      category: json['category']?.toString() ?? '',
       lastUsedAt: json['lastUsedAt'] is int ? json['lastUsedAt'] as int : 0,
       channelCount:
           json['channelCount'] is int ? json['channelCount'] as int : 0,
@@ -80,6 +93,8 @@ class LiveSourceEntry {
   Map<String, dynamic> toJson() => {
         'location': location,
         'kind': kind.name,
+        if (note.isNotEmpty) 'note': note,
+        if (category.isNotEmpty) 'category': category,
         'lastUsedAt': lastUsedAt,
         'channelCount': channelCount,
         if (kind == LiveSourceKind.config)
@@ -96,8 +111,13 @@ class LiveSourceHistory {
 
   final String? active;
   final List<LiveSourceEntry> entries;
+  final List<String> categories;
 
-  const LiveSourceHistory({this.active, this.entries = const []});
+  /// 兼容旧记录里的分类；空目录项不会随最后一条源删除而消失。
+  List<String> get categoryNames => SourceCategories(categories)
+      .include(entries.map((entry) => entry.category)).names;
+
+  const LiveSourceHistory({this.active, this.entries = const [], this.categories = const []});
 
   LiveSourceEntry? get activeEntry {
     if (active == null) return null;
@@ -110,6 +130,7 @@ class LiveSourceHistory {
   /// 设为当前：同地址的旧记录被替换并移到最前，超出上限丢弃最旧的。
   LiveSourceHistory activate(LiveSourceEntry entry) => LiveSourceHistory(
         active: entry.location,
+        categories: categoryNames,
         entries: List.unmodifiable([
           entry,
           ...entries.where((item) => item.location != entry.location),
@@ -119,15 +140,17 @@ class LiveSourceHistory {
   /// 删除一条；删除的是当前项时回退主配置源（[active] 置空）。
   LiveSourceHistory remove(String location) => LiveSourceHistory(
         active: active == location ? null : active,
+        categories: categoryNames,
         entries: List.unmodifiable(
             entries.where((entry) => entry.location != location)),
       );
 
-  LiveSourceHistory deactivate() => LiveSourceHistory(entries: entries);
+  LiveSourceHistory deactivate() => LiveSourceHistory(entries: entries, categories: categoryNames);
 
   /// 只更新已有记录（刷新配置快照 / 频道数），不改变当前项与顺序。
   LiveSourceHistory replace(LiveSourceEntry entry) => LiveSourceHistory(
         active: active,
+        categories: categoryNames,
         entries: List.unmodifiable(entries.map((item) =>
             item.location == entry.location ? entry : item)),
       );
@@ -153,6 +176,7 @@ class LiveSourceHistory {
           ? active.trim()
           : null,
       entries: List.unmodifiable(entries),
+      categories: SourceCategories.fromJson(json['categories']).names,
     );
     // 指向已不存在的记录时按「跟随主配置源」处理。
     return history.activeEntry == null && history.active != null
@@ -162,6 +186,7 @@ class LiveSourceHistory {
 
   Map<String, dynamic> toJson() => {
         'active': active,
+        'categories': categoryNames,
         'entries': entries.map((entry) => entry.toJson()).toList(),
       };
 }

@@ -37,6 +37,9 @@ public final class HttpLogHook {
 
     private static final String TAG = "HTTP";
 
+    /** Internal request tag: suppress capability payloads without affecting transport or cancellation. */
+    public enum MetadataOnly { INSTANCE }
+
     private HttpLogHook() {
     }
 
@@ -63,11 +66,13 @@ public final class HttpLogHook {
         public Response intercept(Chain chain) throws IOException {
             Request request = HeaderOverride.apply(DoubanRewrite.apply(chain.request()));
             final boolean logging = DebugLog.httpEnabled();
+            final boolean metadataOnly = request.tag(MetadataOnly.class) != null;
             long id = logging ? DebugLog.nextId() : 0L;
             long started = System.nanoTime();
             if (logging) {
-                DebugLog.httpRequest(id, request.method(), request.url().toString(),
-                        headers(request), body(request));
+                DebugLog.httpRequest(id, request.method(),
+                        metadataOnly ? request.url().redact() : request.url().toString(),
+                        metadataOnly ? Map.of() : headers(request), metadataOnly ? null : body(request));
             }
 
             // 登记这次请求本体，让 /spider/cancel 与看门狗超时可以真的把它掐断。
@@ -86,14 +91,16 @@ public final class HttpLogHook {
                 if (logging) {
                     long cost = (System.nanoTime() - started) / 1_000_000L;
                     byte[] peek = new byte[0];
-                    try {
-                        ResponseBody peeked = response.peekBody(DebugLog.maxChars());
-                        if (peeked != null) peek = peeked.bytes();
-                    } catch (Throwable ignored) {
+                    if (!metadataOnly) {
+                        try {
+                            ResponseBody peeked = response.peekBody(DebugLog.maxChars());
+                            if (peeked != null) peek = peeked.bytes();
+                        } catch (Throwable ignored) {
+                        }
                     }
                     long length = response.body() == null ? -1 : response.body().contentLength();
                     DebugLog.httpResponse(id, response.code(), cost,
-                            response.header("Content-Type"), length, peek);
+                            metadataOnly ? null : response.header("Content-Type"), length, peek);
                 }
                 if (tracked && response.body() != null) {
                     // 注销推迟到响应体关闭：读响应体期间仍可被 /spider/cancel 与看门狗掐断
@@ -104,7 +111,7 @@ public final class HttpLogHook {
                 }
                 return response;
             } catch (Throwable t) {
-                if (logging) DebugLog.httpError(id, t);
+                if (logging) DebugLog.httpError(id, metadataOnly ? new IOException(t.getClass().getSimpleName()) : t);
                 throw t;
             } finally {
                 if (tracked && !handedOff) CallRegistry.unregister(tag, call);

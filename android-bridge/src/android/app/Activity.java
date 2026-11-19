@@ -1,7 +1,7 @@
 package android.app;
 
 import android.content.ComponentName;
-import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.Intent;
 import android.view.View;
 import android.view.Window;
@@ -13,8 +13,10 @@ import android.view.WindowManager;
  * <p>进程里只有一个常驻前台界面（{@link #foreground()}），对应 FongMi 的首页；
  * 载荷在它上面创建的弹窗由 {@link DialogHost} 交给宿主呈现。
  * UI 调用仍按「立即在调用线程执行」处理，与既有行为一致。
+ *
+ * <p>Activity 必须可赋值给 ContextWrapper：载荷的配置界面直接依赖这个 Android 类型契约。
  */
-public class Activity extends Context {
+public class Activity extends ContextWrapper implements android.view.KeyEvent.Callback {
 
     private static final Activity FOREGROUND = new Activity();
 
@@ -86,4 +88,16 @@ public class Activity extends Context {
     public android.window.OnBackInvokedDispatcher getOnBackInvokedDispatcher() {
         return window.getOnBackInvokedDispatcher();
     }
+
+    @Override
+    public boolean onKeyDown(int keyCode, android.view.KeyEvent event) { return false; }
+
+    @Override
+    public boolean onKeyLongPress(int keyCode, android.view.KeyEvent event) { return false; }
+
+    @Override
+    public boolean onKeyUp(int keyCode, android.view.KeyEvent event) { return false; }
+
+    @Override
+    public boolean onKeyMultiple(int keyCode, int count, android.view.KeyEvent event) { return false; }
 }

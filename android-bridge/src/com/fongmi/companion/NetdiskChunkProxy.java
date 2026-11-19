@@ -20,6 +20,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.regex.Pattern;
 
 /**
  * 网盘直链的分块并发代理：替代载荷 8096 多线程加速代理（ARM {@code libwexproxy.so}，Windows 起不来）。
@@ -51,6 +52,8 @@ public final class NetdiskChunkProxy implements HttpHandler {
     private static final int MAX_ENTRIES = 64;
     private static final int CONNECT_TIMEOUT_MS = 10_000;
     private static final int READ_TIMEOUT_MS = 20_000;
+    private static final Pattern CONTENT_RANGE =
+            Pattern.compile("bytes\\s+(\\d+)-(\\d+)/(\\d+|\\*)", Pattern.CASE_INSENSITIVE);
 
     private static volatile int localPort;
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -167,11 +170,41 @@ public final class NetdiskChunkProxy implements HttpHandler {
             exchange.sendResponseHeaders(range == null ? 200 : 206, -1);
             return;
         }
-        exchange.sendResponseHeaders(range == null ? 200 : 206, length);
         long t0 = System.currentTimeMillis();
         long[] sent = {0};
-        try (OutputStream body = exchange.getResponseBody()) {
+        boolean[] committed = {false};
+        try (OutputStream body = new OutputStream() {
+            private OutputStream delegate;
+
+            private OutputStream target() throws IOException {
+                if (delegate == null) {
+                    exchange.sendResponseHeaders(range == null ? 200 : 206, length);
+                    committed[0] = true;
+                    delegate = exchange.getResponseBody();
+                }
+                return delegate;
+            }
+
+            @Override public void write(int value) throws IOException { target().write(value); }
+            @Override public void write(byte[] data, int offset, int count) throws IOException {
+                target().write(data, offset, count);
+            }
+            @Override public void flush() throws IOException {
+                if (delegate != null) delegate.flush();
+            }
+            @Override public void close() throws IOException {
+                if (delegate != null) delegate.close();
+            }
+        }) {
+            // Commit success only after the first complete, verified block is available.
             stream(entry, start, end, body, sent);
+        } catch (IOException error) {
+            if (committed[0]) throw error;
+            out.remove("Content-Range");
+            out.remove("Accept-Ranges");
+            int code = error instanceof UpstreamStatus ? ((UpstreamStatus) error).code : 502;
+            int status = code >= 400 && code <= 599 ? code : 502;
+            sendText(exchange, status, "upstream range transfer failed");
         } finally {
             long ms = Math.max(1, System.currentTimeMillis() - t0);
             DebugLog.line("Netdisk", String.format("bytes=%d-%d 交付 %.1f MB / %d ms（%.2f MB/s）",
@@ -290,20 +323,46 @@ public final class NetdiskChunkProxy implements HttpHandler {
         private byte[] fetch() throws IOException {
             HttpURLConnection conn = open(entry, "bytes=" + from + "-" + to);
             connection = conn;
-            if (cancelled) conn.disconnect();
-            int code = conn.getResponseCode();
-            if (code != 206) {
-                drain(conn);
-                throw new UpstreamStatus(code);
-            }
-            int expected = (int) (to - from + 1);
-            try (InputStream in = conn.getInputStream()) {
-                byte[] data = in.readNBytes(expected);
-                if (data.length != expected) {
-                    throw new IOException("short chunk " + data.length + "/" + expected + " @" + from);
+            boolean complete = false;
+            try {
+                if (cancelled) throw new IOException("cancelled");
+                int code = conn.getResponseCode();
+                if (code != 206) throw new UpstreamStatus(code);
+                validateRange(conn.getHeaderField("Content-Range"));
+                int expected = (int) (to - from + 1);
+                long declaredLength = conn.getContentLengthLong();
+                if (declaredLength >= 0 && declaredLength != expected) {
+                    throw new IOException("chunk length mismatch @" + from + "-" + to);
                 }
-                return data;
+                try (InputStream in = conn.getInputStream()) {
+                    byte[] data = in.readNBytes(expected);
+                    if (data.length != expected) {
+                        throw new IOException("short chunk " + data.length + "/" + expected + " @" + from);
+                    }
+                    complete = true;
+                    return data;
+                }
+            } finally {
+                if (!complete) conn.disconnect();
+                connection = null;
             }
+        }
+
+        /** Equal byte counts do not establish that a CDN returned the requested interval. */
+        private void validateRange(String contentRange) throws IOException {
+            var match = CONTENT_RANGE.matcher(contentRange == null ? "" : contentRange.trim());
+            try {
+                if (match.matches()
+                        && Long.parseLong(match.group(1)) == from
+                        && Long.parseLong(match.group(2)) == to
+                        && ("*".equals(match.group(3))
+                            || Long.parseLong(match.group(3)) == entry.total)) {
+                    return;
+                }
+            } catch (NumberFormatException ignored) {
+                // Reject malformed or overflowing ranges through the same retry path.
+            }
+            throw new IOException("Content-Range mismatch @" + from + "-" + to);
         }
 
         byte[] await() throws IOException {

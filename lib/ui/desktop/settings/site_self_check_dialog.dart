@@ -10,6 +10,7 @@ import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../widgets/app_message.dart';
 import '../widgets/focus_ring.dart';
+import '../dialogs/escape_closable.dart';
 
 /// 站点体检弹窗：对当前配置里的 Spider 站点逐个探测，边跑边出结果。
 ///
@@ -156,7 +157,7 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
     final timeout = _entries.where((e) => e.isTimeout).length;
     final failed = _entries.length - ok - degraded - timeout;
 
-    return Dialog(
+    return EscapeClosable(child: Dialog(
       backgroundColor: context.palette.panel,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadii.lg),
@@ -178,7 +179,7 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
                       color: context.palette.accentWash,
                       borderRadius: BorderRadius.circular(AppRadii.md),
                     ),
-                    child: Icon(Icons.health_and_safety_outlined,
+                    child: Icon(Icons.health_and_safety_rounded,
                         size: 20, color: context.palette.accentInk),
                   ),
                   const SizedBox(width: 10),
@@ -303,7 +304,7 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
                     child: TextButton.icon(
                       onPressed:
                           _entries.isEmpty ? null : () => unawaited(_copy()),
-                      icon: const Icon(Icons.copy_all_outlined, size: 16),
+                      icon: const Icon(Icons.copy_all_rounded, size: 16),
                       label: const Text('复制结果'),
                     ),
                   ),
@@ -322,6 +323,6 @@ class _SiteSelfCheckDialogState extends State<SiteSelfCheckDialog> {
           ),
         ),
       ),
-    );
+    ));
   }
 }

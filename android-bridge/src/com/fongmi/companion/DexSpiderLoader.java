@@ -5,6 +5,7 @@ import com.github.catvod.crawler.Spider;
 import com.github.catvod.crawler.SpiderNull;
 import com.github.catvod.spider.UnsupportedGuardSpider;
 import com.fongmi.companion.hardshell.HardshellPipeline;
+import com.fongmi.companion.hardshell.FishNativeService;
 import com.fongmi.companion.py.PySpider;
 import com.fongmi.companion.d2j.PreciseDex2jar;
 import com.fongmi.companion.guard.GuardCryptoService;
@@ -58,9 +59,11 @@ public class DexSpiderLoader {
     /** 工作目录超过这个时长没有任何写入，视为进程异常退出的残留。 */
     private static final long STALE_WORK_MS = 10 * 60_000L;
     private final ConcurrentHashMap<String, Spider> spiders = new ConcurrentHashMap<>();
+    private final JavaProxyRegistry javaProxies = new JavaProxyRegistry();
+    public JavaProxyRegistry javaProxies() { return javaProxies; }
     private final Object scriptLifecycle = new Object();
     private final Map<String, PySpider> scriptProxies = new HashMap<>();
-    private final Set<PySpider> initializingScripts = new HashSet<>();
+    private final Set<Spider> initializingScripts = new HashSet<>();
     private long scriptGeneration;
     private volatile String scriptProxyBase = "";
     private volatile String scriptDanmakuBase = "";
@@ -112,15 +115,15 @@ public class DexSpiderLoader {
         registerBuiltinFactories();
     }
 
-    /** 作废的旧转换产物：-jvm.jar ~ -jvm8（含带修补戳的 -jvm7-r* / -jvm8-r*.jar；转换器已升级到 -jvm9）。 */
+    /** 作废的旧转换产物：-jvm.jar ~ -jvm9（含带修补戳的 -jvm7-r* ~ -jvm9-r*.jar；转换器已升级到 -jvm10）。 */
     private static final java.util.regex.Pattern OBSOLETE_JVM =
-            java.util.regex.Pattern.compile(".*-jvm([0-6]?|[78](-r[A-Za-z0-9-]*)?)\\.jar");
+            java.util.regex.Pattern.compile(".*-jvm([0-6]?|[789](-r[A-Za-z0-9-]*)?)\\.jar");
     /** 临时产物只清理足够旧的，避免误删另一实例正在写的文件。 */
     private static final long STALE_TMP_MS = 10 * 60_000L;
 
     /**
      * 启动时清理 jars 缓存里的作废产物，只删三类：旧版本转换产物、残留的 *.tmp.jar、
-     * 已有带修补戳版本时的无戳 -jvm9.jar。此时本进程尚未加载任何 jar；
+     * 已有带修补戳版本时的无戳 -jvm10.jar。此时本进程尚未加载任何 jar；
      * 被其它进程占用的文件在 Windows 上删除会失败，直接跳过。其余缓存（原始 jar 等）不动。
      */
     static int purgeObsoleteArtifacts(File dir) {
@@ -139,7 +142,7 @@ public class DexSpiderLoader {
                 obsolete = now - f.lastModified() > STALE_TMP_MS;
             } else if (OBSOLETE_JVM.matcher(name).matches()) {
                 obsolete = true;
-            } else if (name.endsWith("-jvm9.jar")) {
+            } else if (name.endsWith("-jvm10.jar")) {
                 String prefix = name.substring(0, name.length() - ".jar".length()) + "-";
                 obsolete = false;
                 for (String other : names) {
@@ -187,11 +190,21 @@ public class DexSpiderLoader {
      * 下载/校验/解密这类与类名无关的硬失败（{@link #hardStop}）之后，jar 相关工厂不再重试同一 jar。
      */
     private void registerBuiltinFactories() {
+        factories.register("catnode", 90,
+                r -> CatNodeSpider.create(r.api(), r.ext(), new File(Context.get().getFilesDir(), "catnode")));
         factories.register("py", 100,
                 r -> PySpider.isPythonApi(r.api())
                         ? new PySpider(r.api(), r.ext(), cacheDir, r.siteKey(), scriptProxyBase, scriptDanmakuBase) : null);
+        factories.register("php", 110,
+                r -> PhpSpider.isPhpApi(r.api()) ? new PhpSpider(r.api(), r.ext(), cacheDir, r.siteKey()) : null);
+        // GM's Android WebView jar cannot execute in desktop shims; preserve its userScript/template contract.
+        factories.register("gm", 190, r -> GmSpider.create(r.cleanApi(), r.ext()));
         factories.register("js", 200,
                 r -> r.ext() != null && r.ext().contains("\"js\"") ? new JavaScriptSpider(r.api(), r.ext()) : null);
+        // drpy2 引擎：api 指向 drpy2(.min).js，ext 是规则；ES 模块图由 DrpySpider 下载改写后求值
+        factories.register("drpy", 205, r -> DrpySpider.create(r.api(), r.ext(), cacheDir));
+        // XPTV / NowShowTime：ext 是脚本 .js 地址（api 为 csp_xxx 占位），脚本内容符合契约才接管
+        factories.register("xptv", 210, r -> XptvSpider.create(r.api(), r.ext(), cacheDir));
         // py/js may inherit a global jar without using it; prepare only after those factories.
         factories.register("jar-prepare", 250, r -> {
             if (r.hasJar()) loadJar(r.jar());
@@ -227,8 +240,10 @@ public class DexSpiderLoader {
      */
     public int clear() {
         List<Spider> oldSpiders;
+        Runnable releaseJavaProxies;
         synchronized (scriptLifecycle) {
             scriptGeneration++;
+            releaseJavaProxies = javaProxies.revokeAll();
             oldSpiders = new ArrayList<>(spiders.values());
             oldSpiders.addAll(initializingScripts);
             initializingScripts.clear();
@@ -236,14 +251,17 @@ public class DexSpiderLoader {
             spiders.clear();
             spiderLocks.clear();
         }
+        releaseJavaProxies.run();
         List<ClassLoader> oldLoaders = new ArrayList<>(loaders.values());
         loaders.clear();
         for (Spider spider : oldSpiders) {
+            spider.closeHostResources();
             try {
                 spider.destroy();
             } catch (Throwable ignored) {}
         }
         for (ClassLoader cl : oldLoaders) {
+            FishNativeService.release(cl);
             // 先停掉该载荷投递的心跳 / 延迟任务：自我重投的任务若不取消会永远循环，
             // 关闭类加载器也释放不了它（任务对象本身就引用着载荷类）
             int cancelled = android.os.Handler.cancelAll(cl);
@@ -258,6 +276,7 @@ public class DexSpiderLoader {
         }
         // 本地代理持有端口与线程；配置切换后旧 loader 不再使用，必须一并释放
         GuardProxyServer.releaseAll();
+        CatNodeRuntime.closeAll();
         ParseStage.reset();
         SPIDER_CLASSES.clear();
         return oldSpiders.size();
@@ -267,6 +286,7 @@ public class DexSpiderLoader {
         final long generation;
         synchronized (scriptLifecycle) { generation = scriptGeneration; }
         boolean python = PySpider.isPythonApi(api);
+        boolean php = PhpSpider.isPhpApi(api);
         String cleanApi = normalizeApiName(api);
         // 崩溃站必须在 Level 0（载荷加载）之前短路，否则进程直接消失。
         if (rules.isBlocked(cleanApi)) {
@@ -281,7 +301,8 @@ public class DexSpiderLoader {
             }
         }
         String jarKey = md5(jar != null ? jar : "default");
-        String spKey = python ? "py:" + JsonCodec.stringify(Arrays.asList(siteKey, api, ext, jar))
+        String spKey = python || php || "catnode".equals(api)
+                ? (python ? "py:" : php ? "php:" : "cat:") + JsonCodec.stringify(Arrays.asList(siteKey, api, ext, jar))
                 : jarKey + "_" + siteKey + "_" + cleanApi;
 
         Spider cached = spiders.get(spKey);
@@ -297,17 +318,22 @@ public class DexSpiderLoader {
             try {
                 spider = factories.create(new SpiderRequest(siteKey, api, cleanApi, ext, jar));
                 if (spider != null) {
-                    if (spider instanceof PySpider) {
-                        synchronized (scriptLifecycle) {
-                            if (generation != scriptGeneration || Thread.currentThread().isInterrupted()) {
-                                throw new IllegalStateException("script load cancelled");
-                            }
-                            initializingScripts.add((PySpider) spider);
+                    synchronized (scriptLifecycle) {
+                        if (generation != scriptGeneration || Thread.currentThread().isInterrupted()) {
+                            throw new IllegalStateException("source load cancelled");
                         }
+                        initializingScripts.add(spider);
+                        javaProxies.bind(spider);
                     }
                     spider.siteKey = siteKey;
-                    spider.init(Context.get(), ext != null ? ext : "");
+                    String resolvedExt = FishNativeService.decrypt(jar == null ? null : loaders.get(loaderKey(jar)), ext);
+                    spider.init(Context.get(), resolvedExt != null ? resolvedExt : "");
+                    SpiderApiBinder.bind(spider);
                     synchronized (scriptLifecycle) {
+                        if (generation != scriptGeneration || Thread.currentThread().isInterrupted()) {
+                            throw new IllegalStateException("source load cancelled");
+                        }
+                        javaProxies.activate(spider);
                         if (spider instanceof PySpider) {
                             if (generation != scriptGeneration || Thread.currentThread().isInterrupted()) {
                                 throw new IllegalStateException("script load cancelled");
@@ -318,26 +344,26 @@ public class DexSpiderLoader {
                         spiders.put(spKey, spider);
                     }
                     ParseStage.clearFailure();
-                    System.out.println("[DexSpiderLoader] Successfully initialized spider: " + cleanApi + " for site: " + siteKey);
+                    System.out.println("[DexSpiderLoader] Successfully initialized spider: " + PhpSpider.diagnosticApi(cleanApi) + " for site: " + siteKey);
                     return spider;
                 }
             } catch (Throwable t) {
-                ParseStage.fail(spider != null ? ParseStage.INIT : ParseStage.INSTANTIATE, cleanApi + ": " + t);
+                ParseStage.fail(spider != null ? ParseStage.INIT : ParseStage.INSTANTIATE, PhpSpider.diagnosticApi(cleanApi) + ": " + t);
                 ParseStage.Failure stage = ParseStage.current();
-                System.err.println("[DexSpiderLoader] Error instantiating spider " + cleanApi + ": " + t.getMessage()
+                System.err.println("[DexSpiderLoader] Error instantiating spider " + PhpSpider.diagnosticApi(cleanApi) + ": " + t.getMessage()
                         + (stage != null ? "（阶段=" + stage.stage + "）" : ""));
                 t.printStackTrace();
                 // 失败不缓存，下次会重建：已创建的实例必须当场销毁，否则 python 子进程 / JS 上下文每次失败都泄漏一份
                 if (spider != null) {
+                    javaProxies.remove(spider);
+                    spider.closeHostResources();
                     try {
                         spider.destroy();
                     } catch (Throwable ignored) {
                     }
                 }
             } finally {
-                if (spider instanceof PySpider) {
-                    synchronized (scriptLifecycle) { initializingScripts.remove((PySpider) spider); }
-                }
+                synchronized (scriptLifecycle) { initializingScripts.remove(spider); }
                 SpiderAttempt attempt = spiderAttempt.get();
                 if (attempt != null && attempt.failure != null) {
                     ParseStage.fail(attempt.failure.stage, attempt.failure.detail);
@@ -350,7 +376,7 @@ public class DexSpiderLoader {
         // 或者 jar 还没下载完；一旦把 SpiderNull 缓存住，该站点会一直空白直到进程重启
         // （实测现象：糯米站整页无数据，而其它先访问的站点正常）。
         ParseStage.Failure stage = ParseStage.current();
-        System.err.println("[DexSpiderLoader] Fallback to SpiderNull for: " + api + " (site: " + siteKey
+        System.err.println("[DexSpiderLoader] Fallback to SpiderNull for: " + PhpSpider.diagnosticApi(api) + " (site: " + siteKey
                 + ", 本次不缓存，下次调用会重试加载)"
                 + (stage != null ? "（阶段=" + stage.stage + "，原因=" + stage.detail + "）" : ""));
         return new SpiderNull();
@@ -1064,6 +1090,7 @@ public class DexSpiderLoader {
             }
             // 父优先；载荷里有类依赖自带的 Push / Douban 等时，这几个类改用载荷版本（见 PayloadClassLoader）
             created = PayloadClassLoader.create(usableJar, getClass().getClassLoader());
+            FishNativeService.remember(created, localJar);
             String payloadInit = HardshellPipeline.payloadInit(localJar);
             if (payloadInit != null) PAYLOAD_INIT.put(created, payloadInit);
         } catch (Throwable t) {
@@ -1088,17 +1115,21 @@ public class DexSpiderLoader {
         }
     }
 
-    /** 转换产物路径：{@code <源名去 .jar>-jvm9<修补链戳>.jar}，放在 cacheDir。 */
+    /** 转换产物路径：{@code <源名去 .jar>-jvm10<修补链戳>.jar}，放在 cacheDir。 */
     private File jvmJarOf(File jarFile) {
         String base = jarFile.getName();
         if (base.endsWith(".jar")) base = base.substring(0, base.length() - 4);
+        // Local files can share a basename and timestamp while containing different payloads.
+        if (!cacheDir.equals(jarFile.getAbsoluteFile().getParentFile())) base += "-" + md5File(jarFile);
         // -jvm7：转换器改为 PreciseDex2jar（保留 new-instance 的真实分配类型，不再塌缩成父类）。
         // -jvm8：超长字符串常量不再走 DexFix 改写（旧产物里这类方法是 VerifyError 桩）。
         // -jvm9：含超长跳转、COMPUTE_MAXS 生成失败的类改用 COMPUTE_FRAMES 重转（旧产物里这类类缺失）。
-        // 旧缓存（-jvm 至 -jvm8）换名作废。
+        // -jvm10：指向接口的方法引用改成 InterfaceMethodref（旧产物里 JDK 接口静态方法整站抛 ICCE）。
+        // -jvm11：按实际宿主/载荷类型层次重建 StackMapTable（严格 JVM 拒绝无帧的 tableswitch）。
+        // 旧缓存（-jvm 至 -jvm10）换名作废。
         // 加固载荷再带上修补链版本戳：修补器升级后旧产物自动作废（普通 jar 戳为空，缓存名不变）。
         String stamp = HardshellPipeline.repairStamp(jarFile);
-        return new File(cacheDir, base + "-jvm9" + stamp + ".jar");
+        return new File(cacheDir, base + "-jvm11" + stamp + ".jar");
     }
 
     /**
@@ -1154,6 +1185,13 @@ public class DexSpiderLoader {
                 // 用哪几个修补器，全部由 hardshell 注册表的数据决定，这里不判断源。
                 // 未声明修补器的载荷一次都不跑，既有站点行为不变。
                 HardshellPipeline.repair(converted, jarFile);
+                // DEX 转换器输出的旧 class 可能没有 StackMapTable；在严格校验模式下，
+                // tableswitch/try-catch 等分支会在初始化前直接触发 VerifyError。这里仅对
+                // 本次 DEX 转换产物重建帧，不改动普通 JVM jar；类型层次只读宿主 class
+                // 资源与已确认的载荷优先类，禁止通过 -noverify 掩盖问题。
+                java.util.Set<String> payloadFirst = PayloadClassLoader
+                        .scan(converted, getClass().getClassLoader()).keySet();
+                PreciseDex2jar.finishVerification(converted, payloadFirst);
                 tmp.delete();
                 converted.setLastModified(System.currentTimeMillis());
                 publish(converted, jvmJar);
@@ -1161,7 +1199,8 @@ public class DexSpiderLoader {
                 System.out.println("[DexSpiderLoader] Dex2jar done in " + (System.currentTimeMillis() - t0)
                         + "ms -> " + jvmJar.getName() + " (" + jvmJar.length() + " bytes, "
                         + result.classes + " classes, 保留真实分配类型 " + result.keptMismatchedNew + " 处"
-                        + ", 超长字符串常量 " + result.longStrings + " 处)");
+                        + ", 超长字符串常量 " + result.longStrings + " 处"
+                        + ", 接口方法引用修正 " + result.interfaceRefs + " 处)");
                 return jvmJar;
             }
             ParseStage.fail(ParseStage.DEX2JAR, "dex2jar 输出为空: " + jarFile.getName());
@@ -1229,10 +1268,39 @@ public class DexSpiderLoader {
             String rawUrl = parts[0].trim();
             String expectedMd5 = parts.length > 1 ? parts[1].trim() : "";
 
-            if (rawUrl.startsWith("file://") || rawUrl.startsWith("/") || (rawUrl.length() > 2 && rawUrl.charAt(1) == ':')) {
-                String cleanPath = rawUrl.startsWith("file://") ? rawUrl.substring(7) : rawUrl;
-                File file = new File(cleanPath);
-                if (file.exists()) return file;
+            if (rawUrl.regionMatches(true, 0, "file:", 0, 5) || rawUrl.startsWith("/") || (rawUrl.length() > 2 && rawUrl.charAt(1) == ':')) {
+                File file = rawUrl.regionMatches(true, 0, "file:", 0, 5) ? new File(URI.create(rawUrl)) : new File(rawUrl);
+                if (!file.isFile()) {
+                    ParseStage.fail(ParseStage.RESOLVE, "本地 jar 文件不存在");
+                    return null;
+                }
+                if (!expectedMd5.isEmpty()) {
+                    // 与远程下载同一条规则：配置里的 md5 常是过期抄写（包作者换了 jar 没改清单）。
+                    // 内容仍是 zip/jar → 只告警并继续；不是 zip → 失败，但绝不删除用户的本地文件。
+                    String actualMd5 = md5File(file);
+                    if (!actualMd5.equalsIgnoreCase(expectedMd5)) {
+                        String msg = "本地 jar 摘要校验失败（期望 " + expectedMd5 + "，实际 " + actualMd5 + "）: " + file.getName();
+                        if (!looksLikeZip(file)) {
+                            ParseStage.fail(ParseStage.MD5, msg + "，且内容不是 zip");
+                            return null;
+                        }
+                        // 不写 ParseStage：残留的 md5 记录会盖住后续真正的失败原因。
+                        System.err.println("[DexSpiderLoader] " + msg + "（内容可解压，继续加载）");
+                    }
+                }
+                com.fongmi.companion.hardshell.ShellRegistry.ensureLoaded(cacheDir);
+                if (HardshellPipeline.isShell(file) || GuardPayloadProvisioner.isGuardShell(file)) {
+                    // 本地包也要先解壳；按内容共享载荷，移动原包后仍可复用。
+                    String contentMd5 = md5File(file);
+                    synchronized (fileLock(new File(cacheDir, "local-shell-" + contentMd5))) {
+                        GuardCryptoService.rememberShellJar(file);
+                        File shellPayload = HardshellPipeline.resolve(cacheDir, file, contentMd5);
+                        if (shellPayload != null) return shellPayload;
+                        File provisioned = GuardPayloadProvisioner.ensure(cacheDir, file, contentMd5, file.getName());
+                        if (provisioned != null) return provisioned;
+                    }
+                }
+                return file;
             }
 
             if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
@@ -1391,7 +1459,7 @@ public class DexSpiderLoader {
         for (File entry : entries) {
             String name = entry.getName();
             boolean ours = name.startsWith(WORK_PREFIX);
-            boolean legacy = (name.contains("-jvm7") || name.contains("-jvm8") || name.contains("-jvm9"))
+            boolean legacy = (name.contains("-jvm7") || name.contains("-jvm8") || name.contains("-jvm9") || name.contains("-jvm10"))
                     && (name.endsWith(".tmp.jar") || name.endsWith(".tmp"));
             if (!ours && !legacy) continue;
             try {
@@ -1459,6 +1527,8 @@ public class DexSpiderLoader {
      */
     private String loaderKey(String jarSpec) {
         String[] parts = jarSpec.split(";md5;");
+        String location = parts[0].trim();
+        if (!location.startsWith("http://") && !location.startsWith("https://")) return "local:" + md5(jarSpec);
         if (parts.length > 1) {
             String contentMd5 = parts[1].trim().toLowerCase(Locale.ROOT);
             if (!contentMd5.isEmpty()) return "md5:" + contentMd5;

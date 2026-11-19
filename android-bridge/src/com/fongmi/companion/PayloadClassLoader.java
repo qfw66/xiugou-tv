@@ -39,6 +39,13 @@ import java.util.zip.ZipFile;
  * 网盘站的详情页全部打不开。没有依赖的 jar 行为不变，桌面替身照旧生效。
  *
  * <p>例外二：{@link #OUTDATED} 里已过时的桌面替身（Kanqiu），载荷自带就用载荷版，不看依赖。
+ *
+ * <p>例外三：{@link #HELPER_PKGS}（bean / net / utils）里的辅助类。常见载荷把它们混淆进 merge/*，
+ * 与桌面版不重名；但也有载荷（初忆本地包）保留原名、自带完整实现，而桌面版只是几十行的精简版。
+ * 父优先时载荷的站点类链接到精简版，运行时报 {@code NoSuchMethodError}（如 {@code Vod.setVodTag}、
+ * {@code OkHttp.post(String,String,Map)}）。所以：载荷里有非辅助类引用了桌面版没有的成员时，
+ * 载荷自带且与桌面版重名的辅助类**整套**改用载荷版（{@link #HOST_ONLY_HELPERS} 除外）；
+ * 能直接链接到桌面版的载荷行为不变。
  */
 final class PayloadClassLoader extends URLClassLoader {
     static {
@@ -69,6 +76,19 @@ final class PayloadClassLoader extends URLClassLoader {
     static final Map<String, String> OUTDATED = Map.of(
             "Kanqiu", "桌面替身已过时（写死的 88kanqiu.tv 已失效）");
 
+    /** 载荷可能自带整套同名实现的辅助包（只看直接在这些包里的类，不含子包）。 */
+    static final Set<String> HELPER_PKGS = Set.of(
+            "com.github.catvod.bean.", "com.github.catvod.net.", "com.github.catvod.utils.");
+
+    /**
+     * 即使载荷自带也始终用桌面版的辅助类：它们是 companion 自己的网络 / 日志 / 弹窗通道，
+     * 载荷版要么依赖安卓界面，要么会绕开桌面侧的代理、调试日志与请求头改写。
+     */
+    static final Set<String> HOST_ONLY_HELPERS = Set.of(
+            "com.github.catvod.net.Net", "com.github.catvod.net.NetOptions", "com.github.catvod.net.OkDns",
+            "com.github.catvod.utils.DebugLog", "com.github.catvod.utils.Dialog",
+            "com.github.catvod.utils.HeaderOverride");
+
     private final Set<String> payloadFirst;
 
     private PayloadClassLoader(URL[] urls, ClassLoader parent, Set<String> payloadFirst) {
@@ -92,13 +112,25 @@ final class PayloadClassLoader extends URLClassLoader {
                 Collections.unmodifiableSet(new HashSet<>(reasons.keySet())));
     }
 
-    /** 本 jar 中改为载荷优先的 spider 简单类名（测试与日志用）。 */
+    /** 本 jar 中改为载荷优先的类：spider 替身是简单类名，辅助类是点分全名（测试与日志用）。 */
     Set<String> payloadFirst() {
         return payloadFirst;
     }
 
     @Override
     protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+        if ("com.github.catvod.utils.FishNative".equals(name)) {
+            synchronized (getClassLoadingLock(name)) {
+                Class<?> loaded = findLoadedClass(name);
+                if (loaded == null) {
+                    // 仅已验证原生库的载荷使用宿主代调，未知修订保持自己的类定义。
+                    loaded = com.fongmi.companion.hardshell.FishNativeService.supports(this)
+                            ? getParent().loadClass(name) : findClass(name);
+                }
+                if (resolve) resolveClass(loaded);
+                return loaded;
+            }
+        }
         if (!isPayloadFirst(name)) return super.loadClass(name, resolve);
         synchronized (getClassLoadingLock(name)) {
             Class<?> c = findLoadedClass(name);
@@ -115,7 +147,10 @@ final class PayloadClassLoader extends URLClassLoader {
     }
 
     private boolean isPayloadFirst(String name) {
-        return !payloadFirst.isEmpty() && payloadFirst.contains(outerSimpleName(name.replace('/', '.')));
+        if (payloadFirst.isEmpty()) return false;
+        String dotted = name.replace('/', '.');
+        String helper = helperOuterName(dotted);
+        return payloadFirst.contains(helper != null ? helper : outerSimpleName(dotted));
     }
 
     /** {@code com.github.catvod.spider.Push$1} → {@code Push}；不在 spider 包（或在子包）→ null。 */
@@ -127,54 +162,91 @@ final class PayloadClassLoader extends URLClassLoader {
         return inner > 0 ? simple.substring(0, inner) : simple;
     }
 
-    /** 返回「简单类名 → 原因」，只含需要改为载荷优先的替身。 */
+    /**
+     * {@code com.github.catvod.bean.Filter$Value} → {@code com.github.catvod.bean.Filter}；
+     * 不直接在 {@link #HELPER_PKGS} 的某个包里（含子包，如 bean.ali）→ null。
+     */
+    static String helperOuterName(String dottedName) {
+        for (String pkg : HELPER_PKGS) {
+            if (!dottedName.startsWith(pkg)) continue;
+            if (dottedName.indexOf('.', pkg.length()) >= 0) return null;
+            int inner = dottedName.indexOf('$', pkg.length());
+            return inner > pkg.length() ? dottedName.substring(0, inner) : dottedName;
+        }
+        return null;
+    }
+
+    /** 返回「键 → 原因」，只含需要改为载荷优先的类：spider 替身用简单类名，辅助类用点分全名。 */
     static Map<String, String> scan(File jar, ClassLoader parent) throws IOException {
         Map<String, String> reasons = new LinkedHashMap<>();
         try (ZipFile zip = new ZipFile(jar)) {
             Set<String> candidates = new HashSet<>();
+            Set<String> helpers = new TreeSet<>();
             for (Enumeration<? extends ZipEntry> e = zip.entries(); e.hasMoreElements(); ) {
                 String n = e.nextElement().getName();
-                if (!n.endsWith(".class")) continue;
-                String simple = outerSimpleName(n.substring(0, n.length() - 6).replace('/', '.'));
-                if (simple == null || n.indexOf('$') >= 0 || parent.getResource(n) == null) continue;
-                if (OUTDATED.containsKey(simple)) {
+                if (!n.endsWith(".class") || n.indexOf('$') >= 0) continue;
+                String dotted = n.substring(0, n.length() - 6).replace('/', '.');
+                String simple = outerSimpleName(dotted);
+                String helper = helperOuterName(dotted);
+                if ((simple == null && helper == null) || parent.getResource(n) == null) continue;
+                if (helper != null) {
+                    if (!HOST_ONLY_HELPERS.contains(helper)) helpers.add(helper);
+                } else if (OUTDATED.containsKey(simple)) {
                     reasons.put(simple, OUTDATED.get(simple));
                 } else if (STAND_INS.contains(simple)) {
                     candidates.add(simple);
                 }
             }
-            if (candidates.isEmpty()) return reasons;
+            if (candidates.isEmpty() && helpers.isEmpty()) return reasons;
 
             Map<String, Integer> subclasses = new HashMap<>();
             Map<String, Set<String>> missing = new HashMap<>();
+            Map<String, Set<String>> helperMissing = new HashMap<>();
             Map<String, Set<String>> bridgeMembers = new HashMap<>();
             for (Enumeration<? extends ZipEntry> e = zip.entries(); e.hasMoreElements(); ) {
                 ZipEntry entry = e.nextElement();
                 String n = entry.getName();
                 if (!n.endsWith(".class")) continue;
-                String self = outerSimpleName(n.substring(0, n.length() - 6).replace('/', '.'));
+                String dotted = n.substring(0, n.length() - 6).replace('/', '.');
+                String self = outerSimpleName(dotted);
+                // 只认 spider 包里的类（站点类及其内部类）当替身的依赖方：merge/* 之类的混淆辅助类引用替身的成员，
+                // 多半是在给载荷版替身自己干活；替身用桌面版时它们根本不会被调用，不能因此让位。
+                boolean spiderSide = self != null && !candidates.isEmpty();
+                // 辅助类候选自己（含内部类）不算依赖方：它引用的本来就是自己那一版的成员。
+                String selfHelper = helperOuterName(dotted);
+                boolean helperSide = !helpers.isEmpty() && (selfHelper == null || !helpers.contains(selfHelper));
+                if (!spiderSide && !helperSide) continue;
                 ClassRefs refs;
                 try (InputStream in = zip.getInputStream(entry)) {
                     refs = ClassRefs.parse(in.readAllBytes());
                 } catch (IOException | RuntimeException ex) {
                     continue;
                 }
-                // 只认 spider 包里的类（站点类及其内部类）当依赖方：merge/* 之类的混淆辅助类引用替身的成员，
-                // 多半是在给载荷版替身自己干活；替身用桌面版时它们根本不会被调用，不能因此让位。
-                if (refs == null || self == null) continue;
-                String sup = refs.superName == null ? null : outerSimpleName(refs.superName.replace('/', '.'));
-                if (sup != null && candidates.contains(sup) && !sup.equals(self)) {
-                    subclasses.merge(sup, 1, Integer::sum);
+                if (refs == null) continue;
+                if (spiderSide) {
+                    String sup = refs.superName == null ? null : outerSimpleName(refs.superName.replace('/', '.'));
+                    if (sup != null && candidates.contains(sup) && !sup.equals(self)) {
+                        subclasses.merge(sup, 1, Integer::sum);
+                    }
                 }
                 for (String[] m : refs.members) {
-                    String owner = outerSimpleName(m[0].replace('/', '.'));
-                    if (owner == null || !candidates.contains(owner) || owner.equals(self)) continue;
                     if (m[0].indexOf('$') >= 0) continue;
-                    Set<String> have = bridgeMembers.computeIfAbsent(owner, o -> bridgeMembersOf(SPIDER_PKG + o, parent));
-                    if (have == null) continue;
                     String key = m[1] + ":" + m[2];
-                    if (!have.contains(key)) {
-                        missing.computeIfAbsent(owner, o -> new TreeSet<>()).add(m[1]);
+                    String ownerDotted = m[0].replace('/', '.');
+                    if (spiderSide) {
+                        String owner = outerSimpleName(ownerDotted);
+                        if (owner != null && candidates.contains(owner) && !owner.equals(self)) {
+                            Set<String> have = bridgeMembers.computeIfAbsent(owner, o -> bridgeMembersOf(SPIDER_PKG + o, parent));
+                            if (have != null && !have.contains(key)) {
+                                missing.computeIfAbsent(owner, o -> new TreeSet<>()).add(m[1]);
+                            }
+                        }
+                    }
+                    if (helperSide && helpers.contains(ownerDotted)) {
+                        Set<String> have = bridgeMembers.computeIfAbsent(ownerDotted, o -> bridgeMembersOf(o, parent));
+                        if (have != null && !have.contains(key)) {
+                            helperMissing.computeIfAbsent(ownerDotted, o -> new TreeSet<>()).add(m[1]);
+                        }
                     }
                 }
             }
@@ -186,13 +258,27 @@ final class PayloadClassLoader extends URLClassLoader {
                 if (subs != null) why.append(subs).append(" 个子类");
                 if (lack != null) {
                     if (why.length() > 0) why.append("，");
-                    why.append("桌面版缺成员 ").append(String.join(",", lack.stream().limit(5).toList()));
-                    if (lack.size() > 5) why.append("…共 ").append(lack.size()).append(" 个");
+                    why.append(lackSummary(lack));
                 }
                 reasons.put(c, why.toString());
             }
+            if (!helperMissing.isEmpty()) {
+                // 辅助类是一套互相引用的库（Result.vod(Vod)、OkHttp ↔ OkResult、Gson 字段）：
+                // 只要有一个缺成员就整套换成载荷版，不让桌面版和载荷版的 bean 混用。
+                for (String h : helpers) {
+                    Set<String> lack = helperMissing.get(h);
+                    reasons.put(h, lack == null ? "随载荷辅助类整套让位" : lackSummary(lack));
+                }
+            }
         }
         return reasons;
+    }
+
+    private static String lackSummary(Set<String> lack) {
+        StringBuilder why = new StringBuilder("桌面版缺成员 ");
+        why.append(String.join(",", lack.stream().limit(5).toList()));
+        if (lack.size() > 5) why.append("…共 ").append(lack.size()).append(" 个");
+        return why.toString();
     }
 
     /**
