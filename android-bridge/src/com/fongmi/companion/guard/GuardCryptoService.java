@@ -1,6 +1,7 @@
 package com.fongmi.companion.guard;
 
 import com.fongmi.companion.fs.NativeCache;
+import com.fongmi.companion.ipc.ChildJvm;
 import com.fongmi.companion.ipc.LineProcess;
 import com.github.unidbg.AndroidEmulator;
 import com.github.unidbg.linux.android.AndroidEmulatorBuilder;
@@ -373,20 +374,10 @@ public final class GuardCryptoService {
     }
 
     private static List<String> buildCommand(File libDir, File jar) {
-        String javaBin = new File(new File(System.getProperty("java.home", "."), "bin"),
-                isWindows() ? "java.exe" : "java").getAbsolutePath();
         String classpath = selfClasspath().getAbsolutePath()
                 + File.pathSeparator + new File(libDir, "*").getAbsolutePath();
-        List<String> command = new ArrayList<>();
-        command.add(javaBin);
-        command.add("-Xmx1g");
-        command.add("-Dfile.encoding=UTF-8");
-        command.add("-cp");
-        command.add(classpath);
-        command.add("com.fongmi.companion.guard.GuardCryptoService");
-        command.add(jar.getAbsolutePath());
-        command.add("--serve");
-        return command;
+        return ChildJvm.command("-Xmx1g", "-Dfile.encoding=UTF-8", "-cp", classpath,
+                "com.fongmi.companion.guard.GuardCryptoService", jar.getAbsolutePath(), "--serve");
     }
 
     /**
@@ -431,9 +422,6 @@ public final class GuardCryptoService {
         return self.isDirectory() ? self : self.getParentFile();
     }
 
-    private static boolean isWindows() {
-        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
-    }
 
     // ==================================================================================
     // 协议工具

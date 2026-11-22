@@ -132,6 +132,20 @@ final class JvmVerificationRepair {
         addedConstructors++;
     }
 
+    /** 以接口为目标的 invokestatic / invokespecial 从 class 版本 52 起才合法。 */
+    private static void alignInterfaceCallVersion(ClassNode node) {
+        if ((node.version & 0xffff) >= Opcodes.V1_8) return;
+        for (MethodNode method : node.methods) {
+            for (AbstractInsnNode insn : method.instructions) {
+                if (insn instanceof MethodInsnNode call && call.itf &&
+                        (call.getOpcode() == Opcodes.INVOKESTATIC || call.getOpcode() == Opcodes.INVOKESPECIAL)) {
+                    node.version = Opcodes.V1_8;
+                    return;
+                }
+            }
+        }
+    }
+
     private void write(Path destination) throws IOException {
         Path pending = destination.resolveSibling(destination.getFileName() + ".verify.tmp");
         try {
@@ -140,6 +154,7 @@ final class JvmVerificationRepair {
                     byte[] data = entry.getValue();
                     if (entry.getKey().endsWith(".class")) {
                         ClassNode node = nodes.get(entry.getKey().substring(0, entry.getKey().length() - 6));
+                        alignInterfaceCallVersion(node);
                         ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES) {
                             @Override protected String getCommonSuperClass(String a, String b) {
                                 try { return commonSuper(a, b); }

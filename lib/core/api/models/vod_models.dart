@@ -13,6 +13,7 @@ class VodItem {
   final String? content;
   final String? typeName;
   final String? score;
+  final String? doubanId;
   final String? tag;
   final String? siteKey;
   final String? siteName;
@@ -37,6 +38,7 @@ class VodItem {
     this.content,
     this.typeName,
     this.score,
+    this.doubanId,
     this.tag,
     this.siteKey,
     this.siteName,
@@ -56,6 +58,7 @@ class VodItem {
     String? content,
     String? typeName,
     String? score,
+    String? doubanId,
     String? tag,
     String? siteKey,
     String? siteName,
@@ -74,6 +77,7 @@ class VodItem {
       content: content ?? this.content,
       typeName: typeName ?? this.typeName,
       score: score ?? this.score,
+      doubanId: doubanId ?? this.doubanId,
       tag: tag ?? this.tag,
       siteKey: siteKey ?? this.siteKey,
       siteName: siteName ?? this.siteName,
@@ -106,6 +110,7 @@ class VodItem {
       content: json['vod_content']?.toString() ?? json['content']?.toString() ?? json['des']?.toString(),
       typeName: json['type_name']?.toString() ?? json['type']?.toString(),
       score: (rawScore != null && rawScore.isNotEmpty && rawScore != '0' && rawScore != '0.0') ? rawScore : null,
+      doubanId: validDoubanId(json['vod_douban_id']) ?? validDoubanId(json['douban_id']),
       tag: (rawTag != null && rawTag.isNotEmpty) ? rawTag : null,
       siteKey: json['site_key']?.toString(),
       siteName: json['site_name']?.toString(),
@@ -114,6 +119,11 @@ class VodItem {
           ? Map<String, dynamic>.unmodifiable(json['cate'] as Map)
           : null,
     );
+  }
+
+  static String? validDoubanId(Object? value) {
+    final id = value?.toString().trim() ?? '';
+    return RegExp(r'^[1-9]\d{0,11}$').hasMatch(id) ? id : null;
   }
 
   Map<String, dynamic> toJson() => {
@@ -128,6 +138,7 @@ class VodItem {
     if (content != null) 'vod_content': content,
     if (typeName != null) 'type_name': typeName,
     if (score != null) 'vod_score': score,
+    if (doubanId != null) 'vod_douban_id': doubanId,
     if (tag != null) 'vod_tag': tag,
     if (siteKey != null) 'site_key': siteKey,
     if (siteName != null) 'site_name': siteName,
@@ -167,6 +178,27 @@ class VodDetail {
     required this.item,
     required this.sources,
   });
+
+  /// 部分站源的详情只返回选集；同站同片的列表资料才能补入详情。
+  VodDetail withCardFallbacks(VodItem card) {
+    if (item.id.isEmpty || item.id != card.id ||
+        (item.siteKey != null && card.siteKey != null && item.siteKey != card.siteKey)) {
+      return this;
+    }
+    String? missing(String? detail, String? fallback) =>
+        (detail?.trim().isEmpty ?? true) ? fallback?.trim() : null;
+    return VodDetail(
+      item: item.copyWith(
+        name: missing(item.name, card.name),
+        year: missing(item.year, card.year),
+        typeName: missing(item.typeName, card.typeName),
+        doubanId: VodItem.validDoubanId(item.doubanId) ??
+            VodItem.validDoubanId(card.doubanId),
+        remarks: missing(item.remarks, card.remarks),
+      ),
+      sources: sources,
+    );
+  }
 
   factory VodDetail.fromJson(Map<String, dynamic> json) {
     final item = VodItem.fromJson(json);
@@ -239,11 +271,14 @@ class VodDetail {
     final area = extractTag(vContent, 'area');
     final actor = extractTag(vContent, 'actor');
     final director = extractTag(vContent, 'director');
+    final doubanId = extractTag(vContent, 'vod_douban_id');
 
     final item = VodItem(
       id: id,
       name: name,
       pic: pic,
+      doubanId: VodItem.validDoubanId(doubanId) ??
+          VodItem.validDoubanId(extractTag(vContent, 'douban_id')),
       remarks: note.isNotEmpty ? note : null,
       typeName: type.isNotEmpty ? type : null,
       content: des.isNotEmpty ? des : null,

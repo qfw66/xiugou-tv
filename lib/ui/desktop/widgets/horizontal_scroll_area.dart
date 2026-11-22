@@ -1,13 +1,4 @@
-/// 水平滚动条容器：让桌面鼠标也能左右滚动。
-///
-/// 问题（2026-10-26 实机反馈）：「影片分类太多的情况下没办法左右滚动」。
-/// 原因有两层：
-/// 1. Flutter 桌面默认 [ScrollBehavior] 的 `dragDevices` **不含鼠标** —— 按住拖不动；
-/// 2. 水平 `ListView` 只消费 `scrollDelta.dx`，而普通鼠标滚轮只有 `dy` —— 滚轮也无效。
-///
-/// 所以这里两件事一起做：把鼠标加进拖拽设备，并把竖向滚轮增量映射到横向滚动。
-/// 与搜索站点栏（`_handleSearchSiteBarPointerSignal`）的口径保持一致：
-/// 只映射 dy，横滑（dx）留给 Scrollable 自己处理，避免双倍滚动。
+/// 桌面横栏支持鼠标拖动和滚轮；触控板保留原生方向。
 library;
 
 import 'package:flutter/gestures.dart';
@@ -28,13 +19,26 @@ class HorizontalScrollArea extends StatelessWidget {
   });
 
   void _onPointerSignal(PointerSignalEvent event) {
-    if (event is! PointerScrollEvent) return;
-    final delta = event.scrollDelta.dy;
-    if (delta == 0 || !controller.hasClients) return;
+    if (event is! PointerScrollEvent ||
+        event.kind != PointerDeviceKind.mouse ||
+        event.scrollDelta.dx != 0 ||
+        event.scrollDelta.dy == 0 ||
+        !controller.hasClients) {
+      return;
+    }
     final position = controller.position;
-    final target = (position.pixels + delta)
-        .clamp(position.minScrollExtent, position.maxScrollExtent);
-    if (target != position.pixels) controller.jumpTo(target);
+    if (!position.physics.shouldAcceptUserOffset(position)) return;
+    final delta = axisDirectionIsReversed(position.axisDirection)
+        ? -event.scrollDelta.dy
+        : event.scrollDelta.dy;
+    if (delta > 0 ? position.extentAfter == 0 : position.extentBefore == 0) {
+      return;
+    }
+    // 与内外层 Scrollable 仲裁同一事件；到边时不登记，由外层接手。
+    GestureBinding.instance.pointerSignalResolver.register(event, (_) {
+      position.pointerScroll(delta);
+      event.respond(allowPlatformDefault: false);
+    });
   }
 
   @override

@@ -4,8 +4,10 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.graphics.drawable.Drawable;
 import android.view.View;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.ListAdapter;
+import android.widget.ListView;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -40,10 +42,8 @@ public class AlertDialog extends Dialog {
 
     private volatile CharSequence message;
     private final Map<Integer, ButtonSpec> buttons = new ConcurrentHashMap<>();
-    private volatile CharSequence[] items;
-    private ListAdapter adapter;
+    private ListView listView;
     private volatile int itemMode = ITEMS_NONE;
-    private volatile int checkedItem = -1;
     private volatile boolean[] checkedItems;
     private DialogInterface.OnClickListener itemListener;
     private DialogInterface.OnMultiChoiceClickListener multiChoiceListener;
@@ -134,7 +134,8 @@ public class AlertDialog extends Dialog {
     }
 
     public CharSequence[] getHostItems() {
-        if (adapter == null) return items;
+        if (listView == null || listView.getAdapter() == null) return null;
+        ListAdapter adapter = listView.getAdapter();
         CharSequence[] labels = new CharSequence[adapter.getCount()];
         for (int i = 0; i < labels.length; i++) labels[i] = java.util.Objects.toString(adapter.getItem(i), "");
         return labels;
@@ -145,12 +146,17 @@ public class AlertDialog extends Dialog {
     }
 
     public int getHostCheckedItem() {
-        return checkedItem;
+        return listView == null ? -1 : listView.getCheckedItemPosition();
     }
 
     public boolean[] getHostCheckedItems() {
-        return checkedItems;
+        if (itemMode != ITEMS_MULTI || listView == null) return null;
+        boolean[] values = new boolean[listView.getCount()];
+        for (int i = 0; i < values.length; i++) values[i] = listView.isItemChecked(i);
+        return values;
     }
+
+    public ListView getListView() { return listView; }
 
     /** 用户点了对话框按钮。 */
     public void hostPerformButton(int which) {
@@ -167,20 +173,18 @@ public class AlertDialog extends Dialog {
 
     /** 用户点了列表第 {@code index} 项。 */
     public void hostPerformItem(int index) {
-        CharSequence[] list = getHostItems();
-        if (list == null || index < 0 || index >= list.length || (adapter != null && !adapter.isEnabled(index))) return;
+        if (listView == null || index < 0 || index >= listView.getCount()
+                || !listView.getAdapter().isEnabled(index)) return;
         switch (itemMode) {
             case ITEMS_SINGLE:
-                checkedItem = index;
-                DialogHost.get().onDialogChanged(this);
+                listView.setItemChecked(index, true);
                 if (itemListener != null) itemListener.onClick(this, index);
                 break;
             case ITEMS_MULTI: {
-                boolean[] checked = checkedItems;
-                if (checked == null || index >= checked.length) return;
-                checked[index] = !checked[index];
-                DialogHost.get().onDialogChanged(this);
-                if (multiChoiceListener != null) multiChoiceListener.onClick(this, index, checked[index]);
+                boolean checked = !listView.isItemChecked(index);
+                listView.setItemChecked(index, checked);
+                if (checkedItems != null && index < checkedItems.length) checkedItems[index] = checked;
+                if (multiChoiceListener != null) multiChoiceListener.onClick(this, index, checked);
                 break;
             }
             default:
@@ -365,11 +369,22 @@ public class AlertDialog extends Dialog {
             dialog.setTitle(title);
             dialog.message = message;
             dialog.buttons.putAll(buttons);
-            dialog.items = items;
-            dialog.adapter = adapter;
             dialog.itemMode = itemMode;
-            dialog.checkedItem = checkedItem;
             dialog.checkedItems = checkedItems;
+            if (items != null || adapter != null) {
+                ListView list = new ListView(context);
+                list.setAdapter(adapter != null ? adapter : new ArrayAdapter<>(context, 0, items));
+                if (itemMode == ITEMS_SINGLE) {
+                    list.setChoiceMode(ListView.CHOICE_MODE_SINGLE);
+                    list.setItemChecked(checkedItem, true);
+                } else if (itemMode == ITEMS_MULTI) {
+                    list.setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
+                    for (int i = 0; checkedItems != null && i < checkedItems.length; i++) {
+                        if (checkedItems[i]) list.setItemChecked(i, true);
+                    }
+                }
+                dialog.listView = list;
+            }
             dialog.itemListener = itemListener;
             dialog.multiChoiceListener = multiChoiceListener;
             if (view != null) dialog.setContentView(view);

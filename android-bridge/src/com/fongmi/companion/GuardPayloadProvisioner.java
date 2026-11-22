@@ -1,9 +1,9 @@
 package com.fongmi.companion;
 
+import com.fongmi.companion.ipc.ChildJvm;
 import java.io.File;
 import java.io.InputStream;
 import java.net.URI;
-import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -132,14 +132,11 @@ public final class GuardPayloadProvisioner {
     }
 
     private static java.util.List<String> buildCommand(File selfClasspath, File libDir, File shellJar, File target) {
-        String javaBin = new File(new File(System.getProperty("java.home", "."), "bin"),
-                isWindows() ? "java.exe" : "java").getAbsolutePath();
         // selfClasspath 必须指向 companion-service.jar 本身（或开发态的 classes 目录），
         // 指向 dist 目录是不够的：目录里放的是 jar，不会自动被当成 classpath 条目展开。
         String classpath = selfClasspath.getAbsolutePath() + File.pathSeparator
                 + new File(libDir, "*").getAbsolutePath();
-        return Arrays.asList(
-                javaBin,
+        return ChildJvm.command(
                 "-Xmx2g",
                 "-Dfile.encoding=UTF-8",
                 "-cp", classpath,
@@ -166,10 +163,6 @@ public final class GuardPayloadProvisioner {
     private static File resolveDistDir() {
         File self = resolveSelfClasspath();
         return self.isDirectory() ? self : self.getParentFile();
-    }
-
-    private static boolean isWindows() {
-        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
     }
 
     /** 供诊断用：把子进程日志尾部读成字符串。 */

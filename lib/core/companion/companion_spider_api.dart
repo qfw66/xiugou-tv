@@ -8,6 +8,7 @@ import '../config/models/vod_config.dart';
 import '../net/http_client_factory.dart';
 import '../net/site_icon_url.dart';
 import '../player/models/player_state.dart';
+import '../player/source_subtitle.dart';
 import 'companion_process_manager.dart';
 import 'companion_recovery.dart';
 import 'browser_verification_controller.dart';
@@ -868,6 +869,7 @@ class SpiderPlayResult {
   final List<PlaybackQuality> qualities;
   final int qualityIndex;
   final List<LiveDanmakuSource> liveDanmakuSources;
+  final List<SourceSubtitle> subtitles;
 
   const SpiderPlayResult({
     required this.url,
@@ -876,6 +878,7 @@ class SpiderPlayResult {
     this.qualities = const [],
     this.qualityIndex = 0,
     this.liveDanmakuSources = const [],
+    this.subtitles = const [],
   });
 
   /// 纯播放载荷解析，HTTP type:4 与 Spider 共用，不访问伴随服务状态。
@@ -921,6 +924,7 @@ class SpiderPlayResult {
       headers: headers,
       qualityIndex: selection.index,
       liveDanmakuSources: liveDanmakuSources,
+      subtitles: SourceSubtitle.parse(decoded['subs']),
       qualities: qualities.length < 2
           ? const []
           : List<PlaybackQuality>.unmodifiable([

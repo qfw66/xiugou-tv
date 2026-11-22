@@ -113,12 +113,8 @@ class FileWebDavProfileStore implements WebDavProfileStore {
     if (clear == null || clear.isEmpty || clear.length > _maxBytes) {
       throw const FormatException();
     }
-    final Object? decoded;
-    try {
-      decoded = jsonDecode(utf8.decode(clear));
-    } finally {
-      clear.fillRange(0, clear.length, 0);
-    }
+    // 通道可能返回只读视图，直接解码，无需额外复制明文。
+    final Object? decoded = jsonDecode(utf8.decode(clear));
     if (decoded is! Map ||
         decoded['version'] != 1 ||
         decoded['connections'] is! List) {

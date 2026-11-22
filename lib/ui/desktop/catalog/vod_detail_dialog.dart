@@ -1,16 +1,29 @@
+import 'dart:async';
+import 'dart:math' as math;
+import 'package:dio/dio.dart' show CancelToken;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../../../core/api/douban_repository.dart';
 import '../../../core/api/models/vod_models.dart';
+import '../../../core/api/tmdb_repository.dart';
 import '../../../core/config/models/history_record.dart';
 import '../../../core/api/netdisk_share_links.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../widgets/app_message.dart';
+import '../widgets/desktop_window_frame.dart';
+import '../widgets/media_title_bar.dart';
 import '../widgets/focus_ring.dart';
 import '../dialogs/history_sections.dart';
 import '../widgets/horizontal_scroll_area.dart';
 import 'poster_image.dart';
+import 'douban_poster_image.dart';
+
+part 'cinematic_vod_detail.dart';
+part 'cinematic_detail_rail.dart';
+part 'cinematic_detail_comments.dart';
+part 'cinematic_detail_metadata.dart';
 
 /// 详情页选集的完整选择上下文（把同站全部线路带进播放会话）。
 class EpisodeSelection {
@@ -21,6 +34,9 @@ class EpisodeSelection {
   final List<PlayFrom> sources;
   final int sourceIndex;
 
+  /// 从历史记录定位到这一集时保留所选断点；普通选集仍按片名和集名查找进度。
+  final HistoryRecord? resumeRecord;
+
   const EpisodeSelection({
     required this.episode,
     required this.sourceName,
@@ -28,6 +44,7 @@ class EpisodeSelection {
     required this.index,
     required this.sources,
     required this.sourceIndex,
+    this.resumeRecord,
   });
 }
 
@@ -103,6 +120,13 @@ class VodDetailDialog extends StatefulWidget {
   /// 本片在当前站最近一条播放历史；为 `null` 时不显示「上次播放」。
   final HistoryRecord? lastWatched;
 
+  final Future<TmdbMovie?> Function(CancelToken)? loadCinematicMetadata;
+  final Future<DoubanDetailMetadata?> Function(CancelToken)? loadDoubanMetadata;
+  final Future<List<String>> Function(DoubanDetailMetadata, CancelToken)? loadDoubanBackdrops;
+  final Future<List<DoubanComment>> Function(CancelToken)? loadHotComments;
+  final ValueChanged<String>? onSearchRecommendation;
+  final EpisodeSelection? historySelection;
+
   const VodDetailDialog({
     super.key,
     required this.detail,
@@ -112,6 +136,12 @@ class VodDetailDialog extends StatefulWidget {
     this.currentEpisode,
     this.onOpenUrl,
     this.lastWatched,
+    this.loadCinematicMetadata,
+    this.loadDoubanMetadata,
+    this.loadDoubanBackdrops,
+    this.loadHotComments,
+    this.onSearchRecommendation,
+    this.historySelection,
   });
 
   @override
@@ -227,11 +257,58 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
     );
   }
 
+  Future<void> _toggleFavorite() async {
+    if (_favoriteBusy || widget.onToggleFavorite == null) return;
+    final previous = _favorited;
+    setState(() {
+      _favoriteBusy = true;
+      _favorited = !previous;
+      _error = null;
+    });
+    String? message;
+    try {
+      message = await widget.onToggleFavorite!();
+    } catch (_) {
+      message = '收藏保存失败，请稍后重试';
+    }
+    if (!mounted) return;
+    setState(() {
+      _favoriteBusy = false;
+      if (message != null) {
+        _favorited = previous;
+        _error = message;
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
     final item = widget.detail.item;
     final sources = widget.detail.sources;
+    if (widget.loadCinematicMetadata case final load?) {
+      return _CinematicVodPage(
+        key: ValueKey((item.siteKey, item.id, item.name, item.year, item.typeName, item.doubanId)),
+        detail: widget.detail,
+        load: load,
+        loadDoubanMetadata: widget.loadDoubanMetadata,
+        loadDoubanBackdrops: widget.loadDoubanBackdrops,
+        loadHotComments: widget.loadHotComments,
+        current: widget.currentEpisode,
+        history: widget.historySelection,
+        onPlay: widget.onPlayEpisode,
+        onSearchRecommendation: widget.onSearchRecommendation,
+        favorite: widget.onToggleFavorite == null
+            ? null
+            : IconButton.filledTonal(
+                tooltip: _favorited ? '取消收藏' : '收藏影片',
+                icon: Icon(_favorited ? Icons.star_rounded : Icons.star_outline_rounded),
+                onPressed: _favoriteBusy ? null : _toggleFavorite,
+              ),
+        share: _shareLinks.isEmpty ? null : _buildShareLinkButton(palette),
+        error: _error,
+      );
+    }
     final currentEpisodes =
         (sources.isNotEmpty && _selectedSourceIndex < sources.length)
             ? sources[_selectedSourceIndex].episodes
@@ -490,26 +567,7 @@ class _VodDetailDialogState extends State<VodDetailDialog> {
                               size: 22,
                             ),
                             tooltip: _favorited ? '已收藏 (点击取消)' : '收藏影片',
-                            onPressed: _favoriteBusy
-                                ? null
-                                : () async {
-                                    final previous = _favorited;
-                                    setState(() {
-                                      _favoriteBusy = true;
-                                      _favorited = !previous;
-                                      _error = null;
-                                    });
-                                    final message =
-                                        await widget.onToggleFavorite!();
-                                    if (!mounted) return;
-                                    setState(() {
-                                      _favoriteBusy = false;
-                                      if (message != null) {
-                                        _favorited = previous;
-                                        _error = message;
-                                      }
-                                    });
-                                  },
+                            onPressed: _favoriteBusy ? null : _toggleFavorite,
                           ),
                         ),
                       const SizedBox(width: 4),

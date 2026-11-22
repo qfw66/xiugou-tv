@@ -5,6 +5,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:path/path.dart' as p;
 import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'ui/desktop/dialogs/cancellable_load_dialog.dart';
 import 'ui/desktop/dialogs/app_dialog.dart';
@@ -18,6 +19,7 @@ import 'core/api/play_failure_text.dart';
 import 'core/api/rating_picker.dart';
 import 'core/api/search_cancel_token.dart';
 import 'core/api/search_engine.dart';
+import 'core/api/tmdb_repository.dart';
 import 'core/app_info.dart';
 import 'core/companion/companion_ui_channel.dart';
 import 'core/companion/companion_spider_api.dart';
@@ -258,6 +260,11 @@ Future<void> showUpdateDialog(BuildContext context) => showAppDialog<void>(
     );
 
 final cmsApiProvider = Provider<CmsJsonApi>((ref) => CmsJsonApi());
+final tmdbRepositoryProvider = Provider<TmdbRepository>((ref) {
+  final repo = TmdbRepository();
+  ref.onDispose(repo.dispose);
+  return repo;
+});
 final Provider<SiteApi> siteApiProvider = Provider<SiteApi>((ref) {
   final api = SiteApi(
     cmsApi: ref.watch(cmsApiProvider),
@@ -580,11 +587,20 @@ final playbackIntentProvider = StateProvider<PlaybackIntent?>((ref) => null);
 
 /// §43 弹幕加载器（全应用一份；换集 / 退出由 [_DanmakuSessionSync] 驱动）。
 final danmakuControllerProvider = Provider<DanmakuController>((ref) {
+  final settings = ref.watch(settingsRepositoryProvider);
+  final source = resolveDanmakuSource(settings.playerSettings.danmaku.source);
   final controller = DanmakuController(
-    api: DanmakuApi(),
+    api: DanmakuApi(source: source),
+    source: source,
     cache: DanmakuCache(p.join(DataDirectoryManager.currentPath, 'danmaku')),
   );
-  ref.onDispose(controller.dispose);
+  final subscription = settings.playerSettingsStream.listen((next) {
+    unawaited(controller.selectSource(resolveDanmakuSource(next.danmaku.source)));
+  });
+  ref.onDispose(() {
+    unawaited(subscription.cancel());
+    controller.dispose();
+  });
   return controller;
 });
 
@@ -650,6 +666,7 @@ Future<void> startEpisodePlaybackWithIntent(
         targetSite: targetSite,
         sources: selection.sources,
         sourceIndex: selection.sourceIndex,
+        resumeRecord: selection.resumeRecord,
       );
     } catch (error) {
       // 骨架不能永远转：异常也收敛成失败态（可重试）。
@@ -1204,6 +1221,7 @@ Object? _lastPlayError;
   required int index,
   required Site? site,
   required MediaPlaySpec resolved,
+  HistoryRecord? resumeRecord,
 }) {
   final episode = episodes[index];
   if (resolved.isLive) {
@@ -1219,7 +1237,7 @@ Object? _lastPlayError;
   }
   final repo = ref.read(configRepositoryProvider);
   final recordId = HistoryRecord.buildId(item.id, episode.name);
-  final resumeMatch = repo.findLatestResumeCandidate(
+  final resumeMatch = resumeRecord != null ? null : repo.findLatestResumeCandidate(
     vodId: item.id,
     vodName: item.name,
     episodeName: episode.name,
@@ -1228,7 +1246,7 @@ Object? _lastPlayError;
         (episodes.isNotEmpty &&
             episodes.every((e) => isMovieEpisodeName(e.name))),
   );
-  final existing = resumeMatch?.record;
+  final existing = resumeRecord ?? resumeMatch?.record;
 
   // 片头跳过：起播位置取「续播位置」与「片头」的较大者（片头只提前、不回退）
   final opening = _openingStart(ref, item.id);
@@ -1281,6 +1299,7 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})>
   Site? targetSite,
   List<PlayFrom>? sources,
   int sourceIndex = 0,
+  HistoryRecord? resumeRecord,
 }) async {
   if (index < 0 || index >= episodes.length) {
     return (error: playResolveFailureText(null), resumeMatch: null);
@@ -1339,6 +1358,7 @@ Future<({String? error, HistoryResumeMatch? resumeMatch})>
       index: candidate.episodeIndex,
       site: site,
       resolved: resolved,
+      resumeRecord: resumeRecord,
     );
     try {
       await _launchPlayback(
@@ -3076,31 +3096,35 @@ class _ConfigDialogState extends State<ConfigDialog> {
   }
 }
 
-/// 片尾跳过监听：只在播放器子树内挂载（此时引擎一定已注入）。
-///
-/// 到达「时长 − 片尾」时调用 SET-17 的切集入口；本集只触发一次，
-/// 且要求本集先上报过片尾点之前的位置（视为真正起播）。
-class _PlaySkipWatcher extends ConsumerStatefulWidget {
+/// 点播连播：自然结束与越过片尾点共用一次切集机会。
+class _EpisodeAdvanceWatcher extends ConsumerStatefulWidget {
   final MpvPlayerEngine engine;
   final Widget child;
 
-  const _PlaySkipWatcher({required this.engine, required this.child});
+  const _EpisodeAdvanceWatcher({required this.engine, required this.child});
 
   @override
-  ConsumerState<_PlaySkipWatcher> createState() => _PlaySkipWatcherState();
+  ConsumerState<_EpisodeAdvanceWatcher> createState() =>
+      _EpisodeAdvanceWatcherState();
 }
 
-class _PlaySkipWatcherState extends ConsumerState<_PlaySkipWatcher> {
+class _EpisodeAdvanceWatcherState extends ConsumerState<_EpisodeAdvanceWatcher> {
   StreamSubscription<Duration>? _subscription;
+  StreamSubscription<PlaybackStatus>? _statusSubscription;
 
   /// 单订阅流（部分测试替身）已被播放器内部消费时的回退时钟。
   Timer? _timer;
-  String? _triggeredFor;
-  String? _armedKey;
+  MediaPlaySpec? _startedSpec;
+  MediaPlaySpec? _beforeEndingSpec;
+  MediaPlaySpec? _triggeredSpec;
 
   @override
   void initState() {
     super.initState();
+    if (widget.engine.status == PlaybackStatus.playing) {
+      _startedSpec = widget.engine.currentSpec;
+    }
+    _statusSubscription = widget.engine.statusStream.listen(_onStatus);
     try {
       _subscription = widget.engine.positionStream.listen(_onPosition);
     } on StateError {
@@ -3113,44 +3137,76 @@ class _PlaySkipWatcherState extends ConsumerState<_PlaySkipWatcher> {
   @override
   void dispose() {
     unawaited(_subscription?.cancel());
+    unawaited(_statusSubscription?.cancel());
     _timer?.cancel();
     super.dispose();
   }
 
-  void _onPosition(Duration position) {
-    if (!mounted || ref.read(activePlaySpecProvider)?.isLive == true) return;
-    // 设置中心打开时不自动切集：否则会把用户的设置面板强行关掉并丢失未提交输入
-    if (ref.read(settingsPageOpenProvider)) return;
+  PlaybackSession? _eligibleSession(MediaPlaySpec spec) {
     final session = ref.read(activePlaybackSessionProvider);
-    if (session == null) return;
-    if (session.switching ||
+    if (session == null ||
+        !session.hasNext ||
+        session.switching ||
+        !identical(ref.read(activePlaySpecProvider), spec) ||
+        ref.read(settingsPageOpenProvider) ||
+        ref.read(playbackIntentProvider) != null ||
         ref.read(playerRefreshBusyProvider) ||
+        ref.read(playerAutoSwitchBusyProvider) ||
         ref.read(playbackSourceChangeProvider) != null) {
-      return;
+      return null;
+    }
+    return session;
+  }
+
+  void _onStatus(PlaybackStatus status) {
+    if (!mounted) return;
+    final spec = widget.engine.currentSpec;
+    if (spec == null || spec.isLive) return;
+    if (status == PlaybackStatus.playing) {
+      _startedSpec = spec;
+    } else if (status == PlaybackStatus.error || status == PlaybackStatus.idle) {
+      _startedSpec = null;
+    } else if (status == PlaybackStatus.completed &&
+        identical(_startedSpec, spec)) {
+      final session = _eligibleSession(spec);
+      if (session != null) _advance(spec, session);
+    }
+  }
+
+  void _onPosition(Duration position) {
+    if (!mounted) return;
+    final spec = widget.engine.currentSpec;
+    if (spec == null || spec.isLive) return;
+    final session = _eligibleSession(spec);
+    if (session == null) return;
+    if (position > Duration.zero &&
+        widget.engine.status == PlaybackStatus.playing) {
+      _startedSpec = spec;
     }
     final preferences =
         ref.read(settingsRepositoryProvider).playSkipPreferences;
     if (!preferences.enabled) return;
     final entry = preferences.entryFor(session.item.id);
     if (entry == null || entry.endingMs <= 0) return;
-    if (!session.hasNext) return;
     final duration = widget.engine.duration;
     if (duration <= Duration.zero) return;
     final endAt = duration - Duration(milliseconds: entry.endingMs);
     if (endAt <= Duration.zero) return;
 
-    final key = '${session.item.id}#${session.index}';
-    if (_triggeredFor != null && _triggeredFor != key) {
-      // 新的一集：解除上一次的触发标记
-      _triggeredFor = null;
-    }
     if (position < endAt) {
-      _armedKey = key;
+      _beforeEndingSpec = spec;
+    } else if (identical(_beforeEndingSpec, spec)) {
+      _advance(spec, session);
+    }
+  }
+
+  void _advance(MediaPlaySpec spec, PlaybackSession session) {
+    // 解析下一集期间，旧媒体可能继续上报片尾位置或 EOF，即使切集失败也不循环重试。
+    if (identical(_triggeredSpec, spec) ||
+        !ref.read(settingsRepositoryProvider).playerSettings.autoPlayNextEpisode) {
       return;
     }
-    if (_armedKey != key) return;
-    if (_triggeredFor == key) return;
-    _triggeredFor = key;
+    _triggeredSpec = spec;
     unawaited(_handleEpisodeSwitch(context, ref, session.index + 1));
   }
 
@@ -3738,6 +3794,8 @@ class XiugouTvApp extends ConsumerWidget {
         ref.watch(liveFavoritesProvider).map((e) => e.key).toSet();
     final playerEngine = ref.watch(playerEngineProvider);
     final showSettings = ref.watch(settingsPageOpenProvider);
+    final showPlayer = activePlaySpec != null || liveEntryLoading ||
+        prepareIntent != null;
     final sourceChange = ref.watch(playbackSourceChangeProvider);
     final refreshBusy =
         ref.watch(playerRefreshBusyProvider) || sourceChange != null;
@@ -3805,6 +3863,7 @@ class XiugouTvApp extends ConsumerWidget {
                     ref.read(settingsRepositoryProvider).appearancePreferences;
                 return DesktopWindowFrame(
                   windowManager: windowMgr,
+                  onDetailBack: showSettings || showPlayer ? null : searchBridge.onDetailBack,
                   activeSiteName: activeSiteName,
                   activeSiteIcon: activeSiteIcon,
                   activeSiteHeaders: currentSite?.header,
@@ -3829,9 +3888,7 @@ class XiugouTvApp extends ConsumerWidget {
                     }
                   },
                   child: DesktopShell(
-                    showPlayer: activePlaySpec != null ||
-                        liveEntryLoading ||
-                        prepareIntent != null,
+                    showPlayer: showPlayer,
                     showSettings: showSettings,
                     settingsView: showSettings
                         ? SettingsPage(
@@ -3884,7 +3941,7 @@ class XiugouTvApp extends ConsumerWidget {
                             fit: StackFit.expand,
                             children: [
                               _LineSwitchNoticeHost(
-                                child: _PlaySkipWatcher(
+                                child: _EpisodeAdvanceWatcher(
                                   engine: playerEngine,
                                   child: _PlayerPrefsBinding(
                                     repository:
@@ -4077,6 +4134,9 @@ class XiugouTvApp extends ConsumerWidget {
                                                                 danmakuDefault),
                                                       ),
                                             playerEngine: playerEngine,
+                                            embeddedPlayback: isRealMpvEngine && Platform.isWindows
+                                                ? playerEngine.embeddedSession
+                                                : null,
                                             windowManager: windowMgr,
                                             scale: scale,
                                             hideWindowTitleBar:
@@ -4661,6 +4721,9 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   /// 副本只供详情弹窗判定当前集，不参与播放器逻辑。
   PlaybackSession? _lastPlayedSession;
   bool _restoringDetailDialog = false;
+  WidgetBuilder? _cinematicPage;
+  LocalHistoryEntry? _detailHistory;
+  TmdbCardPreview? _cardPreview;
 
   String? _currentSiteIdentity() {
     final repository = ref.read(configRepositoryProvider);
@@ -4688,8 +4751,35 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   /// 清空搜索词并回到常规首页 / 分类加载（搜索框清除、换源同步与
   /// 空态行动按钮共用——B2）。
   void _clearSearchToHome() {
+    _cardPreview?.cancel();
+    _leaveCatalogDetail();
     _searchController.clear();
     loadSiteData();
+  }
+
+  void _leaveCatalogDetail() => _detailHistory?.remove();
+
+  Future<void> _presentCatalogDetail(WidgetBuilder page) {
+    _leaveCatalogDetail();
+    final closed = Completer<void>();
+    final entry = LocalHistoryEntry(
+      impliesAppBarDismissal: false,
+      onRemove: () {
+        if (_detailHistory != null && mounted) {
+          setState(() {
+            _cinematicPage = null;
+            _detailHistory = null;
+          });
+        }
+        closed.complete();
+      },
+    );
+    ModalRoute.of(context)!.addLocalHistoryEntry(entry);
+    setState(() {
+      _detailHistory = entry;
+      _cinematicPage = page;
+    });
+    return closed.future;
   }
 
   void _synchronizeSite() {
@@ -4777,6 +4867,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
         onRefresh: _reloadCurrentView,
         refreshBusy: _isLoading,
         visible: true,
+        onDetailBack: _cinematicPage == null ? null : _leaveCatalogDetail,
       );
     });
   }
@@ -4788,6 +4879,10 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     // 不卸载它），那一刻标题栏也不在了；而在 dispose 之后再碰 ref 会抛
     // `Cannot use "ref" after the widget was disposed`（旧实现用 post-frame
     // 复位正好踩中）。新实例挂载时 initState → _syncSearchBridge 会覆盖旧值。
+    final entry = _detailHistory;
+    _detailHistory = null;
+    entry?.remove();
+    _cardPreview?.cancel();
     _prewarmTimer?.cancel();
     _proxyRecovery?.dispose();
     _cancelSearchStream();
@@ -5387,6 +5482,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
 
   /// 搜索：聚合开时逐站增量渲染（先完成先显示）；聚合关时仅检索当前站源（不受支持时明确提示且不发起请求）
   Future<void> _handleSearch(String keyword, {bool forceAggregate = false}) async {
+    _cardPreview?.cancel();
+    _leaveCatalogDetail();
     final query = keyword.trim();
     if (query.isEmpty) {
       loadSiteData();
@@ -5535,6 +5632,36 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     );
   }
 
+  TmdbCardPreview? _preloadCard(VodItem item, Site site) {
+    _finishCardPreview(_cardPreview);
+    final prefs = ref.read(settingsRepositoryProvider).appearancePreferences.tmdb;
+    if (!prefs.cinematic || localConfigCenterUrlOf(item.content) != null) {
+      return null;
+    }
+    final preview = _cardPreview = ref
+        .read(tmdbRepositoryProvider)
+        .preloadCard(item, prefs, allowPosterOnly: !site.usesCompanion);
+    final pending = preview?.movie;
+    if (preview != null && pending != null) {
+      unawaited(pending.then((movie) {
+        if (!mounted || movie == null || preview.cancelled ||
+            _cinematicPage != null || !identical(_cardPreview, preview)) {
+          return;
+        }
+        for (final url in {movie.backdrop, movie.logo}.whereType<String>()) {
+          unawaited(precacheImage(NetworkImage(url), context,
+              onError: (_, _) {}));
+        }
+      }));
+    }
+    return preview;
+  }
+
+  void _finishCardPreview(TmdbCardPreview? preview) {
+    preview?.cancel();
+    if (identical(_cardPreview, preview)) _cardPreview = null;
+  }
+
   Future<void> _onItemClicked(VodItem item) async {
     // 豆瓣首页是导航层：点片不进详情，直接拿片名去已启用站源全局搜索（§17）
     if (_isDoubanHome && !_isSearching) {
@@ -5589,6 +5716,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
 
     final clickedAt = DateTime.now();
     final generation = _contentGeneration;
+    final preview = _preloadCard(item, targetSite);
 
     try {
       final siteApi = ref.read(siteApiProvider);
@@ -5633,16 +5761,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
                 ));
         return;
       }
-      // 详情接口常不带 vod_remarks（「更新至N集」），沿用列表卡片上的值。
-      final listRemarks = item.remarks?.trim() ?? '';
-      _showDetailDialog(
-          (detail.item.remarks?.trim().isEmpty ?? true) &&
-                  listRemarks.isNotEmpty
-              ? VodDetail(
-                  item: detail.item.copyWith(remarks: listRemarks),
-                  sources: detail.sources)
-              : detail,
-          targetSite);
+      await _showDetailDialog(detail.withCardFallbacks(item), targetSite,
+          preview: preview);
     } catch (e) {
       if (!mounted || generation != _contentGeneration) return;
       if (e is SpiderCallException &&
@@ -5653,6 +5773,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       }
       if (!mounted || generation != _contentGeneration) return;
       showAppMessage('获取详情失败: $e', type: AppMessageType.error);
+    } finally {
+      _finishCardPreview(preview);
     }
   }
 
@@ -5750,6 +5872,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   /// 打开站源条目的详情弹窗（评分盲开复用「点卡片 → 详情」的同一条链路）。
   Future<void> _openVodDetail(VodItem item, Site site) async {
     final generation = _contentGeneration;
+    final preview = _preloadCard(item, site);
     try {
       final loaded = await loadWithDialog<VodDetail>(
         context: context,
@@ -5766,19 +5889,13 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
             type: AppMessageType.error);
         return;
       }
-      // 详情接口常不带 vod_remarks（「更新至N集」），沿用列表卡片上的值。
-      final listRemarks = item.remarks?.trim() ?? '';
-      _showDetailDialog(
-          (detail.item.remarks?.trim().isEmpty ?? true) &&
-                  listRemarks.isNotEmpty
-              ? VodDetail(
-                  item: detail.item.copyWith(remarks: listRemarks),
-                  sources: detail.sources)
-              : detail,
-          site);
+      await _showDetailDialog(detail.withCardFallbacks(item), site,
+          preview: preview);
     } catch (e) {
       if (!mounted || generation != _contentGeneration) return;
       showAppMessage('评分盲开失败：$e', type: AppMessageType.error);
+    } finally {
+      _finishCardPreview(preview);
     }
   }
 
@@ -5882,6 +5999,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
 
   /// 原地刷新当前视图：文件夹浏览中刷新该层，否则重拉当前分类。
   void _reloadCurrentView() {
+    _cardPreview?.cancel();
+    _leaveCatalogDetail();
     final folder = _folderBrowserKey.currentState;
     if (folder != null) {
       folder.refresh();
@@ -5965,8 +6084,9 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
   ///
   /// 同时记住起播来源：用户从选集里点某一集后，弹窗会先关闭、进入播放器；
   /// 退出播放器时应回到这个弹窗继续选集，而不是掉回首页。
-  void _showDetailDialog(VodDetail detail, Site? site) {
-    _showDetailDialogWithCurrentEpisode(
+  Future<void> _showDetailDialog(VodDetail detail, Site? site,
+      {TmdbCardPreview? preview}) {
+    return _showDetailDialogWithCurrentEpisode(
       detail,
       site,
       currentEpisodeForDetail(
@@ -5975,21 +6095,57 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
         vodId: detail.item.id,
         siteKey: site?.key,
       ),
+      preview: preview,
     );
   }
 
   /// 打开弹窗并**显式**指定当前集：`null` 即零高亮，不再回落推断。
-  void _showDetailDialogWithCurrentEpisode(
-      VodDetail detail, Site? site, CurrentEpisode? currentEpisode) {
+  Future<void> _showDetailDialogWithCurrentEpisode(
+      VodDetail detail, Site? site, CurrentEpisode? currentEpisode,
+      {TmdbCardPreview? preview}) {
     final repo = ref.read(configRepositoryProvider);
-    showAppDialog<void>(
-      context: context,
-      builder: (_) => VodDetailDialog(
+    final prefs = ref.read(settingsRepositoryProvider).appearancePreferences.tmdb;
+    final cinematic = prefs.cinematic &&
+        detail.sources.any((s) => s.episodes.isNotEmpty) &&
+        !detail.item.isFolder &&
+        detail.item.action == null &&
+        localConfigCenterUrlOf(detail.item.content) == null;
+    final history = latestHistoryForDetail(repo.historyRecords,
+        vodId: detail.item.id, siteKey: site?.key);
+    final preloaded = cinematic
+        ? preview?.forDetail(detail.item, prefs, sources: detail.sources)
+        : null;
+    if (!cinematic) preview?.cancel();
+    Widget page(BuildContext _) => VodDetailDialog(
         detail: detail,
         isFavorite: repo.isFavorite(detail.item.id),
         currentEpisode: currentEpisode,
-        lastWatched: latestHistoryForDetail(repo.historyRecords,
-            vodId: detail.item.id, siteKey: site?.key),
+        lastWatched: history,
+        historySelection: cinematic && history != null
+            ? _locateHistorySelection(detail, history)
+            : null,
+        loadCinematicMetadata: cinematic
+            ? (cancel) => preloaded ??
+                ref.read(tmdbRepositoryProvider).lookup(detail.item, prefs,
+                    sources: detail.sources, cancel: cancel)
+            : null,
+        loadDoubanMetadata: cinematic
+            ? (cancel) => ref.read(doubanRepositoryProvider)
+                .detailMetadataFor(detail.item, cancel: cancel)
+            : null,
+        loadDoubanBackdrops: cinematic
+            ? (subject, cancel) => ref.read(doubanRepositoryProvider)
+                .detailBackdropsFor(subject, cancel: cancel)
+            : null,
+        loadHotComments: cinematic
+            ? (cancel) => ref.read(doubanRepositoryProvider)
+                .hotCommentsFor(detail.item, cancel: cancel)
+            : null,
+        onSearchRecommendation: cinematic ? (title) {
+          _searchController.text = title;
+          FocusScope.of(context).unfocus();
+          unawaited(_handleSearch(title, forceAggregate: true));
+        } : null,
         onOpenUrl: ref.read(installerLauncherProvider).openUrl,
         onToggleFavorite: () async {
           try {
@@ -6007,8 +6163,10 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
           unawaited(
               _startPlayEpisode(detail.item, selection, targetSite: site));
         },
-      ),
-    );
+      );
+    return cinematic
+        ? _presentCatalogDetail(page)
+        : showAppDialog<void>(context: context, builder: page);
   }
 
   /// 播放器退出后恢复「选集弹窗」。只对「从详情弹窗起播」的会话生效；
@@ -6085,6 +6243,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       index: episodeIndex,
       sources: detail.sources,
       sourceIndex: sourceIndex,
+      resumeRecord: record,
     );
   }
 
@@ -6133,8 +6292,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
     _playbackOriginDetail = null;
     _playbackOriginSite = null;
 
-    var playUrl = record.playUrl;
-    Map<String, String>? headers;
+    MediaPlaySpec? resolvedSpec;
     if (record.episodeUrl.isNotEmpty) {
       try {
         final resolved = await ref.read(siteApiProvider).resolvePlayback(
@@ -6145,8 +6303,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
               parseEngine: ref.read(parseEngineProvider),
             );
         if (resolved.url.isNotEmpty) {
-          playUrl = resolved.url;
-          headers = resolved.headers;
+          resolvedSpec = resolved;
         }
       } catch (e) {
         if (site?.usesCompanion ?? false) {
@@ -6159,6 +6316,7 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
       }
     }
     if (!mounted) return;
+    final playUrl = resolvedSpec?.url ?? record.playUrl;
     if (playUrl.isEmpty) {
       if (mounted) {
         showAppMessage('该记录缺少可用播放地址，无法续播', type: AppMessageType.error);
@@ -6168,7 +6326,8 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
 
     final playSpec = MediaPlaySpec(
       url: playUrl,
-      headers: headers ?? site?.header,
+      headers: resolvedSpec?.headers ?? site?.header,
+      subtitles: resolvedSpec?.subtitles ?? const [],
       title: '${record.vodName} - ${record.episodeName} (${record.sourceName})',
       startPosition: record.resumePosition,
     );
@@ -6407,6 +6566,23 @@ class _DesktopMainViewState extends ConsumerState<DesktopMainView> {
 
   @override
   Widget build(BuildContext context) {
+    final catalog = _buildCatalog(context);
+    final page = _cinematicPage;
+    return IndexedStack(
+      sizing: StackFit.expand,
+      index: page == null ? 0 : 1,
+      children: [
+        catalog,
+        if (page != null)
+          CallbackShortcuts(
+            bindings: {const SingleActivator(LogicalKeyboardKey.escape): _leaveCatalogDetail},
+            child: Focus(autofocus: true, child: Builder(builder: page)),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildCatalog(BuildContext context) {
     final palette = context.palette;
     final appearance = ref.watch(appearancePreferencesProvider).valueOrNull ??
         ref.read(settingsRepositoryProvider).appearancePreferences;

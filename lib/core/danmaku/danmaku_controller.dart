@@ -6,6 +6,7 @@ import 'danmaku_api.dart';
 import 'danmaku_cache.dart';
 import 'danmaku_matcher.dart';
 import 'danmaku_models.dart';
+import 'danmaku_source.dart';
 
 enum DanmakuLoadPhase { idle, searching, loading, ready, none, failed }
 
@@ -51,19 +52,30 @@ class DanmakuState {
 /// - 弹幕原文落盘缓存（键见 [cacheKeyOf]），命中时不走网络；
 /// - 任何失败只改状态，不抛到播放流程。
 class DanmakuController extends ValueNotifier<DanmakuState> {
-  DanmakuController({required DanmakuApi api, DanmakuCache? cache})
-      : _api = api,
-        _cache = cache,
+  DanmakuController({
+    required this._api,
+    this._cache,
+    this._source = DanmakuSource.primary,
+    DanmakuApi Function(DanmakuSource)? apiFactory,
+  })  : _apiFactory = apiFactory ?? ((source) => DanmakuApi(source: source)),
         super(const DanmakuState());
 
-  final DanmakuApi _api;
+  DanmakuApi _api;
   final DanmakuCache? _cache;
+  final DanmakuApi Function(DanmakuSource) _apiFactory;
+  DanmakuSource _source;
+  int _sourceRevision = 0;
+  final _searchTokens = <DanmakuCancelToken>{};
+  final _candidateRevisions = Expando<int>();
   DanmakuCancelToken? _token;
   bool _disposed = false;
+
+  DanmakuSource get source => _source;
 
   /// 最近一次 [load] 的上下文（片名 / 集名 / 集号）：播放页「搜索弹幕」拿它当默认关键词与集号。
   DanmakuQuery? _query;
   String _key = '';
+  String _scope = '';
 
   /// 用户手动选中的候选（播放页「搜索弹幕」）：命中同一请求键时跳过自动匹配。
   String? _manualKey;
@@ -79,13 +91,17 @@ class DanmakuController extends ValueNotifier<DanmakuState> {
   /// 请求标识：播放会话范围（站点 + 影片 id）+ 规范化片名 + 季 + 集号。
   ///
   /// 换线（同片同集）标识不变、不重拉；同名不同站点 / 不同影片、或同片不同集都会重新匹配。
-  static String keyOf(DanmakuQuery query, {String scope = ''}) => '$scope#${query.identity}';
+  static String keyOf(DanmakuQuery query,
+          {String scope = '', DanmakuSource source = DanmakuSource.primary}) =>
+      '${source == DanmakuSource.primary ? '' : '${source.id}|'}$scope#${query.identity}';
 
   /// 磁盘缓存键：候选名（含片名 / 年份 / 平台 / 集数）+ 取数地址。
   ///
   /// 服务端的分集 id（`comment/10283`）来自其内存缓存，实例重启后会重新分配给别的片 / 别的集；
   /// 只按地址缓存会把旧文件当成新候选的弹幕（串片 / 串集），所以必须连同候选名一起作键。
-  static String cacheKeyOf(DanmakuCandidate candidate) => '${candidate.name}|${candidate.jsonUrl}';
+  static String cacheKeyOf(DanmakuCandidate candidate,
+          {DanmakuSource source = DanmakuSource.primary}) =>
+      '${source == DanmakuSource.primary ? '' : '${source.id}|'}${candidate.name}|${candidate.jsonUrl}';
 
   /// 加载当前集弹幕。
   ///
@@ -109,10 +125,11 @@ class DanmakuController extends ValueNotifier<DanmakuState> {
         episodeIndex: episodeIndex,
         episodeCount: episodeCount,
         yearHint: yearHint);
-    final key = keyOf(query, scope: scope);
+    final key = keyOf(query, scope: scope, source: _source);
     // 「搜索弹幕」弹窗要用最新的片名 / 集号：即便下面去重提前返回也要更新
     _query = query;
     _key = key;
+    _scope = scope;
     if (value.requestKey == key &&
         (value.busy ||
             value.phase == DanmakuLoadPhase.ready ||
@@ -172,14 +189,66 @@ class DanmakuController extends ValueNotifier<DanmakuState> {
     }
   }
 
+  /// 手动切换接口：取消旧请求、清掉手选，按新接口重新加载当前集。
+  Future<void> selectSource(DanmakuSource source) async {
+    if (_disposed || source == _source) return;
+    final nextApi = _apiFactory(source);
+    _token?.cancel();
+    _token = null;
+    _cancelSearches();
+    _api.close();
+    _api = nextApi;
+    _source = source;
+    _sourceRevision++;
+    _manualKey = null;
+    _manualCandidate = null;
+    _key = '';
+    // 通知独立弹窗接口已变化，保留当前集身份以供重新匹配。
+    _set(DanmakuState(
+      requestKey: _query == null ? null : keyOf(_query!, scope: _scope, source: source),
+    ));
+    final query = _query;
+    if (query == null) return;
+    await load(
+      name: query.name,
+      episode: query.episode,
+      episodeIndex: query.episodeIndex,
+      episodeCount: query.episodeCount,
+      yearHint: query.yearHint,
+      scope: _scope,
+    );
+  }
+
+  void _cancelSearches() {
+    for (final token in _searchTokens.toList()) {
+      token.cancel();
+    }
+    _searchTokens.clear();
+  }
+
   /// 播放页「搜索弹幕」：只按关键词搜候选，不动当前正在播的弹幕。
   ///
   /// 关键词为空直接返回空列表（不发请求）；重搜 / 关弹窗时用 [cancel] 中止上一次。
   Future<List<DanmakuCandidate>> searchCandidates(String keyword,
-      {DanmakuCancelToken? cancel}) {
+      {DanmakuCancelToken? cancel}) async {
+    if (_disposed) throw const DanmakuException('已取消');
     final trimmed = keyword.trim();
-    if (trimmed.isEmpty) return Future<List<DanmakuCandidate>>.value(const []);
-    return _api.searchKeyword(trimmed, cancel: cancel);
+    if (trimmed.isEmpty) return const [];
+    final token = cancel ?? DanmakuCancelToken();
+    final revision = _sourceRevision;
+    _searchTokens.add(token);
+    try {
+      final candidates = await _api.searchKeyword(trimmed, cancel: token);
+      if (_disposed || token.isCancelled || revision != _sourceRevision) {
+        throw const DanmakuException('已取消');
+      }
+      for (final candidate in candidates) {
+        _candidateRevisions[candidate] = revision;
+      }
+      return candidates;
+    } finally {
+      _searchTokens.remove(token);
+    }
   }
 
   /// 手动绑定候选并立即拉取弹幕（播放页「搜索弹幕」里选中一条）。
@@ -188,6 +257,14 @@ class DanmakuController extends ValueNotifier<DanmakuState> {
   /// - 之后同片同集（含关闭再开启弹幕）都沿用这次选择，直到换集 / 换片 / [clear]；
   /// - 失败只改状态，返回最终状态供弹窗显示原因。
   Future<DanmakuState> bind(DanmakuCandidate candidate) async {
+    final revision = _candidateRevisions[candidate];
+    if (revision != null && revision != _sourceRevision) {
+      return DanmakuState(
+        phase: DanmakuLoadPhase.failed,
+        requestKey: value.requestKey,
+        message: '接口已切换，请重新搜索',
+      );
+    }
     final key = value.requestKey ?? _key;
     if (key.isEmpty) {
       _log('没有可绑定的播放会话，忽略手动选择「${candidate.name}」');
@@ -212,7 +289,7 @@ class DanmakuController extends ValueNotifier<DanmakuState> {
   }) async {
     _set(DanmakuState(phase: DanmakuLoadPhase.loading, requestKey: key, candidate: candidate));
     try {
-      final cacheKey = cacheKeyOf(candidate);
+      final cacheKey = cacheKeyOf(candidate, source: _source);
       var body = await _cache?.read(cacheKey);
       if (stale()) return;
       final fromCache = body != null;
@@ -256,6 +333,7 @@ class DanmakuController extends ValueNotifier<DanmakuState> {
     _token = null;
     _query = null;
     _key = '';
+    _scope = '';
     _manualKey = null;
     _manualCandidate = null;
     _set(const DanmakuState());
@@ -269,6 +347,7 @@ class DanmakuController extends ValueNotifier<DanmakuState> {
   void dispose() {
     _disposed = true;
     _token?.cancel();
+    _cancelSearches();
     // 与 SegmentsController 对齐：控制器持有 api，释放时一并关掉其 HttpClient
     // （强制断开在途连接与空闲连接池；2026-10-28 发布前资源审查）。
     _api.close();

@@ -30,8 +30,8 @@ class CatLocalPackageImporter {
   /// 数据目录根（其下的 `catvod/` 存本地包）；默认当前数据目录。
   final String? _dataRoot;
 
-  /// 压缩包内条目数上限（正常猫源包只有 3~10 个文件）。
-  static const int maxEntries = 64;
+  /// 包含脚本库的配置可有上百项；条目数与解压字节数分别设限。
+  static const int maxEntries = 256;
 
   /// 单个条目解压后大小上限。
   static const int maxEntryBytes = 128 * 1024 * 1024;
@@ -126,13 +126,8 @@ class CatLocalPackageImporter {
     if (files.isEmpty) {
       throw const CatLocalPackageException('猫源包里没有文件，只有目录');
     }
-    if (files.length > maxEntries) {
-      throw CatLocalPackageException(
-        '猫源包条目过多（${files.length} 个，最多 $maxEntries 个），已拒绝导入',
-      );
-    }
     var total = 0;
-    for (final entry in files) {
+    for (final entry in entries) {
       if (entry.isSymlink) {
         throw CatLocalPackageException(
           '猫源包包含符号链接条目（${entry.name}），可能指向包外路径，已拒绝导入',
@@ -465,6 +460,11 @@ class _ZipDirectory {
       throw const CatLocalPackageException('压缩包已损坏或不是有效的 zip（找不到压缩包目录）');
     }
     final entryCount = data.getUint16(end + 10, Endian.little);
+    if (entryCount > CatLocalPackageImporter.maxEntries) {
+      throw CatLocalPackageException(
+        '猫源包条目过多（$entryCount 个，最多 ${CatLocalPackageImporter.maxEntries} 个），已拒绝导入',
+      );
+    }
     final directorySize = data.getUint32(end + 12, Endian.little);
     final directoryOffset = data.getUint32(end + 16, Endian.little);
     if (directoryOffset + directorySize > bytes.length) {
@@ -489,9 +489,10 @@ class _ZipDirectory {
       }
       final nameBytes = bytes.sublist(offset + 46, offset + 46 + nameLength);
       final unicodeName = (flags & 0x800) != 0;
+      // 未标 UTF-8 的 Windows 本地包由系统 tar 按本机代码页解压；核对时须使用同名。
       final name = unicodeName
           ? utf8.decode(nameBytes, allowMalformed: true)
-          : latin1.decode(nameBytes);
+          : (Platform.isWindows ? systemEncoding : latin1).decode(nameBytes);
       final unix = (madeBy >> 8) == 3;
       final mode = (externalAttributes >> 16) & 0xFFFF;
       entries.add(

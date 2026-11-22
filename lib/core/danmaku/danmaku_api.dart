@@ -5,6 +5,7 @@ import 'dart:io';
 import '../config/app_env.dart';
 import '../net/http_client_factory.dart';
 import 'danmaku_models.dart';
+import 'danmaku_source.dart';
 
 /// §43 弹幕服务地址与访问令牌：由维护者在 `config/app.env` 里配置，代码与仓库里不保存真实值。
 ///
@@ -19,8 +20,28 @@ import 'danmaku_models.dart';
 String get kDanmakuApiBase => composeDanmakuApiBase(
     AppEnv.get('XIUGOU_DANMAKU_URL'), AppEnv.get('XIUGOU_DANMAKU_TOKEN'));
 
+/// 各接口独立取配置：备用地址已包含其访问路径，不复用默认接口的令牌。
+String danmakuApiBaseFor(DanmakuSource source) => switch (source) {
+      DanmakuSource.primary => kDanmakuApiBase,
+      DanmakuSource.secondary =>
+        composeDanmakuApiBase(AppEnv.get('XIUGOU_DANMAKU_SECONDARY_URL'), ''),
+    };
+
+List<DanmakuSource> get configuredDanmakuSources => [
+      for (final source in DanmakuSource.values)
+        if (danmakuApiBaseFor(source).isNotEmpty) source,
+    ];
+
+/// 保存的接口在本次构建中缺失时，仅回落到已配置的接口。
+DanmakuSource resolveDanmakuSource(DanmakuSource preferred) {
+  final sources = configuredDanmakuSources;
+  return sources.contains(preferred)
+      ? preferred
+      : sources.firstOrNull ?? DanmakuSource.primary;
+}
+
 /// 是否配置了弹幕服务（为 false 时弹幕功能整体不出现）。
-bool get danmakuServiceConfigured => kDanmakuApiBase.isNotEmpty;
+bool get danmakuServiceConfigured => configuredDanmakuSources.isNotEmpty;
 
 /// `https://host/` + `tk` → `https://host/tk`；地址为空返回空串；令牌可空（服务未设令牌时）。
 String composeDanmakuApiBase(String url, String token) {
@@ -75,8 +96,12 @@ class DanmakuCancelToken {
 /// 网络：跟随 Windows 系统代理（`HttpClient.findProxyFromEnvironment` 不读注册表，
 /// 这里显式读取，见 [systemProxy]），直连失败的网络环境下仍可用。
 class DanmakuApi {
-  DanmakuApi({String? base, HttpClient? client, String? Function()? proxy})
-      : _base = _trimSlash(base ?? kDanmakuApiBase),
+  DanmakuApi({
+    String? base,
+    DanmakuSource source = DanmakuSource.primary,
+    HttpClient? client,
+    String? Function()? proxy,
+  })  : _base = _trimSlash(base ?? danmakuApiBaseFor(source)),
         _client = client ?? _defaultClient(proxy ?? systemProxy);
 
   static String _trimSlash(String s) => s.endsWith('/') ? s.substring(0, s.length - 1) : s;
@@ -127,6 +152,10 @@ class DanmakuApi {
     cancel?._onCancel(() => request?.abort());
     try {
       request = await _client.getUrl(uri).timeout(timeout);
+      if (cancel?.isCancelled ?? false) {
+        request.abort();
+        throw const DanmakuException('已取消');
+      }
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       final response = await request.close().timeout(timeout);
       final bytes = await response.fold<List<int>>(<int>[], (a, b) => a..addAll(b)).timeout(timeout);
@@ -141,9 +170,9 @@ class DanmakuApi {
     } on TimeoutException {
       request?.abort();
       throw const DanmakuException('弹幕服务超时');
-    } catch (e) {
+    } catch (_) {
       if (cancel?.isCancelled ?? false) throw const DanmakuException('已取消');
-      throw DanmakuException('弹幕服务不可达（$e）');
+      throw const DanmakuException('弹幕服务不可达');
     }
   }
 

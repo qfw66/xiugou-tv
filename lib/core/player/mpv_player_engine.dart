@@ -3,7 +3,9 @@ import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'decode_diagnostics.dart';
+import 'embedded_playback.dart';
 import 'live_stream_tuning.dart';
+import 'local_subtitle_files.dart';
 import 'models/player_settings.dart';
 import 'models/player_state.dart';
 import 'models/track_info.dart';
@@ -17,6 +19,8 @@ import 'player_settings_application.dart';
 import 'mpv_settings_target.dart';
 import 'seek_recovery_controller.dart';
 import '../danmaku/danmaku_api.dart';
+
+part 'mpv_embedded_routing.dart';
 
 /// 基于 media_kit (libmpv) 的 Windows 平台硬件加速播放引擎实现
 class MpvPlayerEngine
@@ -32,6 +36,8 @@ class MpvPlayerEngine
     // Independent pitch control uses an audio-only scaletempo path which
     // media_kit warns can desynchronize video. Standard speed keeps A/V synced.
     pitch: false,
+    // ASS 的排版和矢量绘图不能由 Flutter 的纯文字字幕层还原。
+    libass: true,
     // 播放缓冲 16MB，1080p 约 6~10 秒余量，视码率而定。
     bufferSize: 16 * 1024 * 1024,
     logLevel: MPVLogLevel.warn,
@@ -51,6 +57,21 @@ class MpvPlayerEngine
   late final Player _player;
   late final VideoController _videoController;
 
+  final _embeddedTexture = ValueNotifier<EmbeddedPlaybackSession?>(null);
+  _EmbeddedRoute? _route;
+  Future<Duration?>? _embeddedClosing;
+  Duration? _parkedPosition;
+  bool _volumeNeedsSync = false;
+  VideoDimensions _parkedDimensions = const VideoDimensions();
+
+  ValueListenable<EmbeddedPlaybackSession?> get embeddedSession => _embeddedTexture;
+
+  Future<bool> selectPlaybackBackend(NativePlaybackBackend? backend,
+      {EmbeddedPlaybackChannel channel = const EmbeddedPlaybackChannel()}) =>
+      _selectBackend(backend, channel);
+
+  bool get _mpvOwnsPlayback => _route == null && _embeddedClosing == null;
+
   PlaybackStatus _status = PlaybackStatus.idle;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
@@ -64,6 +85,12 @@ class MpvPlayerEngine
   MediaPlaySpec? _softRetrySpec;
   List<TrackInfo> _audioTracks = [];
   List<TrackInfo> _subtitleTracks = [];
+  int _subtitleRead = 0;
+  int _subtitleChoice = 0;
+  double _subtitleScale = 1;
+  final _localSubtitles = LocalSubtitleFiles();
+  String? _subtitleCodec;
+  final _sourceSubtitleIds = <int, String>{};
   List<TrackInfo> _videoTracks = [];
 
   /// ④ 诊断闭环：mpv 最近日志环形缓冲（40 条），供错误面板展示与「复制诊断」。
@@ -118,6 +145,7 @@ class MpvPlayerEngine
 
   bool get _acceptMediaEvents =>
       !_disposed &&
+      _mpvOwnsPlayback &&
       _currentSpec != null &&
       !_openingMedia &&
       !_externalPlaybackPaused;
@@ -144,7 +172,7 @@ class MpvPlayerEngine
 
   /// 当前是否关闭视频输出（mpv `vid=no`）；引擎未初始化或回读失败时为 false。
   bool get isVideoDisabled {
-    if (!_nativeCreated) return false;
+    if (!_nativeCreated || !_mpvOwnsPlayback) return false;
     try {
       return _player.state.track.video.id == 'no';
     } catch (_) {
@@ -156,10 +184,13 @@ class MpvPlayerEngine
   ///
   /// 只读诊断信息；引擎未初始化或回读失败时返回 null（调用方显示不可用，不猜值）。
   Future<String?> readEngineVersion() async {
+    if (!_mpvOwnsPlayback) return null;
+    final epoch = _sessionEpoch;
     try {
       final platform = _player.platform;
       if (platform is NativePlayer) {
-        return await platform.getProperty('mpv-version');
+        final version = await platform.getProperty('mpv-version');
+        return _isCurrentSession(epoch) ? version : null;
       }
     } catch (_) {
       // 引擎未初始化（late 字段未赋值）或原生回读失败：返回 null
@@ -202,16 +233,19 @@ class MpvPlayerEngine
   ///
   /// 只读诊断；引擎未初始化或回读失败时返回 null（界面不显示该行，不猜值）。
   Future<DecodeDiagnostics?> readDecodeDiagnostics() async {
+    if (!_mpvOwnsPlayback) return null;
+    final epoch = _sessionEpoch;
     try {
       final platform = _player.platform;
       if (platform is! NativePlayer) return null;
-      return DecodeDiagnostics(
+      final diagnostics = DecodeDiagnostics(
         requested: playbackSettings.hwdec,
         current: (await platform.getProperty('hwdec-current')).trim(),
         codec: (await platform.getProperty('video-codec')).trim(),
         width: int.tryParse(await platform.getProperty('width')) ?? 0,
         height: int.tryParse(await platform.getProperty('height')) ?? 0,
       );
+      return _isCurrentSession(epoch) ? diagnostics : null;
     } catch (_) {
       return null;
     }
@@ -281,6 +315,7 @@ class MpvPlayerEngine
 
     _subscriptions.add(
       _player.stream.volume.listen((vol) {
+        if (_disposed || !_mpvOwnsPlayback) return;
         _volume = vol;
         _volumeController.add(vol);
       }),
@@ -288,6 +323,7 @@ class MpvPlayerEngine
 
     _subscriptions.add(
       _player.stream.rate.listen((r) {
+        if (_disposed || !_mpvOwnsPlayback) return;
         _rate = r;
         _rateController.add(r);
       }),
@@ -335,16 +371,7 @@ class MpvPlayerEngine
             .toList();
         _audioTracksController.add(_audioTracks);
 
-        _subtitleTracks = tracks.subtitle
-            .map((t) => TrackInfo(
-                  id: t.id,
-                  type: TrackType.subtitle,
-                  title: t.title,
-                  language: t.language,
-                  isSelected: t.id == _player.state.track.subtitle.id,
-                ))
-            .toList();
-        _subtitleTracksController.add(_subtitleTracks);
+        unawaited(_refreshSubtitleTracks());
 
         _videoTracks = tracks.video
             .where((t) => t.id != 'auto' && t.id != 'no')
@@ -364,14 +391,14 @@ class MpvPlayerEngine
       _player.stream.track.listen((track) {
         if (!_acceptMediaEvents) return;
         _audioTracks = markTrackSelection(_audioTracks, track.audio.id);
-        _subtitleTracks = markTrackSelection(_subtitleTracks, track.subtitle.id);
         _audioTracksController.add(_audioTracks);
-        _subtitleTracksController.add(_subtitleTracks);
+        unawaited(_refreshSubtitleTracks());
       }),
     );
 
     _subscriptions.add(
       _player.stream.log.listen((log) {
+        if (_disposed || !_mpvOwnsPlayback) return;
         _recentLogs.add('[${log.level}] ${log.text}');
       }),
     );
@@ -379,6 +406,7 @@ class MpvPlayerEngine
     _subscriptions.add(
       _player.stream.error.listen((err) {
         if (_disposed ||
+            !_mpvOwnsPlayback ||
             _externalPlaybackPaused ||
             _currentSpec == null ||
             err.isEmpty) {
@@ -465,7 +493,7 @@ class MpvPlayerEngine
 
   /// 确认致命错误：直播先走断流重连，其余锁存为错误态（错误面板 / 自动换线据此工作）。
   void _commitError(String err) {
-    if (_disposed || _externalPlaybackPaused || _hasPendingSeek) return;
+    if (_disposed || !_mpvOwnsPlayback || _externalPlaybackPaused || _hasPendingSeek) return;
     if (_scheduleLiveReconnect()) return;
     // 传输中断（清单/分段没读全）多为瞬时问题：同一地址先自动重开一次，再判失败。
     if (_shouldSoftRetry(err)) {
@@ -585,6 +613,9 @@ class MpvPlayerEngine
 
   void _resetMediaEvidence() {
     cancelSeekRecovery();
+    _subtitleChoice++;
+    _sourceSubtitleIds.clear();
+    _subtitleCodec = null;
     _openingMedia = true;
     _awaitingOpenPosition = true;
     _sawOpenPosition = false;
@@ -611,12 +642,22 @@ class MpvPlayerEngine
   Future<void> _open(MediaPlaySpec spec,
       {bool play = true, int? sessionEpoch}) async {
     final epoch = sessionEpoch ?? _sessionEpoch;
-    if (!_isCurrentSession(epoch) || _externalPlaybackPaused) return;
+    if (!_isCurrentSession(epoch) || !_mpvOwnsPlayback || _externalPlaybackPaused) return;
     final openEpoch = ++_openEpoch;
     _cancelErrorConfirm();
     _resetMediaEvidence();
     late final String openedUri;
     try {
+      final attaching = _localSubtitles.pending;
+      if (attaching != null) {
+        await attaching;
+        if (!_isCurrentSession(epoch) || openEpoch != _openEpoch) return;
+      }
+      if (_volumeNeedsSync) {
+        await _player.setVolume(_volume);
+        if (!_isCurrentSession(epoch) || openEpoch != _openEpoch) return;
+        _volumeNeedsSync = false;
+      }
       await _applySessionStreamProperties(spec.isLive, epoch);
       if (!_isCurrentSession(epoch) || openEpoch != _openEpoch) return;
       await _applyPlaybackProxy(spec.url);
@@ -639,6 +680,10 @@ class MpvPlayerEngine
       }
     }
     await _readOpenedMediaEvidence(epoch, openEpoch, openedUri);
+    if (_isCurrentSession(epoch) && openEpoch == _openEpoch) {
+      // 本地媒体可能在 open 返回前就发出了唯一一次轨道列表。
+      await _refreshSubtitleTracks();
+    }
   }
 
   Future<void> _readOpenedMediaEvidence(
@@ -710,6 +755,7 @@ class MpvPlayerEngine
   Future<void> play(MediaPlaySpec spec) async {
     if (_disposed) throw StateError('播放器已关闭');
     final epoch = ++_sessionEpoch;
+    final closing = _retireEmbedded();
     _cancelLiveReconnect();
     _cancelErrorConfirm();
     _pauseIntent = false;
@@ -726,9 +772,13 @@ class MpvPlayerEngine
     _recentLogs.add('[mode] ${spec.isLive ? '直播' : '点播'}'
         '（来源: ${playbackModeSourceLabel(spec.modeSource)}'
         '${spec.modeDetail == null ? '' : '；依据: ${spec.modeDetail}'}）');
+    if (closing != null) {
+      await closing;
+      if (!_isCurrentSession(epoch)) return;
+    }
     await _applySessionRate(spec);
     if (!_isCurrentSession(epoch)) return;
-    await _open(spec, sessionEpoch: epoch);
+    await _open(spec, play: !_pauseIntent, sessionEpoch: epoch);
   }
 
   /// Replaces media while keeping user playback controls and diagnostics.
@@ -737,8 +787,8 @@ class MpvPlayerEngine
     if (_disposed) throw StateError('播放器已关闭');
     final savedRate = _rate;
     final savedVolume = _volume;
-    final wasPaused = _pauseIntent;
     final epoch = ++_sessionEpoch;
+    final closing = _retireEmbedded();
     _externalPlaybackPaused = false;
     _cancelLiveReconnect();
     _cancelErrorConfirm();
@@ -748,11 +798,16 @@ class MpvPlayerEngine
     _errorController.add(null);
     _resetMediaEvidence();
     _recentLogs.add('[source-switch] 保留倍速、音量和暂停状态');
+    if (closing != null) {
+      await closing;
+      if (!_isCurrentSession(epoch)) return;
+    }
+    final wasPaused = _pauseIntent;
     await _open(spec, play: !wasPaused, sessionEpoch: epoch);
     if (!_isCurrentSession(epoch)) return;
     await setRate(savedRate);
     if (!_isCurrentSession(epoch)) return;
-    await setVolume(savedVolume);
+    await setVolume(closing != null ? _volume : savedVolume);
     if (!_isCurrentSession(epoch)) return;
     if (_pauseIntent != wasPaused) {
       if (_pauseIntent) {
@@ -780,6 +835,7 @@ class MpvPlayerEngine
   Future<void> pause() async {
     if (_disposed) return;
     _pauseIntent = true;
+    if (!_mpvOwnsPlayback) return _embeddedPause(true);
     await _player.pause();
     if (!_disposed) {
       await _readSettledSeekPosition();
@@ -791,6 +847,12 @@ class MpvPlayerEngine
   /// it. The media and controls stay available for an explicit return to playback.
   Future<void> pauseForExternalPlayback() async {
     if (_disposed || _currentSpec == null) return;
+    if (_route != null) {
+      _pauseIntent = true;
+      final restore = selectPlaybackBackend(null);
+      final epoch = _sessionEpoch;
+      if (!await restore || !_isCurrentSession(epoch) || !_pauseIntent) return;
+    }
     final epoch = ++_sessionEpoch;
     _openEpoch++;
     _externalPlaybackPaused = true;
@@ -817,6 +879,7 @@ class MpvPlayerEngine
       _externalPlaybackPaused = false;
     }
     _pauseIntent = false;
+    if (!_mpvOwnsPlayback) return _embeddedPause(false);
     await _player.play();
   }
 
@@ -825,6 +888,7 @@ class MpvPlayerEngine
     if (_disposed) return;
     final epoch = ++_sessionEpoch;
     _openEpoch++;
+    final closing = _retireEmbedded();
     _cancelLiveReconnect();
     _cancelErrorConfirm();
     cancelSeekRecovery();
@@ -833,6 +897,15 @@ class MpvPlayerEngine
     _externalPlaybackPaused = false;
     _openingMedia = false;
     _awaitingOpenPosition = false;
+    if (closing != null) {
+      await closing;
+      if (!_isCurrentSession(epoch)) return;
+    }
+    final attaching = _localSubtitles.pending;
+    if (attaching != null) {
+      await attaching;
+      if (!_isCurrentSession(epoch)) return;
+    }
     await _player.stop();
     if (!_isCurrentSession(epoch)) return;
     _updateStatus(PlaybackStatus.idle);
@@ -847,6 +920,7 @@ class MpvPlayerEngine
           '[seek-rejected] 直播会话忽略 seek 到 ${position.inMilliseconds}ms');
       return;
     }
+    if (!_mpvOwnsPlayback) return _embeddedSeek(position);
     await _seekTo(position, originalPosition: _position);
   }
 
@@ -959,12 +1033,15 @@ class MpvPlayerEngine
 
   @override
   Future<void> setVolume(double volume) async {
+    if (_disposed) return;
     final clamped = volume.clamp(0.0, 100.0);
+    if (!_mpvOwnsPlayback) return _embeddedVolume(clamped);
     await _player.setVolume(clamped);
   }
 
   @override
   Future<void> setRate(double rate) async {
+    if (!_mpvOwnsPlayback) return;
     final clamped = rate.clamp(0.25, 4.0);
     // 立刻更新缓存而不等播放器事件回传：长按松开后紧接着切集时，
     // 起播链路要读到恢复后的倍速，不能读到回传前的临时倍率。
@@ -974,12 +1051,14 @@ class MpvPlayerEngine
 
   @override
   Future<void> setHardwareDecoding(String mode) async {
+    if (!_mpvOwnsPlayback) return;
     await applyPlaybackSettings(
         playbackSettings.copyWith(hwdec: PlayerSettings.normalizeHwdec(mode)));
   }
 
   @override
   Future<void> selectAudioTrack(TrackInfo track) async {
+    if (!_mpvOwnsPlayback) return;
     final nativeAudio = _player.state.tracks.audio.firstWhere(
       (a) => a.id == track.id,
       orElse: () => AudioTrack(track.id, track.title, track.language),
@@ -987,22 +1066,165 @@ class MpvPlayerEngine
     await _player.setAudioTrack(nativeAudio);
   }
 
+  int? get subtitleSession => _nativeCreated && _acceptMediaEvents &&
+          _openedMediaUri != null && _player.platform is NativePlayer
+      ? _openEpoch
+      : null;
+
+  double get subtitleScale => _subtitleScale;
+
+  static const _textSubtitleCodecs = {
+    'subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text', 'ttml',
+    'microdvd', 'sami', 'subviewer', 'subviewer1', 'mpl2', 'jacosub',
+  };
+
+  bool get canScaleSubtitle =>
+      subtitleSession != null && _textSubtitleCodecs.contains(_subtitleCodec);
+
+  Future<bool> setSubtitleScale(double factor) async {
+    final session = subtitleSession;
+    if (session == null) return false;
+    if (!factor.isFinite || factor < 0.5 || factor > 2) {
+      throw ArgumentError.value(factor, 'factor', '字幕缩放应在 0.5 到 2 之间');
+    }
+    final native = _player.platform as NativePlayer;
+    final codec = await native.getProperty('current-tracks/sub/codec');
+    if (session != subtitleSession) return false;
+    if (!_textSubtitleCodecs.contains(codec)) {
+      throw UnsupportedError('当前字幕轨不支持调整字号');
+    }
+    await native.setProperty('sub-scale', '$factor', waitForInitialization: false);
+    final actual = double.tryParse(await native.getProperty('sub-scale'));
+    if (session != subtitleSession) return false;
+    if (actual == null || !actual.isFinite || (actual - factor).abs() > 0.001) {
+      throw UnsupportedError('播放器未能调整字幕大小');
+    }
+    _subtitleScale = actual;
+    return true;
+  }
+
+  Future<bool> loadLocalSubtitle(String path, {required int session}) async {
+    if (session != subtitleSession) return false;
+    final platform = _player.platform as NativePlayer;
+    final choice = ++_subtitleChoice;
+    final epoch = _sessionEpoch;
+    bool current() => session == subtitleSession && _isCurrentSession(epoch) && choice == _subtitleChoice;
+    final bool loaded;
+    try {
+      loaded = await _localSubtitles.load(platform, path, current);
+    } finally {
+      if (current()) await _refreshSubtitleTracks();
+    }
+    return loaded && current();
+  }
+
   @override
   Future<void> selectSubtitleTrack(TrackInfo track) async {
-    final nativeSub = _player.state.tracks.subtitle.firstWhere(
-      (s) => s.id == track.id,
-      orElse: () => SubtitleTrack(track.id, track.title, track.language),
-    );
+    final choice = ++_subtitleChoice;
+    final epoch = _openEpoch;
+    final spec = _currentSpec;
+    bool current() => _acceptMediaEvents && choice == _subtitleChoice && epoch == _openEpoch;
+    final attaching = _localSubtitles.pending;
+    if (attaching != null) await attaching;
+    if (spec == null || !current()) return;
+    final sourceIndex = spec.subtitles.asMap().keys
+        .where((i) => track.id == 'source:$epoch:$i').firstOrNull;
+    var id = track.id;
+    if (sourceIndex != null) {
+      final existing = _sourceSubtitleIds[sourceIndex];
+      if (existing == null) {
+        final source = spec.subtitles[sourceIndex];
+        final platform = _player.platform;
+        if (platform is! NativePlayer) throw UnsupportedError('当前播放器不支持站源外挂字幕');
+        String text;
+        try {
+          text = await source.readText(mediaUrl: spec.url, headers: spec.headers,
+              proxy: DanmakuApi.systemProxy);
+        } catch (_) {
+          throw UnsupportedError('站源字幕下载失败或格式不支持');
+        }
+        if (!current()) return;
+        final previousIds = _player.state.tracks.subtitle.map((t) => t.id).toSet();
+        await _player.setSubtitleTrack(SubtitleTrack.data(text, title: source.name));
+        if (!current()) return;
+        final added = await platform.getProperty('current-tracks/sub/id');
+        final title = await platform.getProperty('current-tracks/sub/title');
+        if (!current()) return;
+        if (added.isEmpty || previousIds.contains(added) || title != source.name) {
+          throw UnsupportedError('播放器未能启用这条站源字幕');
+        }
+        _sourceSubtitleIds[sourceIndex] = added;
+        await _refreshSubtitleTracks();
+        return;
+      }
+      id = existing;
+    }
+    final nativeSub = _player.state.tracks.subtitle.firstWhere((s) => s.id == id);
     await _player.setSubtitleTrack(nativeSub);
+    final selected = await _refreshSubtitleTracks();
+    if (current() && id != 'auto' && selected != id) {
+      throw UnsupportedError('播放器未能启用这条字幕，请换一条字幕轨');
+    }
+  }
+
+  Future<String?> _refreshSubtitleTracks() async {
+    if (!_acceptMediaEvents) return null;
+    final epoch = _openEpoch;
+    final read = ++_subtitleRead;
+    final platform = _player.platform;
+    // media_kit 的 track 字段是请求值（含 auto 或未能解码的轨道），不是 mpv 的实际选择。
+    String? selected;
+    String? codec;
+    try {
+      selected = platform is NativePlayer
+          ? await platform.getProperty('current-tracks/sub/id')
+          : _player.state.track.subtitle.id;
+      if (platform is NativePlayer && selected.isNotEmpty) {
+        codec = await platform.getProperty('current-tracks/sub/codec');
+      }
+    } catch (error) {
+      // 字幕状态不可读也不能让打开媒体失败，或留下上一部片的勾选。
+      if (_acceptMediaEvents && epoch == _openEpoch) {
+        _recentLogs.add('[subtitle] 无法读取当前字幕轨：$error');
+      }
+    }
+    if (!_acceptMediaEvents || epoch != _openEpoch || read != _subtitleRead) return selected;
+    _subtitleCodec = codec;
+    final tracks = _player.state.tracks.subtitle;
+    final sources = _currentSpec!.subtitles;
+    _subtitleTracks = [
+      if (tracks.any((t) => t.id != 'auto' && t.id != 'no'))
+        const TrackInfo(id: 'auto', type: TrackType.subtitle, title: '自动选择'),
+      for (final t in tracks)
+        if (t.id != 'auto' && t.id != 'no' && !_sourceSubtitleIds.containsValue(t.id))
+          TrackInfo(id: t.id, type: TrackType.subtitle, title: t.title,
+              language: t.language, isSelected: t.id == selected),
+      for (var i = 0; i < sources.length; i++)
+        TrackInfo(id: 'source:$epoch:$i', type: TrackType.subtitle,
+            title: sources[i].name,
+            isSelected: selected != null && _sourceSubtitleIds[i] == selected),
+    ];
+    _subtitleTracksController.add(_subtitleTracks);
+    return selected;
   }
 
   @override
   Future<void> disableSubtitle() async {
+    if (!_mpvOwnsPlayback) return;
+    final choice = ++_subtitleChoice;
+    final epoch = _openEpoch;
+    final attaching = _localSubtitles.pending;
+    if (attaching != null) {
+      await attaching;
+      if (!_acceptMediaEvents || epoch != _openEpoch || choice != _subtitleChoice) return;
+    }
     await _player.setSubtitleTrack(SubtitleTrack.no());
+    await _refreshSubtitleTracks();
   }
 
   @override
   Future<void> selectVideoTrack(TrackInfo track) async {
+    if (!_mpvOwnsPlayback) return;
     final VideoTrack native;
     if (track.id == 'auto') {
       native = VideoTrack.auto();
@@ -1030,14 +1252,25 @@ class MpvPlayerEngine
     _disposed = true;
     _sessionEpoch++;
     _openEpoch++;
+    final closing = _retireEmbedded();
+    _embeddedTexture.dispose();
     _seekEvidenceGeneration = null;
     _seekRecovery.dispose();
     _cancelLiveReconnect();
     _cancelErrorConfirm();
     await settingsApplication.dispose();
+    if (closing != null) {
+      try {
+        await closing;
+      } catch (_) {
+        // A failed native release must not leak the mpv player or its streams.
+      }
+    }
     for (final sub in _subscriptions) {
       await sub.cancel();
     }
+    final attaching = _localSubtitles.pending;
+    if (attaching != null) await attaching;
     if (_nativeCreated) await _player.dispose();
     await _statusController.close();
     await _positionController.close();
@@ -1060,11 +1293,11 @@ class MpvPlayerEngine
   @override
   Duration get duration => _duration;
   @override
-  Duration get buffer => _buffer;
+  Duration get buffer => _mpvOwnsPlayback ? _buffer : Duration.zero;
   @override
   double get volume => _volume;
   @override
-  double get rate => _rate;
+  double get rate => _mpvOwnsPlayback ? _rate : 1.0;
   @override
   VideoDimensions get dimensions => _dimensions;
   @override
@@ -1073,13 +1306,13 @@ class MpvPlayerEngine
   MediaPlaySpec? get currentSpec => _currentSpec;
 
   /// 最近 40 条引擎日志（④ 诊断闭环；只读快照，供错误面板展示与复制）。
-  List<String> get recentPlayerLogs => _recentLogs.entries;
+  List<String> get recentPlayerLogs => _mpvOwnsPlayback ? _recentLogs.entries : const [];
   @override
-  List<TrackInfo> get audioTracks => _audioTracks;
+  List<TrackInfo> get audioTracks => _mpvOwnsPlayback ? _audioTracks : const [];
   @override
-  List<TrackInfo> get subtitleTracks => _subtitleTracks;
+  List<TrackInfo> get subtitleTracks => _mpvOwnsPlayback ? _subtitleTracks : const [];
   @override
-  List<TrackInfo> get videoTracks => _videoTracks;
+  List<TrackInfo> get videoTracks => _mpvOwnsPlayback ? _videoTracks : const [];
 
   // --- 状态流 ---
   @override

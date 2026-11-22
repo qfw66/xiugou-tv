@@ -9,6 +9,9 @@ project(runner LANGUAGES CXX)
 add_executable(${BINARY_NAME} WIN32
   "flutter_window.cpp"
   "main.cpp"
+  "native_playback_channel.cpp"
+  "native_playback_texture.cpp"
+  "native_playback_mf.cpp"
   "process_job.cpp"
   "utils.cpp"
   "webdav_secrets.cpp"
@@ -41,6 +44,12 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "crypt32.lib")
+# MF entry points are resolved by the backend at runtime; mfuuid is GUID data.
+target_link_libraries(${BINARY_NAME} PRIVATE mfuuid uuid ole32 oleaut32
+  propsys d3d11 urlmon shlwapi)
+include(native_playback_mdk.cmake)
+# Adds native_playback_mdk.cpp even when building without the optional SDK.
+xiugou_add_mdk(${BINARY_NAME})
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

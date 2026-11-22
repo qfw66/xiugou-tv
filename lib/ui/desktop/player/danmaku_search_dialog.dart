@@ -6,9 +6,11 @@ import '../../../core/danmaku/danmaku_api.dart';
 import '../../../core/danmaku/danmaku_controller.dart';
 import '../../../core/danmaku/danmaku_models.dart';
 import '../../../core/danmaku/danmaku_search.dart';
+import '../../../core/danmaku/danmaku_source.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
 import '../dialogs/app_dialog.dart';
+import 'danmaku_source_dropdown.dart';
 
 /// 播放页「搜索弹幕」：按关键词搜候选，选中一条即绑定并立即刷新屏幕上的弹幕。
 ///
@@ -18,17 +20,26 @@ import '../dialogs/app_dialog.dart';
 Future<void> showDanmakuSearchDialog({
   required BuildContext context,
   required DanmakuController controller,
+  ValueChanged<DanmakuSource>? onSourceChanged,
 }) =>
     showAppDialog<void>(
       context: context,
       barrierLabel: '关闭弹幕搜索',
-      builder: (_) => DanmakuSearchDialog(controller: controller),
+      builder: (_) => DanmakuSearchDialog(
+        controller: controller,
+        onSourceChanged: onSourceChanged,
+      ),
     );
 
 class DanmakuSearchDialog extends StatefulWidget {
-  const DanmakuSearchDialog({super.key, required this.controller});
+  const DanmakuSearchDialog({
+    super.key,
+    required this.controller,
+    this.onSourceChanged,
+  });
 
   final DanmakuController controller;
+  final ValueChanged<DanmakuSource>? onSourceChanged;
 
   @override
   State<DanmakuSearchDialog> createState() => _DanmakuSearchDialogState();
@@ -39,6 +50,8 @@ class _DanmakuSearchDialogState extends State<DanmakuSearchDialog> {
   late final String _queryName;
   late final int? _episodeNumber;
   late final bool _onlyCurrentEpisode;
+  late DanmakuSource _source;
+  int _sourceRevision = 0;
 
   DanmakuCancelToken? _token;
   List<DanmakuCandidate> _candidates = const [];
@@ -60,6 +73,8 @@ class _DanmakuSearchDialogState extends State<DanmakuSearchDialog> {
     final text = danmakuSearchKeyword(_queryName);
     _keyword = TextEditingController(text: text)
       ..selection = TextSelection(baseOffset: 0, extentOffset: text.length);
+    _source = widget.controller.source;
+    widget.controller.addListener(_onControllerChanged);
     // 打开即用当前片名搜一次：多数情况下第一个候选就是要的那条
     _searching = true;
     unawaited(_runSearch(_resetToken(), text.trim()));
@@ -68,8 +83,20 @@ class _DanmakuSearchDialogState extends State<DanmakuSearchDialog> {
   @override
   void dispose() {
     _token?.cancel();
+    widget.controller.removeListener(_onControllerChanged);
     _keyword.dispose();
     super.dispose();
+  }
+
+  void _onControllerChanged() {
+    final source = widget.controller.source;
+    if (!mounted || source == _source) return;
+    setState(() {
+      _source = source;
+      _sourceRevision++;
+      _bindingUrl = null;
+    });
+    _submit();
   }
 
   DanmakuCancelToken _resetToken() {
@@ -88,14 +115,14 @@ class _DanmakuSearchDialogState extends State<DanmakuSearchDialog> {
   Future<void> _runSearch(DanmakuCancelToken token, String keyword) async {
     try {
       final candidates = await widget.controller.searchCandidates(keyword, cancel: token);
-      if (!mounted || token.isCancelled) return;
+      if (!mounted || token.isCancelled || !identical(_token, token)) return;
       setState(() {
         _searching = false;
         _candidates = candidates;
         _view = _viewOf(candidates, keyword);
       });
     } catch (e) {
-      if (!mounted || token.isCancelled) return;
+      if (!mounted || token.isCancelled || !identical(_token, token)) return;
       setState(() {
         _searching = false;
         _candidates = const [];
@@ -108,7 +135,13 @@ class _DanmakuSearchDialogState extends State<DanmakuSearchDialog> {
   void _submit() {
     final keyword = _keyword.text.trim();
     if (keyword.isEmpty) {
-      setState(() => _error = '请输入片名');
+      _resetToken();
+      setState(() {
+        _searching = false;
+        _view = null;
+        _candidates = const [];
+        _error = '请输入片名';
+      });
       return;
     }
     setState(() {
@@ -131,12 +164,13 @@ class _DanmakuSearchDialogState extends State<DanmakuSearchDialog> {
 
   Future<void> _bind(DanmakuSearchEntry entry) async {
     if (_bindingUrl != null) return;
+    final revision = _sourceRevision;
     setState(() {
       _bindingUrl = entry.candidate.url;
       _error = null;
     });
     final state = await widget.controller.bind(entry.candidate);
-    if (!mounted) return;
+    if (!mounted || revision != _sourceRevision) return;
     if (state.phase == DanmakuLoadPhase.ready) {
       // 绑完立即关窗：弹幕已经在播放器上刷新，留着弹窗反而挡住画面
       Navigator.of(context).pop();
@@ -168,6 +202,10 @@ class _DanmakuSearchDialogState extends State<DanmakuSearchDialog> {
             children: [
               _buildHeader(palette),
               const SizedBox(height: 14),
+              if (widget.onSourceChanged != null && configuredDanmakuSources.length > 1) ...[
+                _buildSourceRow(palette),
+                const SizedBox(height: 8),
+              ],
               _buildSearchRow(palette),
               if (_episodeNumber != null) ...[
                 const SizedBox(height: 4),
@@ -231,6 +269,20 @@ class _DanmakuSearchDialogState extends State<DanmakuSearchDialog> {
       ),
     ]);
   }
+
+  Widget _buildSourceRow(AppPalette palette) => Row(
+        children: [
+          Text('弹幕接口', style: TextStyle(color: palette.textSub, fontSize: AppType.label)),
+          const SizedBox(width: 16),
+          Expanded(
+            child: DanmakuSourceDropdown(
+              key: const ValueKey('danmaku-search-source'),
+              source: _source,
+              onChanged: widget.onSourceChanged!,
+            ),
+          ),
+        ],
+      );
 
   Widget _buildSearchRow(AppPalette palette) {
     return Row(children: [

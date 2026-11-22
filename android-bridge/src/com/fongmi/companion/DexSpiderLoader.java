@@ -494,27 +494,27 @@ public class DexSpiderLoader {
 
         if (stripFirst && stripped != null) {
             try {
-                spiderClass = loader.loadClass("com.github.catvod.spider." + stripped);
+                spiderClass = PayloadClassLoader.spiderEntry(loader, "com.github.catvod.spider." + stripped);
                 System.out.println("[DexSpiderLoader] Guard 后缀映射: " + cleanApi + " -> " + stripped);
             } catch (ClassNotFoundException ignored) {
             }
         }
         if (spiderClass == null) {
             try {
-                spiderClass = loader.loadClass("com.github.catvod.spider." + cleanApi);
+                spiderClass = PayloadClassLoader.spiderEntry(loader, "com.github.catvod.spider." + cleanApi);
             } catch (ClassNotFoundException e) {
                 // 加固(Guard)站点映射：csp_XxxGuard → 载荷类 com.github.catvod.spider.Xxx
                 // （ftyguard/wexguard 解密载荷中的类名不带 Guard 后缀，如 WoGGGuard → WoGG）
                 if (stripped != null) {
                     try {
-                        spiderClass = loader.loadClass("com.github.catvod.spider." + stripped);
+                        spiderClass = PayloadClassLoader.spiderEntry(loader, "com.github.catvod.spider." + stripped);
                         System.out.println("[DexSpiderLoader] Guard 后缀映射: " + cleanApi + " -> " + stripped);
                     } catch (ClassNotFoundException ignored) {
                     }
                 }
                 if (spiderClass == null) {
                     try {
-                        spiderClass = loader.loadClass(cleanApi);
+                        spiderClass = PayloadClassLoader.spiderEntry(loader, cleanApi);
                     } catch (Throwable ignored) {
                     }
                 }
@@ -565,7 +565,7 @@ public class DexSpiderLoader {
             return null;
         }
         try {
-            Class<?> cls = Class.forName(picked, false, loader);
+            Class<?> cls = PayloadClassLoader.spiderEntry(loader, picked);
             Object instance = cls.getDeclaredConstructor().newInstance();
             System.out.println("[DexSpiderLoader] 类发现兜底命中: " + cleanApi + " -> " + picked);
             if (instance instanceof Spider) {
@@ -643,7 +643,7 @@ public class DexSpiderLoader {
         List<String> spiders = new ArrayList<>();
         for (String cls : candidates) {
             try {
-                Class<?> c = Class.forName(cls, false, loader);
+                Class<?> c = PayloadClassLoader.spiderEntry(loader, cls);
                 if (!Spider.class.isAssignableFrom(c)) continue;
                 if (c.isInterface() || java.lang.reflect.Modifier.isAbstract(c.getModifiers())) continue;
                 spiders.add(cls);
@@ -1115,7 +1115,7 @@ public class DexSpiderLoader {
         }
     }
 
-    /** 转换产物路径：{@code <源名去 .jar>-jvm10<修补链戳>.jar}，放在 cacheDir。 */
+    /** 转换产物路径含转换器版本和载荷修补链版本，放在 cacheDir。 */
     private File jvmJarOf(File jarFile) {
         String base = jarFile.getName();
         if (base.endsWith(".jar")) base = base.substring(0, base.length() - 4);
@@ -1126,10 +1126,10 @@ public class DexSpiderLoader {
         // -jvm9：含超长跳转、COMPUTE_MAXS 生成失败的类改用 COMPUTE_FRAMES 重转（旧产物里这类类缺失）。
         // -jvm10：指向接口的方法引用改成 InterfaceMethodref（旧产物里 JDK 接口静态方法整站抛 ICCE）。
         // -jvm11：按实际宿主/载荷类型层次重建 StackMapTable（严格 JVM 拒绝无帧的 tableswitch）。
-        // 旧缓存（-jvm 至 -jvm10）换名作废。
+        // -if52-jvm13：接口静态/默认调用要求 class 52；不复用 RC1 或已有候选的转换缓存。
         // 加固载荷再带上修补链版本戳：修补器升级后旧产物自动作废（普通 jar 戳为空，缓存名不变）。
         String stamp = HardshellPipeline.repairStamp(jarFile);
-        return new File(cacheDir, base + "-jvm11" + stamp + ".jar");
+        return new File(cacheDir, base + "-if52-jvm13" + stamp + ".jar");
     }
 
     /**
@@ -1280,7 +1280,7 @@ public class DexSpiderLoader {
                     String actualMd5 = md5File(file);
                     if (!actualMd5.equalsIgnoreCase(expectedMd5)) {
                         String msg = "本地 jar 摘要校验失败（期望 " + expectedMd5 + "，实际 " + actualMd5 + "）: " + file.getName();
-                        if (!looksLikeZip(file)) {
+                        if (!isReadableArchive(file)) {
                             ParseStage.fail(ParseStage.MD5, msg + "，且内容不是 zip");
                             return null;
                         }
@@ -1304,76 +1304,41 @@ public class DexSpiderLoader {
             }
 
             if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
+                String urlKey = md5(rawUrl);
+                File cachedFile = new File(cacheDir, urlKey + ".jar");
                 // 加固(ftyguard/wexguard)载荷缓存：优先按「壳内容 md5」命中，
                 // 再按「URL md5」命中。同一份壳会被多个域名分发（例如
                 // qist.wyfc.qzz.io/jar/fan.txt 与 xiuxiu-pro-new…/posters/xxx.jpg
                 // 是同一个 1,281,099 B / md5 aa8d… 的加密壳），按 URL 缓存会在
                 // 换域名时全部失效，按内容 md5 则跨域名复用同一份解密载荷。
-                if (!expectedMd5.isEmpty()) {
+                if (expectedMd5.matches("[0-9a-fA-F]{32}")) {
                     File payloadJar = new File(cacheDir,
                             "payload-" + expectedMd5.toLowerCase(Locale.ROOT) + ".jar");
-                    if (payloadJar.exists() && payloadJar.length() > 0) {
+                    if (isReadableArchive(payloadJar)) {
                         System.out.println("[DexSpiderLoader] 命中按壳 md5 缓存的载荷: " + payloadJar.getName());
                         // 载荷命中时壳 jar 不会走到下面分支，这里按确定性文件名补记一次，
                         // 让「表里没有的密文」仍能问壳。
-                        File shell = new File(cacheDir, md5(rawUrl) + ".jar");
-                        if (shell.isFile()) GuardCryptoService.rememberShellJar(shell);
+                        if (cachedFile.isFile() && expectedMd5.equalsIgnoreCase(md5File(cachedFile))) {
+                            GuardCryptoService.rememberShellJar(cachedFile);
+                        }
                         return payloadJar;
                     }
                 }
 
-                // 加固(ftyguard/wexguard) jar：本地已解密的守卫载荷优先于原壳 jar
-                // （guard-<url md5>.jar 由解密流程预置到 jars 缓存目录）
-                File guardJar = new File(cacheDir, "guard-" + md5(rawUrl) + ".jar");
-                if (guardJar.exists() && guardJar.length() > 0) {
-                    System.out.println("[DexSpiderLoader] 命中本地守卫载荷: " + guardJar.getName());
-                    return guardJar;
-                }
-                // 加固壳：逻辑在 native so 里，需先解出载荷 jar。
-                // 这里只查已解包缓存（壳 jar 还没下载），命中即免下载；不区分具体源。
-                File shellCached = HardshellPipeline.cached(cacheDir, md5(rawUrl));
-                if (shellCached != null) {
-                    System.out.println("[DexSpiderLoader] 命中本地加固载荷: " + shellCached.getName());
-                    return shellCached;
+                // 按 URL 预置的旧载荷没有版本信息，不能掩盖新配置声明的摘要。
+                if (expectedMd5.isEmpty()) {
+                    File guardJar = new File(cacheDir, "guard-" + urlKey + ".jar");
+                    if (isReadableArchive(guardJar)) return guardJar;
+                    File shellCached = HardshellPipeline.cached(cacheDir, urlKey);
+                    if (shellCached != null) return shellCached;
                 }
 
-                String filename = md5(rawUrl) + ".jar";
-                File cachedFile = new File(cacheDir, filename);
-                if (cachedFile.exists() && cachedFile.length() > 0) {
-                    if (expectedMd5.isEmpty() || md5File(cachedFile).equalsIgnoreCase(expectedMd5)) {
-                        // 壳已缓存但载荷还没解出来（老版本遗留 / 上次解密失败）→ 就地补解
-                        GuardCryptoService.rememberShellJar(cachedFile);
-                        File shellPayload = HardshellPipeline.resolve(cacheDir, cachedFile,
-                                md5(rawUrl));
-                        if (shellPayload != null) return shellPayload;
-                        File provisioned = GuardPayloadProvisioner.ensure(cacheDir, cachedFile, expectedMd5, rawUrl);
-                        if (provisioned != null) return provisioned;
-                        return cachedFile;
-                    }
-                    // 缓存内容与配置声明的 md5 不符：删掉重下，避免「换配置后一直用旧壳」
-                    String stale = md5File(cachedFile);
-                    ParseStage.fail(ParseStage.MD5, "缓存 md5 不符（期望 " + expectedMd5 + "，实际 " + stale
-                            + "），已删除: " + cachedFile.getName());
-                    System.err.println("[DexSpiderLoader] 缓存 md5 不符（期望 " + expectedMd5
-                            + "，实际 " + stale + "），删除后重新下载: " + cachedFile.getName());
-                    cachedFile.delete();
-                }
-
-                // 下载到独占临时文件、完成后原子发布。以前多个线程同时往同一个缓存文件
-                // Files.copy(REPLACE_EXISTING)，互相截断，表现为 Resolve error / md5 不符 /
-                // zip END header not found。
-                downloadTo(rawUrl, cachedFile, expectedMd5);
-                // 配置里带 ;md5; 就必须核对：否则「配置写错」会拿着一份错误内容一路跑到
-                // dex2jar/类加载才炸，定位成本极高（见方案 P1-1 的 md5 阶段）。
-                verifyDownloadedMd5(cachedFile, expectedMd5, rawUrl);
-                if (!cachedFile.exists() || cachedFile.length() == 0) {
-                    return null;
-                }
-                // 下载完才发现是加固壳：就地自动解密出载荷（首次约 10 s，之后按壳 md5 复用）
+                String contentMd5 = downloadTo(rawUrl, cachedFile, expectedMd5);
                 GuardCryptoService.rememberShellJar(cachedFile);
-                File shellPayload = HardshellPipeline.resolve(cacheDir, cachedFile, md5(rawUrl));
+                File shellPayload = HardshellPipeline.resolve(cacheDir, cachedFile,
+                        expectedMd5.isEmpty() ? urlKey : contentMd5);
                 if (shellPayload != null) return shellPayload;
-                File provisioned = GuardPayloadProvisioner.ensure(cacheDir, cachedFile, expectedMd5, rawUrl);
+                File provisioned = GuardPayloadProvisioner.ensure(cacheDir, cachedFile, contentMd5, rawUrl);
                 if (provisioned != null) return provisioned;
                 return cachedFile;
             }
@@ -1390,13 +1355,14 @@ public class DexSpiderLoader {
 
     /**
      * 下载到独占工作目录，完成后原子发布为 {@code target}。按目标文件加锁：等锁的线程
-     * 进来时先按缓存命中规则复查，前一个线程刚下好的就不再重下。
+     * 进来时先按缓存命中规则复查，前一个线程刚下好的就不再重下。声明了摘要时返回实际 MD5。
      */
-    private void downloadTo(String rawUrl, File target, String expectedMd5) throws IOException {
+    private String downloadTo(String rawUrl, File target, String expectedMd5) throws IOException {
         synchronized (fileLock(target)) {
-            if (target.isFile() && target.length() > 0
-                    && (expectedMd5.isEmpty() || md5File(target).equalsIgnoreCase(expectedMd5))) {
-                return;
+            if (isReadableArchive(target)) {
+                if (expectedMd5.isEmpty()) return "";
+                String actual = md5File(target);
+                if (expectedMd5.equalsIgnoreCase(actual)) return actual;
             }
             System.out.println("[DexSpiderLoader] Downloading jar from: " + rawUrl);
             File work = newWorkDir(target.getName());
@@ -1407,9 +1373,19 @@ public class DexSpiderLoader {
                 conn.setConnectTimeout(15000);
                 conn.setReadTimeout(60000);
                 try (InputStream in = conn.getInputStream()) {
-                    Files.copy(in, part.toPath());
+                    long length = conn.getContentLengthLong();
+                    long copied = Files.copy(in, part.toPath());
+                    if (length >= 0 && copied != length) throw new EOFException("JAR 下载不完整: " + copied + "/" + length);
+                }
+                if (!isReadableArchive(part)) throw new IOException("下载内容不是完整的 JAR/ZIP");
+                String actual = expectedMd5.isEmpty() ? "" : md5File(part);
+                if (!expectedMd5.isEmpty() && !expectedMd5.equalsIgnoreCase(actual)) {
+                    // 部分订阅更新了原包却没有更新清单；沿用既有兼容，但不把声明值当作内容身份。
+                    System.err.println("[DexSpiderLoader] 下载内容 md5 不符（期望 " + expectedMd5
+                            + "，实际 " + actual + "），完整 JAR 继续加载: " + target.getName());
                 }
                 publish(part, target);
+                return actual;
             } finally {
                 deleteWork(work);
             }
@@ -1482,37 +1458,12 @@ public class DexSpiderLoader {
         }
     }
 
-    /**
-     * 下载后校验 md5。
-     *
-     * <p>软/硬两种处理：
-     * <ul>
-     *   <li>内容仍是可解压的 zip → 只告警并记 stage=md5，继续尝试
-     *       （很多配置里的 md5 是过期抄写，硬失败会误伤可用站点）；</li>
-     *   <li>内容不是 zip（下到了错误页/文本）→ 删除并失败，避免下游把它当 jar。</li>
-     * </ul>
-     */
-    private void verifyDownloadedMd5(File file, String expectedMd5, String rawUrl) {
-        if (expectedMd5 == null || expectedMd5.trim().isEmpty()) return;
-        String actual = md5File(file);
-        if (actual.equalsIgnoreCase(expectedMd5.trim())) return;
-        String msg = "下载内容 md5 不符（期望 " + expectedMd5.trim() + "，实际 " + actual + "）: " + rawUrl;
-        ParseStage.fail(ParseStage.MD5, msg);
-        if (looksLikeZip(file)) {
-            System.err.println("[DexSpiderLoader] " + msg + "（内容可解压，继续尝试）");
-        } else {
-            System.err.println("[DexSpiderLoader] " + msg + "（内容不是 zip，放弃）");
-            file.delete();
-        }
-    }
-
-    /** 只看 zip 魔数（PK\\003\\004 / PK\\005\\006 / PK\\007\\008），不展开。 */
-    private boolean looksLikeZip(File file) {
-        try (InputStream in = new FileInputStream(file)) {
-            byte[] head = new byte[4];
-            if (in.read(head) < 4) return false;
-            return head[0] == 'P' && head[1] == 'K' && (head[2] == 3 || head[2] == 5 || head[2] == 7);
-        } catch (Throwable t) {
+    /** 能读到非空 ZIP 中央目录才可复用；光有 PK 文件头的半包不算。 */
+    private static boolean isReadableArchive(File file) {
+        if (!file.isFile()) return false;
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(file)) {
+            return zip.size() > 0;
+        } catch (IOException e) {
             return false;
         }
     }

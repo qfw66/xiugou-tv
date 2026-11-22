@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/danmaku/danmaku_api.dart';
 import '../../../core/danmaku/danmaku_settings.dart';
 import '../../theme/app_palette.dart';
 import '../../theme/app_tokens.dart';
+import 'danmaku_source_dropdown.dart';
 import 'player_side_drawer.dart';
 
 /// 播放页「弹幕设置」抽屉内容（§43 二期验收反馈：播放中直接调，不用退到设置中心）。
@@ -19,6 +21,7 @@ class DanmakuSettingsPanel extends StatefulWidget {
     required this.onChanged,
     required this.enabled,
     required this.onToggle,
+    this.showSourceSelector = true,
   });
 
   final DanmakuSettings initial;
@@ -27,6 +30,9 @@ class DanmakuSettingsPanel extends StatefulWidget {
   /// 本次播放是否显示弹幕（与控制条「弹幕」按钮 / D 键同一个开关）
   final bool enabled;
   final VoidCallback onToggle;
+
+  /// 直播聊天不使用点播弹幕 API，不显示此项。
+  final bool showSourceSelector;
 
   @override
   State<DanmakuSettingsPanel> createState() => _DanmakuSettingsPanelState();
@@ -70,6 +76,26 @@ class _DanmakuSettingsPanelState extends State<DanmakuSettingsPanel> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _switchRow(),
+          if (widget.showSourceSelector && configuredDanmakuSources.length > 1)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: _labelWidth,
+                    child: Text('弹幕接口',
+                        style: TextStyle(color: context.palette.playerText, fontSize: AppType.body)),
+                  ),
+                  Expanded(
+                    child: DanmakuSourceDropdown(
+                      key: const ValueKey('danmaku-drawer-source'),
+                      source: d.source,
+                      onChanged: (source) => _commit(_value.copyWith(source: source)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           // 2026-10-27 验收反馈：与下方滑块统一成「左标签 / 中控件 / 右数值」一行一项。
           // 屏蔽是开关量，不适合滑块，同样一行一项，控件用开关。
           _section('屏蔽类型'),

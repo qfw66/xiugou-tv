@@ -76,6 +76,9 @@ class PlayerSettings {
   /// 关闭后出错只提示，由用户在线路抽屉里手动换。
   final bool autoLineSwitch;
 
+  /// 点播自然结束或到达自定义片尾点时，是否接着播放下一集。
+  final bool autoPlayNextEpisode;
+
   /// 长按快进主快捷键的临时倍速；松开恢复原倍速。
   final double holdRate;
 
@@ -123,6 +126,7 @@ class PlayerSettings {
     this.showMiniProgress = true,
     this.showResolution = false,
     this.autoLineSwitch = true,
+    this.autoPlayNextEpisode = true,
     this.holdRate = defaultHoldRate,
     this.shortcuts = PlayerShortcutBindings.defaults,
     this.externalPlayer = ExternalPlayerSettings.defaults,
@@ -241,6 +245,7 @@ class PlayerSettings {
       showMiniProgress: json['showMiniProgress'] != false,
       showResolution: json['showResolution'] == true,
       autoLineSwitch: json['autoLineSwitch'] != false,
+      autoPlayNextEpisode: json['autoPlayNextEpisode'] != false,
       holdRate: _pickHoldRate(json['holdRate']),
       shortcuts: PlayerShortcutBindings.fromJson(json['shortcuts']),
       externalPlayer: ExternalPlayerSettings.fromJson(json['externalPlayer']),
@@ -275,6 +280,7 @@ class PlayerSettings {
         'showMiniProgress': showMiniProgress,
         'showResolution': showResolution,
         'autoLineSwitch': autoLineSwitch,
+        'autoPlayNextEpisode': autoPlayNextEpisode,
         'holdRate': holdRate,
         'shortcuts': shortcuts.toJson(),
         'externalPlayer': externalPlayer.toJson(),
@@ -330,6 +336,7 @@ class PlayerSettings {
     bool? showMiniProgress,
     bool? showResolution,
     bool? autoLineSwitch,
+    bool? autoPlayNextEpisode,
     double? holdRate,
     PlayerShortcutBindings? shortcuts,
     ExternalPlayerSettings? externalPlayer,
@@ -357,6 +364,7 @@ class PlayerSettings {
       showMiniProgress: showMiniProgress ?? this.showMiniProgress,
       showResolution: showResolution ?? this.showResolution,
       autoLineSwitch: autoLineSwitch ?? this.autoLineSwitch,
+      autoPlayNextEpisode: autoPlayNextEpisode ?? this.autoPlayNextEpisode,
       holdRate: holdRate ?? this.holdRate,
       shortcuts: shortcuts ?? this.shortcuts,
       externalPlayer: externalPlayer ?? this.externalPlayer,
@@ -389,6 +397,7 @@ class PlayerSettings {
       other.showMiniProgress == showMiniProgress &&
       other.showResolution == showResolution &&
       other.autoLineSwitch == autoLineSwitch &&
+      other.autoPlayNextEpisode == autoPlayNextEpisode &&
       other.holdRate == holdRate &&
       other.shortcuts == shortcuts &&
       other.externalPlayer == externalPlayer &&
@@ -399,6 +408,6 @@ class PlayerSettings {
   @override
   int get hashCode => Object.hashAll([hwdec, defaultVolume, defaultRate, audioChannels, audioDelayMs,
       toneMapping, scale, brightness, contrast, saturation, gamma, cacheSecs, hideWindowTitleBar,
-      danmakuEnabled, danmaku, segmentsAutoApply, showMiniProgress, showResolution, autoLineSwitch, holdRate, shortcuts,
+      danmakuEnabled, danmaku, segmentsAutoApply, showMiniProgress, showResolution, autoLineSwitch, autoPlayNextEpisode, holdRate, shortcuts,
       externalPlayer, autoHideCursor, browserHeaders, autoDetectLiveDirectMode]);
 }

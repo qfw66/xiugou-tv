@@ -19,6 +19,7 @@ class HomeSearchBridge {
   final VoidCallback? onRefresh;
   final bool refreshBusy;
   final bool visible;
+  final VoidCallback? onDetailBack;
 
   const HomeSearchBridge({
     this.searchController,
@@ -31,6 +32,7 @@ class HomeSearchBridge {
     this.onRefresh,
     this.refreshBusy = false,
     this.visible = false,
+    this.onDetailBack,
   });
 }
 

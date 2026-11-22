@@ -5,7 +5,7 @@
 
 - 生成方式：本地脚本读取每个 jar 的 `META-INF/maven/**/pom.properties`、`META-INF/MANIFEST.MF`
   与内嵌 `LICENSE*`，逐条列出「依据」；**无法从仓内证实的条目明确标为「待核实」**，不做推测。
-- 核对时间：2026-11-18；当前构建期 JAR 清单为 **43 个**（`companion/deps.manifest.json`，逐项核对字节数与 SHA-256）。未提交的依赖以该文件清单为准，不以历史 `git ls-files` 数量替代。
+- Java 组件沿用 2026-11-18 核对的 **43 个 JAR**；v1.2.0 候选使用已提交的 `companion/deps.manifest.json`，不纳入工作区未提交的 SQLite／转换器试验。v1.2.0 的 MDK／FFmpeg 分发边界见 §2.1。
 - 上游许可原文以各项目仓库为准；本文件只做转载与指向。
 
 ## 1. 构建与分发使用的 Java 二进制（`companion/`，43 个 JAR）
@@ -66,8 +66,18 @@
 | CPython（Python 站源运行时） | 随包放置在 `companion/dist/pyruntime` | PSF 及所含第三方条款，随发行版许可文件 |
 | PHP 8.3.36 NTS x64（PHP 站源运行时） | `scripts/setup_php_runtime.ps1` 校验下载后随包放置在 `companion/dist/phpruntime` | PHP License 3.01；扩展与 redist 见随包 `license.txt`、`readme-redist-bins.txt` |
 | Mozilla CA 证书集 | PHP HTTPS 使用随包 `cacert.pem`，由 curl 官方 CA 提取服务获取 | Mozilla CA 数据条款，来源 `https://curl.se/docs/caextract.html` |
+| MDK 0.40.1（可选 Windows 播放内核） | 入选时随包放在 `mdk/`，含 `mdk.dll` 与 SDK 通知 | MDK SDK 条款（见 §2.1）；本项目为 GPL-3.0 开源软件，按上游"opensource 免费"条款使用 |
+| MDK 的 `ffmpeg-9.dll` | 随 MDK 以独立 DLL 动态加载 | LGPL-2.1-or-later；对应源码按书面提供方式给出，见 §2.1 |
+| Windows Media Foundation | 使用 Windows 系统组件，包内只有本项目接口实现 | 系统组件由 Windows 提供，不将系统 DLL 随包再分发 |
 
 > §1 的 43 个 JAR 是构建/分发输入；§2 的运行时由构建工具获取并随 Windows 二进制包分发，是否进入源码仓库是另一回事。安装包与便携包均应保留对应许可文件。
+
+### 2.1 v1.2.0 可选原生播放器的分发边界
+
+- MDK SDK 0.40.1 的授权依据：上游通知原文「Free for opensource softwares, non-commercial softwares, flutter, QtAV donors and contributors.」，原文随包保留在 `mdk/Xiugou-MDK-SDK-notice.txt`。本项目以 GPL-3.0 开源发布，按该条款使用；本清单不把 SDK 重新声明为 GPL-3.0。
+- `ffmpeg-9.dll` 报告 LGPL version 2.1 or later，构建标识 `git-2026-10-25-464fc8c-avbuild`。**书面提供**：对应源码为 FFmpeg 提交 `464fc8c2ed53`（<https://github.com/FFmpeg/FFmpeg/tree/464fc8c2ed53>），Windows 构建脚本见 <https://github.com/wang-bin/avbuild>；自本版发布起三年内，向持有本发行版者提供上述源码副本（含所用构建配置），索取方式见仓库 Issue。许可全文随包在 `licenses/FFmpeg-COPYING.LGPLv2.1`。
+- MDK 以独立 DLL 动态加载 `ffmpeg-9.dll`，用户可用兼容构建直接替换该 DLL，无需重新链接本程序，满足 LGPL 的可替换要求。
+- MDK 的 FFmpeg 与默认 mpv 的 FFmpeg 是不同构建，不互相推断许可；各自保留上游通知与许可文件。PGS 独立预览内核未替换本版标准 mpv。
 
 ## 3. 已核实的许可文件位置（便于复查）
 
@@ -119,6 +129,6 @@ companion/libs/bcprov-jdk18on-1.78.1.jar         → org/bouncycastle/LICENSE.cl
 
 在任意机器上（无需联网）执行以下检查即可复现本文件的数据：
 
-1. 在 PowerShell 读取清单：`$m = Get-Content companion/deps.manifest.json -Raw | ConvertFrom-Json; $m.count`（当前为 43）。
+1. 核对已提交候选时先读取其清单：`$m = git show HEAD:companion/deps.manifest.json | ConvertFrom-Json; $m.count`（本版候选为 43）。工作区未提交的依赖试验不是入包证据。
 2. 对 `$m.files` 中每个路径核对 `Get-Item` 的 `Length` 和 `Get-FileHash -Algorithm SHA256`；不能只核对文件名。
 3. 读取各 JAR 的 Maven 元数据与许可文件，并确认胖 JAR 合并后保留独立 `licenses/` 路径，外部 Node/Python/PHP/JRE 运行时也保留自己的许可。

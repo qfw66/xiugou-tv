@@ -14,6 +14,7 @@ import '../../../core/build_info.dart';
 import '../../../core/diagnostics/error_log.dart';
 import '../../../core/danmaku/danmaku_api.dart';
 import '../../../core/danmaku/danmaku_settings.dart';
+import '../player/danmaku_source_dropdown.dart';
 import '../../../core/live/epg_repository.dart';
 import '../../../core/live/live_repository.dart';
 import '../../../core/live/live_source_history.dart';
@@ -52,6 +53,7 @@ import 'error_log_dialog.dart';
 import 'site_self_check_dialog.dart';
 import 'source_category_controls.dart';
 import 'source_history_table.dart';
+import 'tmdb_settings_card.dart';
 import '../keyboard/player_shortcuts.dart';
 
 part 'player_shortcuts_panel.dart';
@@ -226,14 +228,18 @@ class _SettingsPageState extends State<SettingsPage> {
                             type: AppTransitionType.vertical,
                             reverse: _reverseSection,
                             child: switch (_section) {
-                            SettingsSection.configSources => ConfigSourcesPanel(
-                                key: const ValueKey('settings-config-sources'),
-                                configRepository: widget.configRepository,
-                                settingsRepository: widget.settingsRepository,
-                                onAddConfig: widget.onAddConfig,
-                                selectDepot: widget.selectDepot,
-                                pickExportPath: widget.pickExportPath,
-                                companionSpiderApi: widget.companionSpiderApi,
+                            SettingsSection.configSources => TextSelectionTheme(
+                                data: TextSelectionTheme.of(context).copyWith(
+                                    selectionColor: context.palette.sourceInputSelection),
+                                child: ConfigSourcesPanel(
+                                  key: const ValueKey('settings-config-sources'),
+                                  configRepository: widget.configRepository,
+                                  settingsRepository: widget.settingsRepository,
+                                  onAddConfig: widget.onAddConfig,
+                                  selectDepot: widget.selectDepot,
+                                  pickExportPath: widget.pickExportPath,
+                                  companionSpiderApi: widget.companionSpiderApi,
+                                ),
                               ),
                             SettingsSection.liveSources => switch (
                                   widget.liveRepository) {
@@ -1132,6 +1138,7 @@ class _ConfigSourcesPanelState extends State<ConfigSourcesPanel> {
               const SizedBox(height: 8),
               SelectableText(
                 sourceText,
+                selectionColor: Theme.of(context).textSelectionTheme.selectionColor,
                 style: TextStyle(
                     fontSize: AppType.label, color: context.palette.textSub),
               ),
@@ -2577,6 +2584,19 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                     ),
                   ),
                   const _RowDivider(),
+                  MergeSemantics(
+                    child: _SettingRow(
+                      title: '自动播放下一集',
+                      description: '点播剧集',
+                      trailing: Switch(
+                        key: const ValueKey('setting-auto-play-next-episode'),
+                        value: s.autoPlayNextEpisode,
+                        onChanged: (value) =>
+                            _update(s.copyWith(autoPlayNextEpisode: value)),
+                      ),
+                    ),
+                  ),
+                  const _RowDivider(),
                   _SettingRow(
                     title: '自动换线路',
                     description: '起播早期出错时自动尝试同一集的其他线路；'
@@ -2598,6 +2618,26 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                 context,
                 child: Column(
                   children: [
+                    if (configuredDanmakuSources.length > 1) ...[
+                      _SettingRow(
+                        title: '弹幕接口',
+                        description: '手动选择自动匹配与搜索使用的接口；与播放弹窗同步，切换后重新匹配当前集',
+                        trailing: SizedBox(
+                          width: 210,
+                          child: DanmakuSourceDropdown(
+                            key: const ValueKey('setting-danmaku-source'),
+                            source: s.danmaku.source,
+                            onChanged: (source) {
+                              final current = settingsRepository.playerSettings;
+                              _update(current.copyWith(
+                                danmaku: current.danmaku.copyWith(source: source),
+                              ));
+                            },
+                          ),
+                        ),
+                      ),
+                      const _RowDivider(),
+                    ],
                     _SettingRow(
                       title: '播放时显示弹幕',
                       description: '点播起播时自动匹配并显示弹幕（直播不显示）；'
@@ -2625,7 +2665,9 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                 title: '片头片尾跳过',
                 description: _playSkipReadFailed
                     ? '片头片尾偏好读取失败，修复文件后可重新读取'
-                    : '开启后：起播跳过片头，到达片尾点自动进入下一集（按影片记忆、跨集共享；播放器内可设置时间点）',
+                    : s.autoPlayNextEpisode
+                        ? '开启后：起播跳过片头，到达片尾点自动进入下一集（按影片记忆、跨集共享；播放器内可设置时间点）'
+                        : '自动播放下一集已关闭，仅跳过片头',
                 trailing: Switch(
                   key: const ValueKey('setting-play-skip'),
                   value: _playSkip.enabled,
@@ -2694,12 +2736,6 @@ class _PlayerSettingsPanelState extends State<PlayerSettingsPanel> {
                   ],
                 ],
               ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              '说明：渲染由 media_kit 纹理管线（Direct3D 11）负责，本版本不提供渲染后端与播放内核切换。',
-              style: TextStyle(
-                  fontSize: AppType.body, color: context.palette.textSub),
             ),
           ],
         );
@@ -4596,9 +4632,11 @@ class _AppearancePanelState extends State<AppearancePanel> {
       _message = null;
     });
     try {
-      final next = await widget.wallpaperStore
+      final imported = await widget.wallpaperStore
           .importFrom(path, widget.settingsRepository.appearancePreferences);
-      await widget.settingsRepository.updateAppearancePreferences(next);
+      final repo = widget.settingsRepository;
+      await repo.updateAppearancePreferences(
+          repo.appearancePreferences.withWallpaper(imported.wallpaperFileName));
       _setMessage('壁纸已更新');
     } on WallpaperImportException catch (error) {
       _setMessage(error.message, isError: true);
@@ -4618,8 +4656,9 @@ class _AppearancePanelState extends State<AppearancePanel> {
       _message = null;
     });
     try {
-      final next = await widget.wallpaperStore.clear();
-      await widget.settingsRepository.updateAppearancePreferences(next);
+      await widget.wallpaperStore.clear();
+      final repo = widget.settingsRepository;
+      await repo.updateAppearancePreferences(repo.appearancePreferences.withWallpaper(null));
       _setMessage('已恢复默认背景');
     } on DataRestorePendingRestartException catch (error) {
       _setMessage(error.message, isError: true);
@@ -4671,6 +4710,15 @@ class _AppearancePanelState extends State<AppearancePanel> {
                   messageIsError: _messageIsError,
                   onChoose: _choose,
                   onReset: _restoreDefault,
+                ),
+                const SizedBox(height: 16),
+                TmdbSettingsCard(
+                  preferences: preferences.tmdb,
+                  onSave: (next) {
+                    final repo = widget.settingsRepository;
+                    return repo.updateAppearancePreferences(
+                        repo.appearancePreferences.withTmdb(next));
+                  },
                 ),
               ],
             );
@@ -5224,6 +5272,24 @@ class _AboutPanelState extends State<AboutPanel> {
                           child: CircularProgressIndicator(strokeWidth: 2))
                       : null,
                 ),
+              const SizedBox(height: 24),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () => unawaited(_open('https://www.themoviedb.org/')),
+                  icon: Container(
+                    padding: const EdgeInsets.all(5),
+                    color: Colors.black87,
+                    child: Image.asset('assets/icons/tmdb-wordmark-white.png',
+                        width: 60, excludeFromSemantics: true),
+                  ),
+                  label: const Text('影片资料来源：TMDB'),
+                ),
+              ),
+              Text(
+                'This product uses the TMDB API but is not endorsed or certified by TMDB.',
+                style: TextStyle(fontSize: AppType.body, color: palette.textSub),
+              ),
             ],
           ),
         ),

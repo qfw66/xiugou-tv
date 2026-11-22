@@ -1,5 +1,6 @@
 package com.fongmi.companion.hardshell;
 
+import com.fongmi.companion.ipc.ChildJvm;
 import com.fongmi.companion.ipc.LineProcess;
 import java.io.File;
 import java.io.IOException;
@@ -23,7 +24,9 @@ import org.json.JSONArray;
 /** Fish 载荷的原生调用边界；真实原生库在隔离子进程中执行，状态归属创建它的 loader。 */
 public final class FishNativeService {
     static final String LIBRARY = "assets/FishGuard-v8.so";
-    static final String LIBRARY_SHA256 = "c5eb72e0cd59c1e61c40bee6ba8b323b57784b9b533dc4861bef00f86d9cbd20";
+    private static final String LEGACY_LIBRARY_SHA256 = "c5eb72e0cd59c1e61c40bee6ba8b323b57784b9b533dc4861bef00f86d9cbd20";
+    private static final String YOUHUN_PAYLOAD_SHA256 = "efb1ac16b48230b0fa6174764765e65158130433e4fe6f6a71e2131ac1365207";
+    private static final String YOUHUN_LIBRARY_SHA256 = "0663cedc07d46457e1e09741548083b5245aeb4429e594cc122a0a8b46e43e91";
     static final String FRAME = "\u0001FC\u0002";
     private static final int MAX_TEXT = 1024 * 1024;
     private static final Map<ClassLoader, Session> SESSIONS = new IdentityHashMap<>();
@@ -36,24 +39,26 @@ public final class FishNativeService {
             if (zip.getEntry(LIBRARY) == null || zip.getEntry("assets/FishGuard.md5") == null) return;
         }
         String identity = sha256(payload);
-        try { verifiedLibrary(payload, identity); }
+        VerifiedLibrary library;
+        try { library = verifiedLibrary(payload, identity); }
         catch (IOException unsupported) {
             System.err.println("[FishNative] 保留载荷原生实现: " + unsupported.getMessage());
             return;
         }
-        Session next = new Session(payload.getAbsoluteFile(), identity);
+        Session next = new Session(payload.getAbsoluteFile(), identity, library.digest());
         Session previous;
         synchronized (SESSIONS) { previous = SESSIONS.put(loader, next); }
         if (previous != null) previous.close();
     }
 
     public static void load(String path) {
+        Session session = callerSession();
         try {
             File library = path == null ? null : new File(path);
-            if (library == null || !library.isFile() || !LIBRARY_SHA256.equals(sha256(library))) {
-                throw new IOException("Fish 请求的原生库尚未适配");
+            if (library == null || !library.isFile() || !session.libraryDigest.equals(sha256(library))) {
+                throw new IOException("Fish 请求的原生库与当前载荷不符");
             }
-            nativeCall("svN()I");
+            session.call("svN()I");
         } catch (IOException failure) { throw new IllegalStateException(failure.getMessage(), failure); }
     }
 
@@ -69,13 +74,15 @@ public final class FishNativeService {
     }
 
     /** 调用者的载荷 loader 决定会话，禁止用最后加载的源作为全局默认。 */
-    public static Object nativeCall(String signature, Object... args) {
-        Session session = StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).walk(frames ->
+    private static Session callerSession() {
+        return StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE).walk(frames ->
                 frames.map(frame -> frame.getDeclaringClass().getClassLoader()).map(loader -> {
                     synchronized (SESSIONS) { return SESSIONS.get(loader); }
-                }).filter(java.util.Objects::nonNull).findFirst().orElse(null));
-        if (session == null) throw new IllegalStateException("Fish 原生调用没有绑定载荷");
-        try { return session.call(signature, args); }
+                }).filter(java.util.Objects::nonNull).findFirst().orElseThrow(() -> new IllegalStateException("Fish 原生调用没有绑定载荷")));
+    }
+
+    public static Object nativeCall(String signature, Object... args) {
+        try { return callerSession().call(signature, args); }
         catch (IOException failure) { throw new IllegalStateException(failure.getMessage(), failure); }
     }
 
@@ -95,7 +102,9 @@ public final class FishNativeService {
         } catch (IllegalArgumentException invalid) { return false; }
     }
 
-    static byte[] verifiedLibrary(File payload, String identity) throws IOException {
+    record VerifiedLibrary(byte[] bytes, String digest) {}
+
+    static VerifiedLibrary verifiedLibrary(File payload, String identity) throws IOException {
         if (!identity.equals(sha256(payload))) throw new IOException("Fish 载荷在加载后发生变化");
         try (ZipFile zip = new ZipFile(payload)) {
             var entry = zip.getEntry(LIBRARY);
@@ -103,7 +112,10 @@ public final class FishNativeService {
             if (entry == null || manifest == null) throw new IOException("Fish 原生资源不完整");
             byte[] bytes;
             try (InputStream input = zip.getInputStream(entry)) { bytes = input.readNBytes(2 * MAX_TEXT + 1); }
-            if (bytes.length > 2 * MAX_TEXT || !LIBRARY_SHA256.equals(hash(bytes, "SHA-256"))) {
+            String digest = hash(bytes, "SHA-256");
+            boolean supported = LEGACY_LIBRARY_SHA256.equals(digest)
+                    || (YOUHUN_PAYLOAD_SHA256.equals(identity) && YOUHUN_LIBRARY_SHA256.equals(digest));
+            if (bytes.length > 2 * MAX_TEXT || !supported) {
                 throw new IOException("Fish 原生库版本尚未验证，无法解密配置");
             }
             java.util.Properties properties = new java.util.Properties();
@@ -111,7 +123,7 @@ public final class FishNativeService {
             if (!hash(bytes, "MD5").equalsIgnoreCase(properties.getProperty("arm64-v8a", ""))) {
                 throw new IOException("Fish 原生库清单校验失败");
             }
-            return bytes;
+            return new VerifiedLibrary(bytes, digest);
         }
     }
 
@@ -161,6 +173,7 @@ public final class FishNativeService {
     private static final class Session {
         final File payload;
         final String identity;
+        final String libraryDigest;
         final String instance = java.util.UUID.randomUUID().toString();
         final Map<String, String> cache = new LinkedHashMap<>();
         volatile LineProcess channel;
@@ -168,7 +181,11 @@ public final class FishNativeService {
         volatile boolean failed;
         boolean ready;
 
-        Session(File payload, String identity) { this.payload = payload; this.identity = identity; }
+        Session(File payload, String identity, String libraryDigest) {
+            this.payload = payload;
+            this.identity = identity;
+            this.libraryDigest = libraryDigest;
+        }
 
         synchronized String decrypt(String ext) throws IOException {
             checkAvailable();
@@ -266,14 +283,7 @@ public final class FishNativeService {
             File self = NativeProvisioner.selfClasspath();
             File libs = new File(dist, "lib-unidbg");
             if (self == null || !libs.isDirectory()) throw new IOException("Fish 配置解密缺少随包原生运行依赖");
-            List<String> command = new ArrayList<>();
-            command.add(NativeProvisioner.javaBinary());
-            command.add("-Xverify:all");
-            command.add("-Xmx512m");
-            command.add("-Dfile.encoding=UTF-8");
-            command.add("-Duser.home=" + System.getProperty("user.home", "."));
-            command.add("-Djava.io.tmpdir=" + System.getProperty("java.io.tmpdir", "."));
-            command.add("-cp");
+            List<String> command = ChildJvm.command("-Xverify:all", "-Xmx512m", "-Dfile.encoding=UTF-8", "-cp");
             command.add(self.getAbsolutePath() + File.pathSeparator + new File(libs, "*").getAbsolutePath());
             command.add("com.fongmi.companion.hardshell.FishNativeMain");
             command.add(payload.getAbsolutePath());

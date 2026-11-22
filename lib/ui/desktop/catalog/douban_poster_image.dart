@@ -25,7 +25,7 @@ import '../../../core/net/http_client_factory.dart';
 /// 1. **webp 优先**：豆瓣 CDN 会按后缀转码，同图 `.webp` 比 `.jpg` 小约 18%；
 /// 2. **jpg 回落**：个别老资源没有 webp 变体时自动退回原地址，不会掉成占位图。
 class DoubanPosterImage extends ImageProvider<DoubanPosterImage> {
-  const DoubanPosterImage(this.url, {this.targetWidth, this.fallbackUrl});
+  const DoubanPosterImage(this.url, {this.targetWidth, this.fallbackUrl, this.requireLandscape = false});
 
   /// 海报原始地址（接口给的通常是 `.jpg`）
   final String url;
@@ -36,6 +36,9 @@ class DoubanPosterImage extends ImageProvider<DoubanPosterImage> {
   /// 高清地址失败时的回落地址（首页大屏把 `m_ratio_poster` 提到 `raw`，
   /// 个别老资源没有原图，此时退回接口给的缩略图，别掉成占位图）。
   final String? fallbackUrl;
+
+  /// 详情背景须按解码后的宽高复核，普通海报及演员头像不受限制。
+  final bool requireLandscape;
 
   static const Duration _timeout = Duration(seconds: 20);
 
@@ -64,12 +67,20 @@ class DoubanPosterImage extends ImageProvider<DoubanPosterImage> {
     StreamController<ImageChunkEvent> chunkEvents,
   ) async {
     try {
-      final bytes = await _fetch();
-      if (bytes.isEmpty) {
-        throw StateError('豆瓣海报响应为空：$url');
+      Object? lastError;
+      for (final candidate in fetchCandidates(url: url, fallbackUrl: fallbackUrl)) {
+        try {
+          final bytes = await _get(candidate);
+          if (bytes.isEmpty) continue;
+          final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+          return await decode(buffer, getTargetSize: targetSizeFor);
+        } catch (error) {
+          // CDN 即使返回 200 也可能不是可用图片，仍应尝试同图原地址。
+          lastError = error;
+        }
       }
-      final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-      return await decode(buffer, getTargetSize: targetSizeFor);
+      scheduleMicrotask(() => PaintingBinding.instance.imageCache.evict(key));
+      throw StateError('豆瓣海报加载失败：$url（$lastError）');
     } finally {
       // 这一层不消费进度事件，立即关闭避免泄漏
       unawaited(chunkEvents.close());
@@ -79,6 +90,9 @@ class DoubanPosterImage extends ImageProvider<DoubanPosterImage> {
   /// 解码目标尺寸：只缩不放，保持宽高比（对应原 `cacheWidth:` 语义）。
   @visibleForTesting
   ui.TargetImageSize targetSizeFor(int intrinsicWidth, int intrinsicHeight) {
+    if (requireLandscape && !isDoubanBackdropSize(intrinsicWidth, intrinsicHeight)) {
+      throw const FormatException('豆瓣背景图不是宽屏图片');
+    }
     final target = targetWidth;
     if (target == null || target <= 0 || intrinsicWidth <= target) {
       return ui.TargetImageSize(width: intrinsicWidth, height: intrinsicHeight);
@@ -98,8 +112,6 @@ class DoubanPosterImage extends ImageProvider<DoubanPosterImage> {
       ];
 
   /// 实际请求顺序：主地址的 webp → jpg，再回落地址的 webp → jpg（去重）。
-  ///
-  /// 纯字符串逻辑，暴露给测试；`_fetch` 只负责按这个顺序发请求。
   @visibleForTesting
   static List<String> fetchCandidates({
     required String url,
@@ -113,27 +125,6 @@ class DoubanPosterImage extends ImageProvider<DoubanPosterImage> {
     ].where(seen.add).toList(growable: false);
   }
 
-  /// 先要 `.webp`；失败（404 / 非 200）再回落原地址；高清地址整轮失败后
-  /// 再试 [fallbackUrl] 的候选，最后才交给占位图。
-  Future<Uint8List> _fetch() async {
-    final candidates = fetchCandidates(url: url, fallbackUrl: fallbackUrl);
-    Object? lastError;
-    for (final candidate in candidates) {
-      try {
-        final bytes = await _get(candidate);
-        if (bytes.isNotEmpty) return bytes;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    assert(() {
-      // 只在 debug 构建里留痕：线上失败就走占位图，不刷日志
-      debugPrint('[xiugou-tv] 豆瓣海报加载失败：$url（$lastError）');
-      return true;
-    }());
-    throw StateError('豆瓣海报加载失败：$url（$lastError）');
-  }
-
   static Future<Uint8List> _get(String url) async {
     final request =
         await _client.getUrl(Uri.parse(url)).timeout(_timeout);
@@ -142,11 +133,11 @@ class DoubanPosterImage extends ImageProvider<DoubanPosterImage> {
     request.headers.set('Accept', 'image/avif,image/webp,image/*,*/*;q=0.8');
     final response = await request.close().timeout(_timeout);
     if (response.statusCode != HttpStatus.ok) {
-      await response.drain<void>();
+      await response.timeout(_timeout).drain<void>();
       throw HttpException('HTTP ${response.statusCode}', uri: Uri.parse(url));
     }
     final builder = BytesBuilder(copy: false);
-    await for (final chunk in response) {
+    await for (final chunk in response.timeout(_timeout)) {
       builder.add(chunk);
     }
     return builder.takeBytes();
@@ -157,10 +148,10 @@ class DoubanPosterImage extends ImageProvider<DoubanPosterImage> {
       other is DoubanPosterImage &&
       other.url == url &&
       other.targetWidth == targetWidth &&
-      other.fallbackUrl == fallbackUrl;
+      other.fallbackUrl == fallbackUrl && other.requireLandscape == requireLandscape;
 
   @override
-  int get hashCode => Object.hash(url, targetWidth, fallbackUrl);
+  int get hashCode => Object.hash(url, targetWidth, fallbackUrl, requireLandscape);
 
   @override
   String toString() =>

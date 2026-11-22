@@ -60,14 +60,16 @@ if (!(Test-Path $bridgeSrcDir)) {
 
 Write-Host "Compiling android-bridge (runtime / crawler / host)..."
 $bridgeFiles = Get-ChildItem -Path $bridgeSrcDir -Filter "*.java" -Recurse | ForEach-Object { $_.FullName }
-if ($classpath) {
-    & javac -encoding UTF-8 -cp $classpath -d $outDir $bridgeFiles
-} else {
-    & javac -encoding UTF-8 -d $outDir $bridgeFiles
-}
-if ($LASTEXITCODE -ne 0) {
-    throw "javac (android-bridge) failed with exit code $LASTEXITCODE"
-}
+$sourceList = [IO.Path]::GetTempFileName()
+try {
+    # 用正斜线和逐行引号保留空格，避免源码数量或工程目录长度超过 Windows 命令行上限。
+    $paths = @($bridgeFiles | ForEach-Object { '"' + $_.Replace('\', '/') + '"' })
+    [IO.File]::WriteAllLines($sourceList, [string[]]$paths, [Text.UTF8Encoding]::new($false))
+    $compileArgs = @('-J-Dfile.encoding=UTF-8', '-encoding', 'UTF-8', '-d', $outDir)
+    if ($classpath) { $compileArgs += @('-cp', $classpath) }
+    & javac @compileArgs "@$sourceList"
+    if ($LASTEXITCODE -ne 0) { throw "javac (android-bridge) failed with exit code $LASTEXITCODE" }
+} finally { Remove-Item -LiteralPath $sourceList -Force }
 
 Write-Host "Compiling Companion Service Java sources..."
 $javaFiles = Get-ChildItem -Path $srcDir -Filter "*.java" -Recurse | ForEach-Object { $_.FullName }

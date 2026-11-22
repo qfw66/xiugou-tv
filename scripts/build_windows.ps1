@@ -17,6 +17,10 @@
     跳过发布产物冒烟门禁（scripts/verify_release.ps1）。仅限本地调试打包；发布不得使用。
 .PARAMETER AllowMachineInstallCoexistence
     允许门禁以 /CURRENTUSER 在临时目录测试；现有 HKLM 安装必须保持指纹不变，已有 HKCU 安装仍拒绝。
+.PARAMETER IncludeMdk
+    包含 MDK 运行库：要求显式配置 MDK SDK，校验完整运行库与通知。
+.PARAMETER BuildConfigFile
+    客户端编译配置路径。测试包和正式包同样要求 TMDB、弹幕和共享片段均已配置。
 #>
 
 param (
@@ -25,7 +29,9 @@ param (
     [switch]$SkipZip = $false,
     [switch]$SkipInstaller = $false,
     [switch]$SkipSmoke = $false,
-    [switch]$AllowMachineInstallCoexistence = $false
+    [switch]$AllowMachineInstallCoexistence = $false,
+    [Alias('LocalMdkPreview')][switch]$IncludeMdk = $false,
+    [string]$BuildConfigFile
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,7 +39,16 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path "$ScriptDir/..").Path
 $BuildOutputDir = "$ProjectRoot/build/windows/x64/runner/Release"
 $DistDir = "$ProjectRoot/dist"
+if ($IncludeMdk) {
+    if (!$env:XIUGOU_MDK_SDK_DIR -or !(Test-Path -LiteralPath (Join-Path $env:XIUGOU_MDK_SDK_DIR 'include/mdk/c/Player.h') -PathType Leaf)) {
+        throw 'MDK 构建需要 XIUGOU_MDK_SDK_DIR 指向已验证的 MDK SDK。'
+    }
+}
 . (Join-Path $ScriptDir 'package_tree.ps1')
+. (Join-Path $ScriptDir 'client_build_config.ps1')
+if (!$BuildConfigFile) { $BuildConfigFile = Join-Path $ProjectRoot 'config/app.env' }
+$BuildConfigFile = (Resolve-Path -LiteralPath $BuildConfigFile).Path
+$clientConfig = Get-PackageClientConfig $BuildConfigFile
 $PowerShellExe = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
 
 # 版本号默认跟随 pubspec.yaml（开发版本真源）；显式传 -Version 时以参数为准。
@@ -141,8 +156,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # 3. Release compilation
 Write-Host "[3/5] Building Windows x64 Release binary..." -ForegroundColor Yellow
-# §43 构建期配置：config/app.env（不入库，模板见 config/app.env.example）存在就注入；
-# 没有也能构建，只是弹幕等可选功能不出现。
+# 测试包和正式包使用同一套客户端配置；不把原始配置文件复制进包。
 $BuildArgs = @("build", "windows", "--release")
 # 关于页「Build Time / Commit Hash」：打包时注入（工作区有已跟踪改动时哈希带 -dirty）
 $BuildTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -154,13 +168,7 @@ try {
 $BuildArgs += "--dart-define=XIUGOU_BUILD_TIME=$BuildTime"
 if ($Commit) { $BuildArgs += "--dart-define=XIUGOU_COMMIT=$Commit" }
 Write-Host "      Build info: $BuildTime  $Commit" -ForegroundColor Gray
-$AppEnvFile = Join-Path $ProjectRoot "config/app.env"
-if (Test-Path -LiteralPath $AppEnvFile -PathType Leaf) {
-    Write-Host "      Using build config: config/app.env" -ForegroundColor Gray
-    $BuildArgs += "--dart-define-from-file=$AppEnvFile"
-} else {
-    Write-Host "      config/app.env not found: optional features (danmaku) disabled in this build." -ForegroundColor DarkYellow
-}
+$BuildArgs += "--dart-define-from-file=$BuildConfigFile"
 & $FlutterCmd @BuildArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "flutter build windows --release failed."
@@ -169,6 +177,7 @@ if ($LASTEXITCODE -ne 0) {
 if (-not (Test-Path -LiteralPath "$BuildOutputDir/xiugou_tv.exe" -PathType Leaf)) {
     Write-Error "Build output executable not found at: $BuildOutputDir/xiugou_tv.exe"
 }
+Assert-PackageClientConfig $clientConfig (Join-Path $BuildOutputDir 'data/app.so')
 
 # 3.2 Icon font subset gate
 # release 构建默认 --tree-shake-icons，增量构建可能复用过期子集，导致新增图标运行时空白
@@ -221,7 +230,11 @@ foreach ($requiredRuntimeFile in @("bin/java.exe", "bin/server/jvm.dll")) {
 }
 
 Write-Host "  [*] Building companion-service.jar..." -ForegroundColor Cyan
-& $PowerShellExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $CompanionScript
+# javac 的 lint 警告走 stderr；Stop 偏好会把它当成终止错误，这里临时降为 Continue，失败仍按退出码判断。
+$CompanionErrorAction = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& $PowerShellExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $CompanionScript 2>&1 | ForEach-Object { Write-Host $_ }
+$ErrorActionPreference = $CompanionErrorAction
 if ($LASTEXITCODE -ne 0) {
     throw "Companion build failed with exit code $LASTEXITCODE."
 }
@@ -364,12 +377,14 @@ Copy-Item -LiteralPath (Join-Path $ProjectRoot 'LICENSE') -Destination (Join-Pat
 $ReleaseLicenses = Join-Path $BuildOutputDir 'licenses'
 New-Item -ItemType Directory -Path $ReleaseLicenses -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $ProjectRoot 'THIRD_PARTY_LICENSES.md') -Destination $ReleaseLicenses -Force
+$FfmpegLicense = Join-Path $ProjectRoot 'licenses/FFmpeg-COPYING.LGPLv2.1'
+if (Test-Path -LiteralPath $FfmpegLicense) { Copy-Item -LiteralPath $FfmpegLicense -Destination $ReleaseLicenses -Force }
 $PackageStage = Join-Path $ProjectRoot ("build/packaging/" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $PackageStage -Force | Out-Null
-$ApplicationStage = New-StagedApplicationTree -SourceDir $BuildOutputDir -StageDir (Join-Path $PackageStage 'application')
+$ApplicationStage = New-StagedApplicationTree -SourceDir $BuildOutputDir -StageDir (Join-Path $PackageStage 'application') -IncludeMdk:$IncludeMdk
 $StagedAppDir = $ApplicationStage.Root
 $InnoFileList = Join-Path $PackageStage 'application-files.iss'
-Write-PackageInnoFileList -StageDir $StagedAppDir -DestinationPath $InnoFileList
+Write-PackageInnoFileList -StageDir $StagedAppDir -DestinationPath $InnoFileList -IncludeMdk:$IncludeMdk
 Write-Host "  [+] Clean application stage: $StagedAppDir ($($ApplicationStage.Files.Count) files; $($ApplicationStage.Excluded.Count) state/cache/log paths excluded)." -ForegroundColor Green
 $Artifacts = @()
 if (-not $SkipZip) {
@@ -463,9 +478,10 @@ if ($Artifacts.Count -gt 0) {
     } else {
         Write-Host "[6/6] Running release smoke gate..." -ForegroundColor Yellow
         $GateArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "verify_release.ps1"),
-            "-Version", $Version, "-ArtifactDir", $PackageStage, "-StagedAppDir", $StagedAppDir)
+            "-Version", $Version, "-ArtifactDir", $PackageStage, "-StagedAppDir", $StagedAppDir, "-BuildConfigFile", $BuildConfigFile)
         if ($SkipZip) { $GateArgs += "-SkipZip" }
         if ($AllowMachineInstallCoexistence) { $GateArgs += '-AllowMachineInstallCoexistence' }
+        if ($IncludeMdk) { $GateArgs += '-IncludeMdk' }
         if ($SkipInstaller) { $GateArgs += "-SkipInstaller" }
         & $PowerShellExe @GateArgs
         if ($LASTEXITCODE -ne 0) {

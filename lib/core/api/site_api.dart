@@ -59,12 +59,12 @@ class SiteApi {
         companionManager = companionManager ?? CompanionProcessManager(),
         companionSpiderApi = companionSpiderApi ?? CompanionSpiderApi(processManager: companionManager);
 
-  /// 预热诊断落盘：失败时写 ~/.xiugou_tv_companion/prewarm.log，
+  /// 预热诊断跟随当前站源服务目录，
   /// 便于在虚拟机/用户机上直接把文件回传（不依赖界面能否打开）。
-  static void _writePrewarmLog(String line) {
+  void _writePrewarmLog(String line) {
     try {
-      final home = Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'] ?? '.';
-      final dir = Directory('$home/.xiugou_tv_companion');
+      final dir = companionManager.stateDirectory;
+      if (dir == null) return;
       if (!dir.existsSync()) dir.createSync(recursive: true);
       final f = File('${dir.path}/prewarm.log');
       final stamp = DateTime.now().toIso8601String();
@@ -152,6 +152,8 @@ class SiteApi {
   /// 确保在访问 Type 3 (Spider) 站源时，伴随服务自动按需拉起就绪
   Future<bool> _ensureCompanionReady(Site site) async {
     if (!site.usesCompanion) return false;
+    // reset 会取消 Java 中所有在途请求，新配置的预热和首页都要等旧资源释放。
+    await _waitForSpiderReset();
     if (companionManager.isRunning) return true;
 
     // 尝试按需自动启动 Java 伴随微服务
@@ -168,6 +170,14 @@ class SiteApi {
 
   Future<void>? _resettingSpiders;
   int _scriptGeneration = 0;
+
+  Future<void> _waitForSpiderReset() async {
+    Future<void>? reset;
+    do {
+      reset = _resettingSpiders;
+      await reset;
+    } while (!identical(reset, _resettingSpiders));
+  }
 
   Future<void> resetCompanionSpiders() {
     _scriptGeneration++;
@@ -191,11 +201,7 @@ class SiteApi {
       ext: LiveScriptCatalog.encodeExt(source.ext),
       header: source.headers,
     );
-    Future<void>? reset;
-    do {
-      reset = _resettingSpiders;
-      await reset;
-    } while (!identical(reset, _resettingSpiders));
+    await _waitForSpiderReset();
     final generation = _scriptGeneration;
     if (!await _ensureCompanionReady(site)) {
       throw StateError(companionUnavailableText(source.name, companionManager.status));
@@ -383,6 +389,7 @@ class SiteApi {
       qualities: hasQualities ? List<PlaybackQuality>.unmodifiable(qualities) : const [],
       qualityIndex: index,
       liveDanmakuSources: result.liveDanmakuSources,
+      subtitles: result.subtitles,
       mode: result.liveDanmakuSources.isEmpty ? PlaybackMode.vod : PlaybackMode.live,
       modeSource: result.liveDanmakuSources.isEmpty
           ? PlaybackModeSource.defaultMode : PlaybackModeSource.defaultLive,

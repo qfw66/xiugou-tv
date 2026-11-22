@@ -1,10 +1,18 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
 
 import '../bounded_map.dart';
+import '../danmaku/danmaku_matcher.dart' show parseChineseNumber;
 import '../net/http_client_factory.dart';
+import 'detail_lookup_title.dart';
 import 'models/vod_models.dart';
+
+part 'douban_detail_metadata.dart';
+part 'douban_detail_backdrops.dart';
+part 'douban_subject_resolver.dart';
+part 'douban_hot_comments.dart';
 
 /// 豆瓣首页分类（backlog §17）。
 ///
@@ -169,6 +177,10 @@ class DoubanRepository {
   }
 
   final DoubanHttpGet _httpGet;
+  final _DoubanSubjects _subjects;
+  late final _hotComments = _DoubanHotComments(_subjects);
+  late final _details = _DoubanDetails(_subjects);
+  late final _backdrops = _DoubanBackdrops(_subjects, stillCacheTtl);
   final Duration cacheTtl;
 
   /// 剧照（横图）缓存时长：比列表长得多——剧照不随榜单变动，30 分钟足够。
@@ -199,7 +211,22 @@ class DoubanRepository {
     DoubanHttpGet? httpGet,
     this.cacheTtl = const Duration(minutes: 8),
     this.stillCacheTtl = const Duration(minutes: 30),
-  }) : _httpGet = httpGet ?? _dioGet;
+  }) : _httpGet = httpGet ?? _dioGet,
+       _subjects = _DoubanSubjects(
+         httpGet == null ? _dioGet : (uri, {cancel}) => httpGet(uri),
+         cacheTtl,
+       );
+
+  Future<List<DoubanComment>> hotCommentsFor(VodItem item, {CancelToken? cancel}) =>
+      _hotComments.forItem(item, cancel);
+
+  /// 仅在核验为同一部影片后返回资料；不请求图库。未匹配或暂不可用返回 null。
+  Future<DoubanDetailMetadata?> detailMetadataFor(VodItem item, {CancelToken? cancel}) =>
+      _details.forItem(item, cancel);
+
+  /// 同片原生横图，海报在剧照之前，最多三张供图片加载失败时依次回退。
+  Future<List<String>> detailBackdropsFor(DoubanDetailMetadata film, {CancelToken? cancel}) =>
+      _backdrops.forFilm(film, cancel);
 
   /// 一页分类内容：带上 `total` 才能判断「还有没有下一页」（§19 无限滚动）。
   Future<DoubanPage> fetchPage(
@@ -238,6 +265,10 @@ class DoubanRepository {
   }
 
   void clearCache() {
+    _hotComments.cache.clear();
+    _subjects.clear();
+    _details.credits.clear();
+    _backdrops.cache.clear();
     _cache.clear();
     _stills.clear();
     _intros.clear();
@@ -505,8 +536,8 @@ class DoubanRepository {
     ),
   );
 
-  static Future<String> _dioGet(Uri uri) async {
-    final response = await _sharedDio.get<String>(uri.toString());
+  static Future<String> _dioGet(Uri uri, {CancelToken? cancel}) async {
+    final response = await _sharedDio.getUri<String>(uri, cancelToken: cancel);
     final body = response.data;
     if (body == null || body.isEmpty) {
       throw const DoubanException('豆瓣接口返回空响应');

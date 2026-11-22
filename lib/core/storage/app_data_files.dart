@@ -5,6 +5,9 @@
 /// 先在这里登记，再决定是否进入备份。
 library;
 
+/// 重启操作标记不属于资料文件，不能随迁移复制或随备份导出。
+const String appDataResetMarkerFileName = 'reset_pending.json';
+
 /// 数据文件类别；备份排除窗口状态、外观偏好和本机凭据。
 enum AppDataCategory {
   configSnapshot,

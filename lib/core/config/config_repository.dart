@@ -19,6 +19,7 @@ import 'models/config_snapshot.dart';
 import 'models/history_record.dart';
 import 'models/home_site_preference.dart';
 import 'models/vod_config.dart';
+import 'pg_package_resources.dart';
 import 'windows_config_storage.dart';
 import '../storage/data_restore_guard.dart';
 
@@ -456,7 +457,7 @@ class ConfigRepository {
     try {
       final snapshot = await _storage.readCurrentConfig();
       if (snapshot != null) {
-        _applySnapshot(snapshot);
+        _applySnapshot(snapshot, await _parseSnapshot(snapshot));
       } else {
         final savedUrl = _currentWindowConfig.lastConfigUrl;
         if (savedUrl != null && savedUrl.trim().isNotEmpty) {
@@ -1150,11 +1151,13 @@ class ConfigRepository {
       if (_disposed || generation != _loadGeneration) {
         throw const ConfigLoadSuperseded();
       }
-      final parsed = _parseConfig(snapshot.rawContent,
-          baseUrl: _snapshotBaseUrl(snapshot));
+      final parsed = await _parseSnapshot(snapshot);
+      if (_disposed || generation != _loadGeneration) {
+        throw const ConfigLoadSuperseded();
+      }
       await _storage.saveCurrentConfig(snapshot);
       if (_disposed) throw const ConfigLoadSuperseded();
-      _applySnapshot(snapshot, parsed: parsed);
+      _applySnapshot(snapshot, parsed);
       if (snapshot.sourceKind != null) {
         _emitLoaded(snapshot.sourceKind!, snapshot.sourceLocation!, parsed);
       }
@@ -1177,9 +1180,17 @@ class ConfigRepository {
     );
   }
 
-  void _applySnapshot(ConfigSnapshot snapshot, {VodConfig? parsed}) {
-    final config = parsed ??
-        _parseConfig(snapshot.rawContent, baseUrl: _snapshotBaseUrl(snapshot));
+  Future<VodConfig> _parseSnapshot(ConfigSnapshot snapshot) async {
+    final config = _parseConfig(snapshot.rawContent);
+    final baseUrl = _snapshotBaseUrl(snapshot);
+    final localExt = snapshot.sourceKind == ConfigSourceKind.file &&
+            snapshot.depotPath.isEmpty && snapshot.sourceLocation != null
+        ? await PgPackageResources.localExtensions(File(snapshot.sourceLocation!), config.sites)
+        : const <Site, String>{};
+    return _absolutizeConfig(config, baseUrl, localExt: localExt);
+  }
+
+  void _applySnapshot(ConfigSnapshot snapshot, VodConfig config) {
     _currentSnapshot = snapshot;
     _sourceRecoveryError = null;
     _currentSourceKind = snapshot.sourceKind;
@@ -1429,7 +1440,8 @@ class ConfigRepository {
   ///
   /// 手机端在 `Decoder.fix` 中对整份配置文本做等价替换；桌面端此前只还原
   /// 多仓条目，站点侧相对 api/ext/jar 无法下载。
-  VodConfig _absolutizeConfig(VodConfig config, String? baseUrl) {
+  VodConfig _absolutizeConfig(VodConfig config, String? baseUrl,
+      {Map<Site, String> localExt = const {}}) {
     final base = _configBaseUri(baseUrl);
     if (base == null) return config;
     return VodConfig(
@@ -1441,7 +1453,7 @@ class ConfigRepository {
                 api: RelativeUrl.resolve(base, site.api,
                         allowBareRelative: true) ??
                     site.api,
-                ext: _absolutizeSiteExt(site.ext, base),
+                ext: localExt[site] ?? _absolutizeSiteExt(site, base),
                 jar: RelativeUrl.resolve(base, site.jar,
                     allowBareRelative: true),
                 icon: resolveSiteIconUrl(site.icon, baseUrl: base.toString()),
@@ -1460,12 +1472,17 @@ class ConfigRepository {
   ///
   /// CatVodSpider-GM 的 `ext` 是 JSON 对象，`userScript` 使用 `./userScripts/...`。
   /// 只还原明确表示脚本地址的键，避免把扩展里的正文、选择器或自由文本误当成 URL。
-  String? _absolutizeSiteExt(String? ext, Uri base) {
+  String? _absolutizeSiteExt(Site site, Uri base) {
+    final ext = site.ext;
     if (ext == null || ext.trim().isEmpty) return ext;
     dynamic decoded;
     try {
       decoded = jsonDecode(ext);
     } catch (_) {
+      if (site.isJarSource && ext.contains(r'$$$')) {
+        final pg = PgPackageResources.resolve(site, base);
+        if (pg != null) return pg;
+      }
       return RelativeUrl.resolve(base, ext);
     }
     final normalized = _absolutizeExtValue(decoded, base);

@@ -1,9 +1,8 @@
 package android.net;
 
 import java.io.File;
-import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
-import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -135,14 +134,33 @@ public class Uri {
         return encode(s, null);
     }
 
+    private static final String HEX = "0123456789ABCDEF";
+
     public static String encode(String s, String allow) {
         if (s == null) return null;
-        try {
-            String out = URLEncoder.encode(s, "UTF-8").replace("+", "%20");
-            return out;
-        } catch (UnsupportedEncodingException e) {
-            return s;
+        StringBuilder out = null;
+        int last = 0;
+        for (int i = 0; i < s.length();) {
+            if (isAllowed(s.charAt(i), allow)) {
+                i++;
+                continue;
+            }
+            if (out == null) out = new StringBuilder(s.length());
+            out.append(s, last, i);
+            int start = i++;
+            while (i < s.length() && !isAllowed(s.charAt(i), allow)) i++;
+            // Encode a whole run so UTF-16 surrogate pairs stay together.
+            for (byte b : s.substring(start, i).getBytes(StandardCharsets.UTF_8)) {
+                out.append('%').append(HEX.charAt((b & 0xff) >>> 4)).append(HEX.charAt(b & 0x0f));
+            }
+            last = i;
         }
+        return out == null ? s : out.append(s, last, s.length()).toString();
+    }
+
+    private static boolean isAllowed(char c, String allow) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                || "_-!.~'()*".indexOf(c) >= 0 || (allow != null && allow.indexOf(c) >= 0);
     }
 
     public static String decode(String s) {

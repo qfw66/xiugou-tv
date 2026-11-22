@@ -1,11 +1,11 @@
 package com.fongmi.companion.hardshell;
 
+import com.fongmi.companion.ipc.ChildJvm;
 import com.fongmi.companion.ipc.LineProcess;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 
@@ -186,11 +186,7 @@ public final class PayloadCryptoService {
         }
         try {
             File cacheDir = payloadJar.getParentFile();
-            List<String> command = new ArrayList<>();
-            command.add(NativeProvisioner.javaBinary());
-            command.add("-Xmx1g");
-            command.add("-Dfile.encoding=UTF-8");
-            command.add("-cp");
+            List<String> command = ChildJvm.command("-Xmx1g", "-Dfile.encoding=UTF-8", "-cp");
             command.add(self.getAbsolutePath() + File.pathSeparator + new File(libDir, "*").getAbsolutePath());
             // 必须是字符串：引用 PayloadCryptoMain.class 会在父 JVM 触发加载，而父进程没有 unidbg。
             command.add("com.fongmi.companion.hardshell.PayloadCryptoMain");

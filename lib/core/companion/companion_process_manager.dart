@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../net/http_client_factory.dart';
+import '../storage/data_directory_manager.dart';
 import 'companion_log.dart';
 import 'companion_recovery.dart';
 import 'companion_stderr_filter.dart';
@@ -58,6 +59,7 @@ class CompanionProcessManager implements CompanionRecoveryHost {
   CompanionProcessManager.scoped({
     Dio? dio,
     String? applicationDirectory,
+    String? systemUserHome,
     Future<String?> Function()? javaResolver,
     Future<Process> Function(String, List<String>)? processStarter,
     // 关闭过慢优化：实测 JVM 正常关机 ≈1.05s；该值同时封顶 HTTP 通知、
@@ -68,16 +70,24 @@ class CompanionProcessManager implements CompanionRecoveryHost {
     this.idleTimeout = const Duration(minutes: 30),
     this.idleCheckInterval = const Duration(minutes: 1),
     CompanionLog? log,
-  })  : _dio = dio ??
-            HttpClientFactory.createDio(BaseOptions(
-                connectTimeout: const Duration(seconds: 3),
-                receiveTimeout: const Duration(seconds: 3))),
-        _applicationDirectory = applicationDirectory == null
-            ? File(Platform.resolvedExecutable).parent.path
-            : p.normalize(p.absolute(applicationDirectory)),
-        _javaResolver = javaResolver,
-        _processStarter = processStarter ?? _startAdopted,
-        _log = log ?? CompanionLog.shared();
+  }) : _dio =
+           dio ??
+           HttpClientFactory.createDio(
+             BaseOptions(
+               connectTimeout: const Duration(seconds: 3),
+               receiveTimeout: const Duration(seconds: 3),
+             ),
+           ),
+       _applicationDirectory = applicationDirectory == null
+           ? File(Platform.resolvedExecutable).parent.path
+           : p.normalize(p.absolute(applicationDirectory)),
+       _systemUserHome =
+           systemUserHome ??
+           Platform.environment['USERPROFILE'] ??
+           Platform.environment['HOME'],
+       _javaResolver = javaResolver,
+       _processStarter = processStarter ?? _startAdopted,
+       _log = log ?? CompanionLog.shared();
 
   /// 默认启动方式：拉起后立即交给 Job Object，主程序崩溃 / 被强杀时整棵 companion 进程树随之终止。
   /// companion 的孙进程（密码服务、python）都是首次用到站点时才派生，晚于这里的收养，因此全部在 Job 内。
@@ -97,6 +107,9 @@ class CompanionProcessManager implements CompanionRecoveryHost {
   String? Function()? fallbackProxy;
 
   final String _applicationDirectory;
+  final String? _systemUserHome;
+  Directory? get stateDirectory =>
+      DataDirectoryManager.companionDirectory(_systemUserHome);
   final Future<String?> Function()? _javaResolver;
   final Future<Process> Function(String, List<String>) _processStarter;
   final Duration exitTimeout;
@@ -348,6 +361,17 @@ class CompanionProcessManager implements CompanionRecoveryHost {
       } catch (_) {
         fallback = null; // 读代理失败按无代理处理，不影响启动
       }
+      final state = stateDirectory;
+      final active = DataDirectoryManager.status?.activePath;
+      final local =
+          state != null &&
+          active != null &&
+          p.equals(state.parent.path, active);
+      final privateTemp = local ? p.join(state.path, 'tmp') : null;
+      if (privateTemp != null) {
+        await Directory(privateTemp).create(recursive: true);
+      }
+      if (_stopRequested) return false;
       // ⑥ 内存收紧与孤儿回收：收紧 JVM 参数（对照实验见静态常量注释）；
       // --stdin-watch=on 让 Java 侧在主进程异常退出（stdin 管道关闭）时自杀，
       // 避免留下无人回收的孤儿进程（见 companion/src/.../Main.java）。
@@ -355,6 +379,8 @@ class CompanionProcessManager implements CompanionRecoveryHost {
         // 非法转换字节码必须在加载时拒绝，否则 GC 扫描栈可能使 JVM 致命退出。
         '-Xverify:all',
         ...companionJvmTuningArgs,
+        if (local) '-Duser.home=$active',
+        if (privateTemp != null) '-Djava.io.tmpdir=$privateTemp',
         // 原生崩溃（hs_err）与 JVM 致命错误落到用户数据目录，便于用户直接回传。
         '-XX:ErrorFile=${_hsErrorFile()}',
         if (debugCompanion) '-Dxiugou.debug=true',

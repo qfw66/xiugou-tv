@@ -104,9 +104,8 @@ class DataDirectoryException implements Exception {
 /// 设计要点：
 /// - 默认目录是**安装目录下的 `user_data`**（便携 ZIP 解压即用）；安装目录不可写
 ///   （Program Files / 只读介质）时回退 `%APPDATA%/XiugouTV` 并给出中文原因；
-/// - 旧版本已经把数据放在 `%APPDATA%/XiugouTV` 的用户**沿用旧目录**，不静默搬家
-///   （搬迁要复制几十个文件，中途失败会留下半套数据；沿用零风险，想搬的用户可以在
-///   设置页显式点「迁移到安装目录」，走既有的只复制不删除 + 安全副本流程）；
+/// - 旧版本的数据可从 `%APPDATA%/XiugouTV` 复制到可写的 `user_data`；
+///   迁移成功后切换，不删除旧资料；自定义目录或待重置的数据不自动搬家；
 /// - 自定义目录优先于默认目录，指针与 pending 标记都放在**默认目录**，因此自定义
 ///   目录换了位置也能找回；
 /// - 迁移只在启动、任何存储初始化之前执行，避免运行中双目录写入；
@@ -128,6 +127,7 @@ class DataDirectoryManager {
 
   /// 便携数据目录名（安装目录下）。
   static const String portableDirectoryName = 'user_data';
+  static const String companionDirectoryName = '.xiugou_tv_companion';
 
   /// 旧版本默认目录名（`%APPDATA%` 下）。
   static const String legacyDirectoryName = 'XiugouTV';
@@ -141,6 +141,7 @@ class DataDirectoryManager {
     'backups',
     'danmaku',
     'catvod',
+    companionDirectoryName,
   ];
 
   static const String markerFormat = 'xiugou-tv-data-location';
@@ -152,9 +153,6 @@ class DataDirectoryManager {
 
   /// 启动时解析出的默认目录（[initialize] 写入，[resetForTest] 清空）。
   static String? _resolvedDefaultPath;
-
-  /// 默认目录回退到旧版 APPDATA 的原因；为空表示没回退。
-  static String? _defaultFallbackReason;
 
   /// 最近一次解析使用的旧版目录（测试会注入临时目录，不能读环境变量）。
   static String? _resolvedLegacyPath;
@@ -186,6 +184,25 @@ class DataDirectoryManager {
   /// 当前数据目录（同步）。未初始化时返回默认目录，保持既有测试与工具的行为。
   static String get currentPath => _activePath ?? defaultDirectoryPath();
 
+  /// 已有的站源账号继续用原位置；随程序带来的站源目录（即使为空）优先。
+  static Directory? companionDirectory(String? systemHome) {
+    final old = systemHome == null || systemHome.isEmpty
+        ? null
+        : Directory(p.join(systemHome, companionDirectoryName));
+    final active = _activePath;
+    if (active == null) return old;
+    final local = Directory(p.join(active, companionDirectoryName));
+    return _hasCompanionProfile(local) || old == null || !old.existsSync() ? local : old;
+  }
+
+  static bool _hasCompanionProfile(Directory dir) {
+    return switch (FileSystemEntity.typeSync(dir.path, followLinks: false)) {
+      FileSystemEntityType.directory => true,
+      FileSystemEntityType.notFound => false,
+      _ => throw const DataDirectoryException('站源数据目录不是普通目录，未使用或覆盖其他账号。'),
+    };
+  }
+
   static DataDirectoryStatus? get status => _status;
 
   /// 仅测试使用：清空静态状态。
@@ -193,7 +210,6 @@ class DataDirectoryManager {
     _activePath = null;
     _status = null;
     _resolvedDefaultPath = null;
-    _defaultFallbackReason = null;
     _resolvedLegacyPath = null;
     _installDirectoryOverride = null;
   }
@@ -214,9 +230,7 @@ class DataDirectoryManager {
         ? await _resolveDefaultDirectory(legacyDirectory: legacyDirectory)
         : _DefaultDirectoryResolution(
             p.normalize(p.absolute(defaultDirectory)), null);
-    _resolvedDefaultPath = resolution.path;
-    _defaultFallbackReason = resolution.reason;
-    final defaultPath = resolution.path;
+    var defaultPath = resolution.path;
     var active = defaultPath;
     String? customPath;
     String? unavailable;
@@ -245,7 +259,11 @@ class DataDirectoryManager {
       }
     }
 
-    final pending = _readMarker(defaultPath, pendingFileName);
+    // 重置先于搬迁：启动随后会在原目录消费标记，不能先复制待清空的资料。
+    final resetPending =
+        File(p.join(defaultPath, appDataResetMarkerFileName)).existsSync();
+    final pending =
+        resetPending ? null : _readMarker(defaultPath, pendingFileName);
     if (pending != null) {
       pendingPath = p.normalize(p.absolute(pending));
       if (_samePath(pendingPath, active)) {
@@ -289,7 +307,8 @@ class DataDirectoryManager {
     // 安装目录下的 user_data —— 这就是「数据跟着安装目录走」的实现路径。
     // 仍然只复制不删除、逐文件 sha256 校验，成功后才切换；失败保留旧目录，
     // 记下原因，之后不再自动重试（设置页还能手动迁移）。
-    if (pendingPath == null &&
+    if (!resetPending &&
+        pendingPath == null &&
         unavailable == null &&
         !_samePath(active, portableDirectoryPath()) &&
         _samePath(active, _resolvedLegacyPath ?? legacyDirectoryPath()) &&
@@ -309,6 +328,13 @@ class DataDirectoryManager {
       }
     }
 
+    // 迁到程序旁后，下次启动会优先从那里读标记；本次设置页也必须写到同一处。
+    if (defaultDirectory == null &&
+        customPath == null &&
+        _isPortableDirectory(active)) {
+      defaultPath = active;
+    }
+    _resolvedDefaultPath = defaultPath;
     _activePath = active;
     _status = DataDirectoryStatus(
       activePath: active,
@@ -317,7 +343,9 @@ class DataDirectoryManager {
       // 自定义目录失败时优先报自定义目录的原因；没有自定义目录时报
       // 「安装目录不可写、已回退 APPDATA」的原因，设置页据此显示提示。
       unavailableReason: unavailable ??
-          (customPath == null ? _defaultFallbackReason : null),
+          (customPath == null && _samePath(defaultPath, resolution.path)
+              ? resolution.reason
+              : null),
       pendingPath: pendingPath,
       pendingError: pendingError,
     );
@@ -374,11 +402,16 @@ class DataDirectoryManager {
   /// 子目录只判断「存在且非空」：旧版可能只留下壁纸 / 备份 / 弹幕缓存，也要认成
   /// 已有数据，避免升级后被当成全新安装而换了默认目录。
   static bool _containsUserData(String directory) {
+    if (FileSystemEntity.typeSync(p.join(directory, companionDirectoryName),
+            followLinks: false) != FileSystemEntityType.notFound) {
+      return true;
+    }
     for (final file in appDataFiles) {
       if (File(p.join(directory, file.name)).existsSync()) return true;
     }
     if (File(p.join(directory, pointerFileName)).existsSync() ||
-        File(p.join(directory, pendingFileName)).existsSync()) {
+        File(p.join(directory, pendingFileName)).existsSync() ||
+        File(p.join(directory, appDataResetMarkerFileName)).existsSync()) {
       return true;
     }
     for (final name in migratedSubdirectories) {
@@ -667,6 +700,9 @@ class DataDirectoryManager {
 
     try {
       await Directory(target).create(recursive: true);
+      final hasProfile = _hasCompanionProfile(Directory(p.join(source, companionDirectoryName)));
+      final targetProfile = Directory(p.join(target, companionDirectoryName));
+      final targetHasProfile = _hasCompanionProfile(targetProfile);
       final files = await _collectFiles(source);
       final stamp = DateTime.now()
           .toUtc()
@@ -716,6 +752,8 @@ class DataDirectoryManager {
           );
         }
       }
+      // 空目录也是账号归属标记；不复制临时文件时，迁移不能让程序改读系统账号。
+      if (hasProfile && !targetHasProfile) await targetProfile.create(recursive: true);
       return DataDirectoryMigrationResult(ok: true, copied: copied);
     } catch (e) {
       return DataDirectoryMigrationResult(
@@ -733,20 +771,28 @@ class DataDirectoryManager {
     }
     for (final dirName in migratedSubdirectories) {
       final dir = Directory(p.join(source, dirName));
-      if (!await dir.exists()) continue;
-      await for (final entity
-          in dir.list(recursive: true, followLinks: false)) {
-        if (entity is! File) continue;
-        final relative = p.join(dirName, p.relative(entity.path, from: dir.path));
-        files.add(_SourceFile(relative, entity));
+      if (await FileSystemEntity.type(dir.path, followLinks: false) !=
+          FileSystemEntityType.directory) {
+        continue;
+      }
+      final pending = [dir];
+      while (pending.isNotEmpty) {
+        await for (final entity in pending.removeLast().list(followLinks: false)) {
+          if (entity is Directory) {
+            if (dirName != companionDirectoryName || !p.equals(entity.path, p.join(dir.path, 'tmp'))) {
+              pending.add(entity);
+            }
+          } else if (entity is File) {
+            files.add(_SourceFile(p.join(dirName, p.relative(entity.path, from: dir.path)), entity));
+          }
+        }
       }
     }
     return files;
   }
 
   static Future<String> _sha256(File file) async {
-    final bytes = await file.readAsBytes();
-    return sha256.convert(bytes).toString();
+    return (await sha256.bind(file.openRead()).first).toString();
   }
 
   static Future<void> _deleteQuietly(File file) async {

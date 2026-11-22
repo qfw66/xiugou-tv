@@ -1,8 +1,11 @@
+import 'danmaku_source.dart';
+
 /// 弹幕外观与过滤设置（§43 二期）。持久化在 `player_settings.json` 的 `danmaku` 对象里。
 ///
 /// 所有字段反序列化时做范围校验，非法 / 缺失回落默认值（与 [PlayerSettings] 同口径）。
 class DanmakuSettings {
   const DanmakuSettings({
+    this.source = DanmakuSource.primary,
     this.blockScroll = false,
     this.blockTop = false,
     this.blockBottom = false,
@@ -23,6 +26,9 @@ class DanmakuSettings {
   });
 
   static const DanmakuSettings defaults = DanmakuSettings();
+
+  /// 自动匹配与手动搜索共用的弹幕接口。
+  final DanmakuSource source;
 
   // ---- 屏蔽（按类型）----
   final bool blockScroll;
@@ -139,6 +145,7 @@ class DanmakuSettings {
     }
 
     return DanmakuSettings(
+      source: DanmakuSource.fromJson(raw['source']),
       blockScroll: flag('blockScroll', false),
       blockTop: flag('blockTop', false),
       blockBottom: flag('blockBottom', false),
@@ -160,6 +167,7 @@ class DanmakuSettings {
   }
 
   Map<String, dynamic> toJson() => {
+        'source': source.id,
         'blockScroll': blockScroll,
         'blockTop': blockTop,
         'blockBottom': blockBottom,
@@ -180,6 +188,7 @@ class DanmakuSettings {
       };
 
   DanmakuSettings copyWith({
+    DanmakuSource? source,
     bool? blockScroll,
     bool? blockTop,
     bool? blockBottom,
@@ -199,6 +208,7 @@ class DanmakuSettings {
     bool? mergeDuplicates,
   }) =>
       DanmakuSettings(
+        source: source ?? this.source,
         blockScroll: blockScroll ?? this.blockScroll,
         blockTop: blockTop ?? this.blockTop,
         blockBottom: blockBottom ?? this.blockBottom,
@@ -221,6 +231,7 @@ class DanmakuSettings {
   @override
   bool operator ==(Object other) =>
       other is DanmakuSettings &&
+      other.source == source &&
       other.blockScroll == blockScroll &&
       other.blockTop == blockTop &&
       other.blockBottom == blockBottom &&
@@ -240,7 +251,7 @@ class DanmakuSettings {
       other.mergeDuplicates == mergeDuplicates;
 
   @override
-  int get hashCode => Object.hash(blockScroll, blockTop, blockBottom, blockColorful, blockAdvanced, area, pipArea,
+  int get hashCode => Object.hash(source, blockScroll, blockTop, blockBottom, blockColorful, blockAdvanced, area, pipArea,
       opacity, fontWeight, strokeWidth, fontSize, fullscreenFontSize, scrollDuration, fixedDuration, lineHeight,
       density, mergeDuplicates);
 }

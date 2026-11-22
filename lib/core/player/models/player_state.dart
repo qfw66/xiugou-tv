@@ -1,3 +1,5 @@
+import '../source_subtitle.dart';
+
 /// 播放器运行状态枚举
 enum PlaybackStatus {
   idle,
@@ -80,6 +82,7 @@ class MediaPlaySpec {
   final List<PlaybackQuality> qualities;
   final int qualityIndex;
   final List<LiveDanmakuSource> liveDanmakuSources;
+  final List<SourceSubtitle> subtitles;
 
   const MediaPlaySpec({
     required this.url,
@@ -93,6 +96,7 @@ class MediaPlaySpec {
     this.qualities = const [],
     this.qualityIndex = 0,
     this.liveDanmakuSources = const [],
+    this.subtitles = const [],
   }) : mode = mode ?? (isLive == true ? PlaybackMode.live : PlaybackMode.vod),
        assert(mode == null || isLive == null, 'mode 与 isLive 只能二选一');
 
@@ -107,6 +111,7 @@ class MediaPlaySpec {
     this.qualities = const [],
     this.qualityIndex = 0,
     this.liveDanmakuSources = const [],
+    this.subtitles = const [],
   }) : mode = PlaybackMode.vod;
 
   /// 直播会话（导入频道 / 收藏 / 上次频道 / 直链按直播）
@@ -120,6 +125,7 @@ class MediaPlaySpec {
     this.qualities = const [],
     this.qualityIndex = 0,
     this.liveDanmakuSources = const [],
+    this.subtitles = const [],
   }) : mode = PlaybackMode.live;
 
   /// 未提供或为 null 的字段保持原值；空 headers/qualities 可清空对应集合。
@@ -135,6 +141,7 @@ class MediaPlaySpec {
     List<PlaybackQuality>? qualities,
     int? qualityIndex,
     List<LiveDanmakuSource>? liveDanmakuSources,
+    List<SourceSubtitle>? subtitles,
   }) {
     assert(mode == null || isLive == null, 'mode 与 isLive 只能二选一');
     return MediaPlaySpec(
@@ -151,6 +158,7 @@ class MediaPlaySpec {
       qualities: qualities ?? this.qualities,
       qualityIndex: qualityIndex ?? this.qualityIndex,
       liveDanmakuSources: liveDanmakuSources ?? this.liveDanmakuSources,
+      subtitles: subtitles ?? this.subtitles,
     );
   }
 

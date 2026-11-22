@@ -18,8 +18,10 @@ import 'package:flutter/foundation.dart';
 abstract final class AppEnv {
   // String.fromEnvironment 的键必须是常量，所以每个键单独写一行。
   static const Map<String, String> _compiled = {
+    'XIUGOU_TMDB_API_KEY': String.fromEnvironment('XIUGOU_TMDB_API_KEY'),
     'XIUGOU_DANMAKU_URL': String.fromEnvironment('XIUGOU_DANMAKU_URL'),
     'XIUGOU_DANMAKU_TOKEN': String.fromEnvironment('XIUGOU_DANMAKU_TOKEN'),
+    'XIUGOU_DANMAKU_SECONDARY_URL': String.fromEnvironment('XIUGOU_DANMAKU_SECONDARY_URL'),
     'XIUGOU_SEGMENTS_URL': String.fromEnvironment('XIUGOU_SEGMENTS_URL'),
     'XIUGOU_SEGMENTS_TOKEN': String.fromEnvironment('XIUGOU_SEGMENTS_TOKEN'),
   };

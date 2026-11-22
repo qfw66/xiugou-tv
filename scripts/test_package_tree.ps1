@@ -7,6 +7,7 @@
 param([Parameter(Mandatory = $true)][string]$ScratchRoot)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'package_tree.ps1')
+. (Join-Path $PSScriptRoot 'client_build_config.ps1')
 . (Join-Path $PSScriptRoot 'release_test_helpers.ps1')
 
 $testRoot = Join-Path ([System.IO.Path]::GetFullPath($ScratchRoot)) ('packaging-fixtures-' + [Guid]::NewGuid().ToString('N'))
@@ -241,5 +242,35 @@ try {
     & $powerShellExe -NoProfile -NonInteractive -Command 'exit 0'
     Assert-True ($LASTEXITCODE -eq 0) 'Absolute PowerShell invocation failed under isolated PATH.'
 } finally { $env:PATH = $savedPath }
+
+$mdkFiles = @('mdk/mdk.dll','mdk/ffmpeg-9.dll','mdk/Xiugou-MDK-SDK-notice.txt')
+Assert-Throws { New-StagedApplicationTree $source (Join-Path $testRoot 'no-sdk') -IncludeMdk } 'Required package runtime missing: mdk/'
+foreach ($rel in $mdkFiles) { Write-Fixture $source $rel }
+$mdkStage = New-StagedApplicationTree $source (Join-Path $testRoot 'mdk-default')
+$mdkCopy = New-StagedApplicationTree $mdkStage.Root (Join-Path $testRoot 'mdk-explicit') -IncludeMdk
+Assert-True ((Assert-PackageMatchesStage $mdkStage.Root $mdkCopy.Root -IncludeMdk) -eq ($runtimeFiles.Count + 3)) 'MDK assets missing.'
+Assert-True ((Assert-PackageMatchesStage $mdkStage.Root $mdkCopy.Root) -eq ($runtimeFiles.Count + 3)) 'Automatic MDK validation failed.'
+$legacyMdkCopy = New-StagedApplicationTree $mdkStage.Root (Join-Path $testRoot 'mdk-legacy-copy') -LocalMdkPreview
+Assert-True ((Assert-PackageMatchesStage $mdkStage.Root $legacyMdkCopy.Root) -eq ($runtimeFiles.Count + 3)) 'Legacy MDK switch alias failed.'
+$mdkList = Join-Path $testRoot 'mdk-files.iss'
+Write-PackageInnoFileList $mdkStage.Root $mdkList -IncludeMdk
+foreach ($rel in $mdkFiles) { Assert-True ([IO.File]::ReadAllText($mdkList).Contains($rel.Replace('/','\'))) "Inno missing: $rel" }
+Write-Fixture $source 'mdk/other.dll'
+Assert-Throws { New-StagedApplicationTree $source (Join-Path $testRoot 'unlisted-sdk') -IncludeMdk } 'Unknown package path'
+
+$configFile = Join-Path $testRoot 'app.env'
+$aotFixture = Join-Path $testRoot 'app.so'
+$configRows = @('XIUGOU_TMDB_API_KEY=0123456789abcdef0123456789abcdef','XIUGOU_DANMAKU_URL="https://fixture.invalid/d"','XIUGOU_DANMAKU_TOKEN="dm#test"','XIUGOU_SEGMENTS_URL=https://fixture.invalid/s','XIUGOU_SEGMENTS_TOKEN=sg_test')
+foreach ($row in $configRows) {
+    [IO.File]::WriteAllLines($configFile, @($configRows -ne $row) + ($row.Split('=')[0] + '=""'))
+    Assert-Throws { Get-PackageClientConfig $configFile } $row.Split('=')[0]
+}
+[IO.File]::WriteAllLines($configFile, $configRows)
+$config = Get-PackageClientConfig $configFile
+Assert-True ($config.Count -eq 5 -and $config.XIUGOU_DANMAKU_TOKEN -ceq 'dm#test') 'Wrong client config.'
+[IO.File]::WriteAllText($aotFixture, ($config.Values -ne 'sg_test' -join ';'))
+Assert-Throws { Assert-PackageClientConfig $config $aotFixture } 'XIUGOU_SEGMENTS_TOKEN'
+[IO.File]::AppendAllText($aotFixture, 'sg_test')
+Assert-PackageClientConfig $config $aotFixture
 
 Write-Host "PASS: $checks packaging fixture assertions. Actual symbolic link tested: $symlinkCreated. Fixtures: $testRoot"

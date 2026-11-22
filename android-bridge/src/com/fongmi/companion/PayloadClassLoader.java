@@ -65,6 +65,16 @@ final class PayloadClassLoader extends URLClassLoader {
      */
     static final Set<String> STAND_INS = Set.of("Douban", "Push");
 
+    private static final String BILI = SPIDER_PKG + "Bili";
+
+    /** 站源入口沿用桌面 B 站实现；配置中心链接到的同名类则可以属于载荷。 */
+    static Class<?> spiderEntry(ClassLoader loader, String name) throws ClassNotFoundException {
+        if (BILI.equals(name) && loader instanceof PayloadClassLoader) {
+            return loader.getParent().loadClass(name);
+        }
+        return loader.loadClass(name);
+    }
+
     /**
      * 已过时的桌面替身（简单类名 → 原因）：载荷 jar 自带同名类时一律用载荷版，不看有没有依赖。
      *
@@ -182,6 +192,7 @@ final class PayloadClassLoader extends URLClassLoader {
         try (ZipFile zip = new ZipFile(jar)) {
             Set<String> candidates = new HashSet<>();
             Set<String> helpers = new TreeSet<>();
+            boolean hasBili = false;
             for (Enumeration<? extends ZipEntry> e = zip.entries(); e.hasMoreElements(); ) {
                 String n = e.nextElement().getName();
                 if (!n.endsWith(".class") || n.indexOf('$') >= 0) continue;
@@ -195,9 +206,11 @@ final class PayloadClassLoader extends URLClassLoader {
                     reasons.put(simple, OUTDATED.get(simple));
                 } else if (STAND_INS.contains(simple)) {
                     candidates.add(simple);
+                } else if (BILI.equals(dotted)) {
+                    hasBili = true;
                 }
             }
-            if (candidates.isEmpty() && helpers.isEmpty()) return reasons;
+            if (candidates.isEmpty() && helpers.isEmpty() && !hasBili) return reasons;
 
             Map<String, Integer> subclasses = new HashMap<>();
             Map<String, Set<String>> missing = new HashMap<>();
@@ -211,7 +224,7 @@ final class PayloadClassLoader extends URLClassLoader {
                 String self = outerSimpleName(dotted);
                 // 只认 spider 包里的类（站点类及其内部类）当替身的依赖方：merge/* 之类的混淆辅助类引用替身的成员，
                 // 多半是在给载荷版替身自己干活；替身用桌面版时它们根本不会被调用，不能因此让位。
-                boolean spiderSide = self != null && !candidates.isEmpty();
+                boolean spiderSide = self != null && (!candidates.isEmpty() || hasBili);
                 // 辅助类候选自己（含内部类）不算依赖方：它引用的本来就是自己那一版的成员。
                 String selfHelper = helperOuterName(dotted);
                 boolean helperSide = !helpers.isEmpty() && (selfHelper == null || !helpers.contains(selfHelper));
@@ -234,6 +247,11 @@ final class PayloadClassLoader extends URLClassLoader {
                     String key = m[1] + ":" + m[2];
                     String ownerDotted = m[0].replace('/', '.');
                     if (spiderSide) {
+                        if (hasBili && !"Bili".equals(self) && BILI.equals(ownerDotted)
+                                && ("dispatchConfigAction:(Ljava/lang/String;)Z".equals(key)
+                                || "configItems:()Ljava/util/List;".equals(key))) {
+                            reasons.put("Bili", "配置中心使用载荷的 B 站设置接口");
+                        }
                         String owner = outerSimpleName(ownerDotted);
                         if (owner != null && candidates.contains(owner) && !owner.equals(self)) {
                             Set<String> have = bridgeMembers.computeIfAbsent(owner, o -> bridgeMembersOf(SPIDER_PKG + o, parent));

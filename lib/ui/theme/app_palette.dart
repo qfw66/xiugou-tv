@@ -71,6 +71,9 @@ class AppPalette extends ThemeExtension<AppPalette> {
   final Color selectionInk;
   final Color onSelectionInk;
 
+  /// 配置源编辑框的实色选区，与输入框底色区分，同时保留正文的字色。
+  final Color sourceInputSelection;
+
   /// 危险 / 错误
   final Color danger;
 
@@ -114,6 +117,7 @@ class AppPalette extends ThemeExtension<AppPalette> {
     required this.selectionFill,
     required this.selectionInk,
     required this.onSelectionInk,
+    required this.sourceInputSelection,
     required this.danger,
     required this.success,
     required this.warning,
@@ -143,6 +147,7 @@ class AppPalette extends ThemeExtension<AppPalette> {
     selectionFill: Color(0xFF163A60),
     selectionInk: Color(0xFF83C4FF),
     onSelectionInk: Color(0xFF101014),
+    sourceInputSelection: Color(0xFF3568AD),
     danger: Color(0xFFF05252),
     success: Color(0xFF4CAF50),
     warning: Color(0xFFFFB300),
@@ -172,6 +177,7 @@ class AppPalette extends ThemeExtension<AppPalette> {
     selectionFill: Color(0xFFC5D9F8),
     selectionInk: Color(0xFF1D4ED8),
     onSelectionInk: Color(0xFFFFFFFF),
+    sourceInputSelection: Color(0xFF6688CC),
     danger: Color(0xFFC62828),
     success: Color(0xFF2E7D32),
     warning: Color(0xFF925800),
@@ -212,6 +218,7 @@ class AppPalette extends ThemeExtension<AppPalette> {
       selectionFill: mix(selectionFill, other.selectionFill),
       selectionInk: mix(selectionInk, other.selectionInk),
       onSelectionInk: mix(onSelectionInk, other.onSelectionInk),
+      sourceInputSelection: mix(sourceInputSelection, other.sourceInputSelection),
       danger: mix(danger, other.danger),
       success: mix(success, other.success),
       warning: mix(warning, other.warning),

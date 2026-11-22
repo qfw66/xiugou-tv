@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import 'app_data_files.dart';
 import 'data_directory_manager.dart';
 import 'data_restore_guard.dart';
 
@@ -21,7 +22,7 @@ import 'data_restore_guard.dart';
 /// 只删修狗TV 自己的数据目录内容；自定义目录本身保留（可能是用户建的文件夹），只清里面的东西。
 /// 站源服务目录里的网盘登录态一并清掉（2026-11-02 用户口径），下载缓存保留。
 abstract final class AppDataReset {
-  static const String markerFileName = 'reset_pending.json';
+  static const String markerFileName = appDataResetMarkerFileName;
 
   static File _marker(String defaultPath) => File(p.join(defaultPath, markerFileName));
 
@@ -45,7 +46,7 @@ abstract final class AppDataReset {
   /// 返回是否执行了清空。任何失败都不阻断启动。
   ///
   /// 站源服务（companion）里的网盘登录态（Cookie / token / 偏好）也一并清掉：
-  /// 生产调用（三个参数都不传）清 `%USERPROFILE%\.xiugou_tv_companion` 与系统临时目录；
+  /// 优先清理当前副本的站源账号，只有旧布局才清系统用户的站源目录；
   /// 测试只传 [defaultDirectory] 时**不碰**真实用户目录，需显式传 [companionHome] / [tempDirectory]。
   static Future<bool> applyPendingAtStartup({
     String? defaultDirectory,
@@ -64,15 +65,40 @@ abstract final class AppDataReset {
       // 标记损坏：仍然清空默认目录（用户已确认过要清空）
     }
 
-    final targets = <String>{defaultPath};
-    if (active != null && active.trim().isNotEmpty) targets.add(p.normalize(p.absolute(active)));
-    for (final dir in targets) {
-      await _emptyDirectory(Directory(dir));
+    final resolved = DataDirectoryManager.status;
+    // 便携目录可能在安排重置之后被移动，不能用标记里的旧绝对路径去清另一份数据。
+    if (resolved != null && p.equals(resolved.defaultPath, defaultPath)) {
+      active = resolved.activePath;
     }
-    final home = companionHome ?? (production ? _defaultCompanionHome() : null);
-    if (home != null) await _clearCompanionLoginState(home);
-    final temp = tempDirectory ?? (production ? Directory.systemTemp.path : null);
-    if (temp != null) await _clearLegacyTempDirs(temp);
+    final activeRoot = active == null || active.trim().isEmpty
+        ? defaultPath
+        : p.normalize(p.absolute(active));
+    final profileName = DataDirectoryManager.companionDirectoryName;
+    final activeType = await FileSystemEntity.type(p.join(activeRoot, profileName), followLinks: false);
+    for (final root in [activeRoot, if (!p.equals(activeRoot, defaultPath)) defaultPath]) {
+      await _emptyDirectory(Directory(root));
+      final profile = Directory(p.join(root, profileName));
+      final type = p.equals(root, activeRoot)
+          ? activeType
+          : await FileSystemEntity.type(profile.path, followLinks: false);
+      if (type == FileSystemEntityType.directory) {
+        await _clearCompanionLoginState(profile.path);
+        await _deleteQuietly(Directory(p.join(profile.path, 'tmp')));
+      } else if (type == FileSystemEntityType.notFound && activeType == FileSystemEntityType.directory) {
+        // 自定义目录指针已清除：默认目录也要保留空的便携账号，不能重新接上系统账号。
+        await profile.create(recursive: true);
+      }
+    }
+    // 已选便携目录（含损坏的目录）时，绝不清理另一个系统账号。
+    if (activeType == FileSystemEntityType.notFound) {
+      final home = companionHome ?? (production ? _defaultCompanionHome() : null);
+      if (home != null && await FileSystemEntity.type(home, followLinks: false) == FileSystemEntityType.directory) {
+        await _clearCompanionLoginState(home);
+      }
+      final temp =
+          tempDirectory ?? (production ? Directory.systemTemp.path : null);
+      if (temp != null) await _clearLegacyTempDirs(temp);
+    }
     return true;
   }
 
@@ -91,8 +117,11 @@ abstract final class AppDataReset {
   ];
 
   static String? _defaultCompanionHome() {
-    final home = Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'];
-    return home == null ? null : p.join(home, '.xiugou_tv_companion');
+    final home =
+        Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'];
+    return home == null
+        ? null
+        : p.join(home, DataDirectoryManager.companionDirectoryName);
   }
 
   static Future<void> _clearCompanionLoginState(String companionHome) async {
@@ -109,10 +138,15 @@ abstract final class AppDataReset {
 
   static Future<void> _deleteQuietly(Directory dir) async {
     try {
+      if (await FileSystemEntity.type(dir.path, followLinks: false) == FileSystemEntityType.link) {
+        await Link(dir.path).delete();
+        return;
+      }
       if (await dir.exists()) await dir.delete(recursive: true);
     } catch (_) {
       // 被占用（站源服务尚未退出）时尽力而为：逐项删掉能删的
       try {
+        if (await FileSystemEntity.type(dir.path, followLinks: false) != FileSystemEntityType.directory) return;
         await for (final entity in dir.list(recursive: false, followLinks: false)) {
           try {
             await entity.delete(recursive: true);
@@ -133,6 +167,12 @@ abstract final class AppDataReset {
       return;
     }
     await for (final entity in dir.list(followLinks: false)) {
+      if (p.equals(
+        p.basename(entity.path),
+        DataDirectoryManager.companionDirectoryName,
+      )) {
+        continue;
+      }
       try {
         await entity.delete(recursive: true);
       } catch (_) {}

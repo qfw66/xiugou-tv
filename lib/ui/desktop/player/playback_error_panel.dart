@@ -29,6 +29,7 @@ class PlaybackErrorPanel extends StatefulWidget {
   final PlayerSourceSwitchNav? sourceSwitchNav;
   final PlayerExternalNav? externalNav;
   final VoidCallback? onOpenChannelList;
+  final VoidCallback? onOpenEpisodeList;
 
   const PlaybackErrorPanel({
     super.key,
@@ -38,6 +39,7 @@ class PlaybackErrorPanel extends StatefulWidget {
     this.sourceSwitchNav,
     this.externalNav,
     this.onOpenChannelList,
+    this.onOpenEpisodeList,
   });
 
   @override
@@ -111,6 +113,12 @@ class _PlaybackErrorPanelState extends State<PlaybackErrorPanel> {
               spacing: AppSpacing.sm,
               runSpacing: AppSpacing.xs,
               children: [
+                if (widget.onOpenEpisodeList != null)
+                  _PanelTextButton(
+                    icon: Icons.video_library_rounded,
+                    label: '选线路与选集',
+                    onPressed: widget.onOpenEpisodeList!,
+                  ),
                 if (externalNav != null)
                   _PanelTextButton(
                     key: const ValueKey('playback-error-external'),

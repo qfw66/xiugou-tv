@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "native_playback_channel.h"
 #include "process_job.h"
 #include "webdav_secrets_channel.h"
 
@@ -32,6 +33,8 @@ class FlutterWindow : public Win32Window {
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+
+  std::unique_ptr<native_playback::PlaybackChannel> native_playback_;
 
   // Keeps the process-job channel alive for the lifetime of the engine.
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>

@@ -32,9 +32,9 @@ public final class FishNativeMain {
         PrintStream protocol = new PrintStream(new FileOutputStream(FileDescriptor.out), true, "UTF-8");
         System.setOut(System.err);
         File payload = new File(args[0]);
-        byte[] library = FishNativeService.verifiedLibrary(payload, args[1]);
-        File so = NativeCache.materialize("FishGuard-v8.so", new ByteArrayInputStream(library));
-        if (!FishNativeService.LIBRARY_SHA256.equals(FishNativeService.sha256(so))) {
+        var library = FishNativeService.verifiedLibrary(payload, args[1]);
+        File so = NativeCache.materialize("FishGuard-v8.so", new ByteArrayInputStream(library.bytes()));
+        if (!library.digest().equals(FishNativeService.sha256(so))) {
             throw new IllegalStateException("Fish 原生缓存内容校验失败，请清除损坏的缓存后重新加载配置");
         }
         try (AndroidEmulator emulator = AndroidEmulatorBuilder.for64Bit().setProcessName(PACKAGE).setRootDir(new File(args[2])).build()) {

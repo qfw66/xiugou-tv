@@ -1,5 +1,6 @@
 package com.fongmi.companion.hardshell;
 
+import com.fongmi.companion.ipc.ChildJvm;
 import java.io.File;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -8,7 +9,6 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
@@ -227,11 +227,7 @@ public final class NativeProvisioner {
             return -1;
         }
         try {
-            List<String> command = new ArrayList<>();
-            command.add(javaBinary());
-            command.add("-Xmx1g");
-            command.add("-Dfile.encoding=UTF-8");
-            command.add("-cp");
+            List<String> command = ChildJvm.command("-Xmx1g", "-Dfile.encoding=UTF-8", "-cp");
             command.add(self.getAbsolutePath() + File.pathSeparator
                     + new File(libDir, "*").getAbsolutePath());
             command.add(profile.unwrapMain);
@@ -261,12 +257,6 @@ public final class NativeProvisioner {
             System.err.println(tag() + " 解包子进程失败: " + t);
             return -1;
         }
-    }
-
-    static String javaBinary() {
-        String exe = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")
-                ? "java.exe" : "java";
-        return new File(new File(System.getProperty("java.home", "."), "bin"), exe).getAbsolutePath();
     }
 
     /** companion 的 dist 目录（unidbg 依赖同级放置）。 */

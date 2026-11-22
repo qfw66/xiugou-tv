@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../window/desktop_window_manager.dart';
 import '../../theme/app_palette.dart';
 import 'desktop_title_bar.dart';
+import 'media_title_bar.dart';
 
 class DesktopWindowFrame extends StatelessWidget {
   final DesktopWindowManager windowManager;
@@ -16,6 +17,7 @@ class DesktopWindowFrame extends StatelessWidget {
   final bool refreshBusy;
   final bool sidebarCollapsed;
   final VoidCallback? onSidebarToggle;
+  final VoidCallback? onDetailBack;
 
   const DesktopWindowFrame({
     super.key,
@@ -31,7 +33,12 @@ class DesktopWindowFrame extends StatelessWidget {
     this.refreshBusy = false,
     this.sidebarCollapsed = false,
     this.onSidebarToggle,
+    this.onDetailBack,
   });
+
+  static bool hasDetailBackButton(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_DetailBackScope>()?.active ??
+      false;
 
   Widget _titleBar() => DesktopTitleBar(
         windowManager: windowManager,
@@ -46,6 +53,27 @@ class DesktopWindowFrame extends StatelessWidget {
         sidebarCollapsed: sidebarCollapsed,
         onSidebarToggle: onSidebarToggle,
       );
+
+  Widget _detailBar(VoidCallback onBack) {
+    return MediaTitleBar(
+      key: const ValueKey('detail-top-bar'),
+      scope: 'detail',
+      onBack: onBack,
+      windowManager: windowManager,
+      onTitleDoubleTap: windowManager.toggleMaximize,
+      actions: [
+        ValueListenableBuilder<bool>(
+          valueListenable: windowManager.isAlwaysOnTopNotifier,
+          builder: (_, pinned, _) => IconButton(
+            tooltip: pinned ? '取消置顶' : '窗口置顶',
+            icon: Icon(pinned ? Icons.push_pin_rounded : Icons.push_pin_outlined,
+                size: 17, color: pinned ? AppPalette.dark.selectionInk : Colors.white),
+            onPressed: windowManager.toggleAlwaysOnTop,
+          ),
+        ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -63,17 +91,27 @@ class DesktopWindowFrame extends StatelessWidget {
             // 播放页顶栏的返回按钮上，用户点不到返回（2026-10-27 实机反馈）。
             // 现在标题栏彻底不渲染，窗口三键与拖动由播放页顶栏接管。
             final hideTitleBar = pip || immersive;
+            final detailBack = hideTitleBar ? null : onDetailBack;
             return Stack(
               fit: StackFit.expand,
               children: [
-                // 结构必须稳定：标题栏槽位恒为 Column 的第 0 个孩子、内容恒为第 1 个，
-                // 否则隐藏标题栏时内容会被重新挂载（页面状态、弹窗、播放器全丢）。
+                // 固定内容槽位，切换普通顶栏、悬浮顶栏或沉浸模式时不重新挂载页面。
                 Column(
                   children: [
-                    if (hideTitleBar) const SizedBox.shrink() else _titleBar(),
-                    Expanded(child: child),
+                    if (!hideTitleBar && detailBack == null)
+                      _titleBar()
+                    else
+                      const SizedBox.shrink(),
+                    Expanded(child: _DetailBackScope(
+                      active: detailBack != null, child: child,
+                    )),
                   ],
                 ),
+                if (detailBack != null)
+                  Positioned(
+                    top: 0, left: 0, right: 0,
+                    child: _detailBar(detailBack),
+                  ),
                 _WindowChromeSync(windowManager: windowManager),
               ],
             );
@@ -82,6 +120,15 @@ class DesktopWindowFrame extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 正文只在窗口没有接管返回时显示自己的按钮，独立弹窗仍可退出。
+class _DetailBackScope extends InheritedWidget {
+  const _DetailBackScope({required this.active, required super.child});
+  final bool active;
+
+  @override
+  bool updateShouldNotify(_DetailBackScope oldWidget) => active != oldWidget.active;
 }
 
 /// 把当前主题的窗口底色同步给原生窗口（避免浅色下缩放窗口时闪黑边）。

@@ -14,7 +14,11 @@ function Assert-PackagePathIsNotLinked([string]$Path) {
     }
 }
 
-function Get-PackageRequiredEntries {
+function Get-MdkEntries {
+    'mdk/mdk.dll', 'mdk/ffmpeg-9.dll', 'mdk/Xiugou-MDK-SDK-notice.txt'
+}
+
+function Get-PackageRequiredEntries([Alias('LocalMdkPreview')][switch]$IncludeMdk) {
     @(
         'xiugou_tv.exe', 'flutter_windows.dll', 'libmpv-2.dll',
         'libEGL.dll', 'libGLESv2.dll', 'd3dcompiler_47.dll',
@@ -35,6 +39,7 @@ function Get-PackageRequiredEntries {
         'companion/dist/phpruntime/ext/php_pdo_sqlite.dll', 'companion/dist/phpruntime/ext/php_pdo_mysql.dll',
         'companion/dist/phpruntime/ext/php_mysqli.dll'
     )
+    if ($IncludeMdk) { Get-MdkEntries }
 }
 
 function Get-PackagePathDisposition([string]$RelativePath, [bool]$IsDirectory) {
@@ -54,11 +59,13 @@ function Get-PackagePathDisposition([string]$RelativePath, [bool]$IsDirectory) {
     if ($RelativePath -match '(^|/)(\.env(\.[^/]*)?|\.git|\.ssh|\.aws|id_rsa|id_ed25519)(/|$)') { return 'Unknown' }
     $license = '(LICENSES?|LICENCE|COPYING|COPYRIGHT|NOTICE|THIRD[_-]PARTY[_-]NOTICES)([._-][^/]+)?'
     if ($IsDirectory) {
+        if ($RelativePath -eq 'mdk') { return 'Include' }
         if ($RelativePath -match '^(data|data/flutter_assets(/.*)?|companion|companion/dist|runtime|runtime/jre)$') { return 'Include' }
         if ($RelativePath -match '^companion/dist/(lib-unidbg|noderuntime|phpruntime|pyshell|pyruntime)(/.*)?$') { return 'Include' }
         if ($RelativePath -match '^runtime/jre/(bin|conf|legal|lib)(/.*)?$') { return 'Include' }
         if ($RelativePath -match '^(licenses|legal)(/.*)?$') { return 'Include' }
     } else {
+        if ($RelativePath -like 'mdk/*' -and $RelativePath -in (Get-MdkEntries)) { return 'Include' }
         if ($RelativePath -match '^(xiugou_tv\.exe|[^/]+\.dll|native_assets\.json)$' -or $RelativePath -match "^$license$") { return 'Include' }
         if ($RelativePath -match '^data/(app\.so|icudtl\.dat|flutter_assets/.+)$') { return 'Include' }
         if ($RelativePath -match '^companion/dist/[^/]+\.jar$' -or $RelativePath -match "^companion/dist/$license$") { return 'Include' }
@@ -106,10 +113,11 @@ function Get-PackageSelection {
     [pscustomobject]@{ Root = $root; Files = $files.ToArray(); Excluded = $excluded.ToArray() }
 }
 
-function Assert-PackageRuntimeFiles($Selection) {
+function Assert-PackageRuntimeFiles($Selection, [Alias('LocalMdkPreview')][switch]$IncludeMdk) {
     $present = @{}
     foreach ($rel in $Selection.Files) { $present[$rel] = $true }
-    foreach ($rel in (Get-PackageRequiredEntries)) {
+    $requireMdk = $IncludeMdk -or (Test-Path -LiteralPath (Join-Path $Selection.Root 'mdk') -PathType Container)
+    foreach ($rel in (Get-PackageRequiredEntries -IncludeMdk:$requireMdk)) {
         if (-not $present.ContainsKey($rel)) { throw "Required package runtime missing: $rel" }
         if ((Get-Item -LiteralPath (Join-Path $Selection.Root $rel)).Length -eq 0) { throw "Required package runtime empty: $rel" }
     }
@@ -122,7 +130,8 @@ function New-StagedApplicationTree {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$SourceDir,
-        [Parameter(Mandatory = $true)][string]$StageDir
+        [Parameter(Mandatory = $true)][string]$StageDir,
+        [Alias('LocalMdkPreview')][switch]$IncludeMdk
     )
     $source = [System.IO.Path]::GetFullPath($SourceDir).TrimEnd('\', '/')
     $stage = [System.IO.Path]::GetFullPath($StageDir).TrimEnd('\', '/')
@@ -133,7 +142,7 @@ function New-StagedApplicationTree {
     Assert-PackagePathIsNotLinked $stage
     if (Test-Path -LiteralPath $stage) { throw "Application stage must be new (no cleanup/overwrite): $stage" }
     $selection = Get-PackageSelection -SourceDir $source
-    Assert-PackageRuntimeFiles $selection
+    Assert-PackageRuntimeFiles $selection -IncludeMdk:$IncludeMdk
     [void][System.IO.Directory]::CreateDirectory($stage)
     foreach ($rel in $selection.Files) {
         $destination = Join-Path $stage $rel
@@ -147,10 +156,11 @@ function Write-PackageInnoFileList {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$StageDir,
-        [Parameter(Mandatory = $true)][string]$DestinationPath
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Alias('LocalMdkPreview')][switch]$IncludeMdk
     )
     $selection = Get-PackageSelection -SourceDir $StageDir -RejectExcluded
-    Assert-PackageRuntimeFiles $selection
+    Assert-PackageRuntimeFiles $selection -IncludeMdk:$IncludeMdk
     $destination = [System.IO.Path]::GetFullPath($DestinationPath)
     if ($destination.StartsWith($selection.Root + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Inno file list must be outside the application tree.' }
     if (Test-Path -LiteralPath $destination) { throw "Inno file list already exists: $destination" }
@@ -168,11 +178,13 @@ function Assert-PackageMatchesStage {
     param(
         [Parameter(Mandatory = $true)][string]$StageDir,
         [Parameter(Mandatory = $true)][string]$PackageDir,
-        [switch]$Installed
+        [switch]$Installed,
+        [Alias('LocalMdkPreview')][switch]$IncludeMdk
     )
     $expected = Get-PackageSelection -SourceDir $StageDir -RejectExcluded
     $actual = Get-PackageSelection -SourceDir $PackageDir -RejectExcluded -Installed:$Installed
-    Assert-PackageRuntimeFiles $expected
+    Assert-PackageRuntimeFiles $expected -IncludeMdk:$IncludeMdk
+    Assert-PackageRuntimeFiles $actual -IncludeMdk:$IncludeMdk
     $difference = @(Compare-Object -ReferenceObject $expected.Files -DifferenceObject $actual.Files)
     if ($difference.Count -gt 0) { throw "Package file set differs from stage: $(($difference | Select-Object -First 8 | ForEach-Object { $_.InputObject }) -join ', ')" }
     foreach ($rel in $expected.Files) {

@@ -124,7 +124,8 @@ public final class UiBridge extends DialogHost {
         View root = view.getRootView();
         for (Dialog dialog : showing.values()) {
             if (dialog.getHostContentView() == root
-                    || (dialog instanceof AlertDialog && ((AlertDialog) dialog).isHostButton(view))) {
+                    || (dialog instanceof AlertDialog && (((AlertDialog) dialog).isHostButton(view)
+                            || ((AlertDialog) dialog).getListView() == root))) {
                 markDirty(dialog);
                 return;
             }

@@ -8,6 +8,7 @@ FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
 
 FlutterWindow::~FlutterWindow() {
+  native_playback_.reset();
   if (webdav_secrets_channel_) {
     webdav_secrets_channel_->SetMethodCallHandler(nullptr);
     webdav_secrets_channel_.reset();
@@ -34,6 +35,9 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  auto* engine = flutter_controller_->engine();
+  native_playback_ = std::make_unique<native_playback::PlaybackChannel>(
+      engine->messenger(), engine->GetRegistrarForPlugin("XiugouNativePlayback"), GetHandle());
   process_job_channel_ =
       RegisterProcessJobChannel(flutter_controller_->engine()->messenger());
   webdav_secrets_channel_ =
@@ -57,6 +61,7 @@ bool FlutterWindow::OnCreate() {
 
 void FlutterWindow::OnDestroy() {
   // Drop the channel before the engine it is bound to.
+  native_playback_.reset();
   if (webdav_secrets_channel_) {
     webdav_secrets_channel_->SetMethodCallHandler(nullptr);
     webdav_secrets_channel_.reset();
@@ -80,6 +85,8 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       return *handled;
     }
   }
+
+  if (message == WM_TIMER && native_playback_ && native_playback_->HandleTimer(wparam)) return 0;
 
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
